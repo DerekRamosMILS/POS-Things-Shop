@@ -1,0 +1,11 @@
+pub mod cash_register;
+pub mod category;
+pub mod config;
+pub mod expense;
+pub mod inventory;
+pub mod notification;
+pub mod product;
+pub mod promotion;
+pub mod sale;
+pub mod supplier;
+pub mod user;

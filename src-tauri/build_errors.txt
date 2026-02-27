@@ -1,0 +1,214 @@
+    Checking things-shop v0.1.0 (E:\Things shop\src-tauri)
+error[E0609]: no field `conn` on type `State<'_, DbState>`
+ --> src\commands\notifications.rs:8:22
+  |
+8 |     let conn = state.conn.lock().unwrap();
+  |                      ^^^^ unknown field
+  |
+  = note: available field is: `db`
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:18:19
+   |
+18 |         .map_err(|e| e.to_string())?;
+   |                   ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+18 |         .map_err(|e: /* Type */| e.to_string())?;
+   |                    ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:21:25
+   |
+21 |         .query_map([], |row| {
+   |                         ^^^
+22 |             let id: i64 = row.get(0)?;
+   |                           --- type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+21 |         .query_map([], |row: /* Type */| {
+   |                            ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:40:19
+   |
+40 |         .map_err(|e| e.to_string())?;
+   |                   ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+40 |         .map_err(|e: /* Type */| e.to_string())?;
+   |                    ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:44:28
+   |
+44 |         notifications.push(alert.map_err(|e| e.to_string())?);
+   |                            ^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:44:43
+   |
+44 |         notifications.push(alert.map_err(|e| e.to_string())?);
+   |                                           ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+44 |         notifications.push(alert.map_err(|e: /* Type */| e.to_string())?);
+   |                                            ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:55:19
+   |
+55 |         .map_err(|e| e.to_string())?;
+   |                   ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+55 |         .map_err(|e: /* Type */| e.to_string())?;
+   |                    ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:58:25
+   |
+58 |         .query_map([], |row| {
+   |                         ^^^
+59 |             Ok(Notification {
+60 |                 id: row.get(0)?,
+   |                     --- type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+58 |         .query_map([], |row: /* Type */| {
+   |                            ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:69:19
+   |
+69 |         .map_err(|e| e.to_string())?;
+   |                   ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+69 |         .map_err(|e: /* Type */| e.to_string())?;
+   |                    ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:72:28
+   |
+72 |         notifications.push(reminder.map_err(|e| e.to_string())?);
+   |                            ^^^^^^^^ cannot infer type
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:72:46
+   |
+72 |         notifications.push(reminder.map_err(|e| e.to_string())?);
+   |                                              ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+72 |         notifications.push(reminder.map_err(|e: /* Type */| e.to_string())?);
+   |                                               ++++++++++++
+
+error[E0609]: no field `conn` on type `State<'_, DbState>`
+  --> src\commands\notifications.rs:84:22
+   |
+84 |     let conn = state.conn.lock().unwrap();
+   |                      ^^^^ unknown field
+   |
+   = note: available field is: `db`
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:93:19
+   |
+93 |         .map_err(|e| e.to_string())?;
+   |                   ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+93 |         .map_err(|e: /* Type */| e.to_string())?;
+   |                    ++++++++++++
+
+error[E0282]: type annotations needed
+  --> src\commands\notifications.rs:99:19
+   |
+99 |         .map_err(|e| e.to_string())?;
+   |                   ^  - type must be known at this point
+   |
+help: consider giving this closure parameter an explicit type
+   |
+99 |         .map_err(|e: /* Type */| e.to_string())?;
+   |                    ++++++++++++
+
+error[E0609]: no field `conn` on type `State<'_, DbState>`
+   --> src\commands\notifications.rs:110:22
+    |
+110 |     let conn = state.conn.lock().unwrap();
+    |                      ^^^^ unknown field
+    |
+    = note: available field is: `db`
+
+error[E0282]: type annotations needed
+   --> src\commands\notifications.rs:117:14
+    |
+117 |             |row| row.get(0),
+    |              ^^^  --- type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+117 |             |row: /* Type */| row.get(0),
+    |                 ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\commands\notifications.rs:128:15
+    |
+128 |     .map_err(|e| e.to_string())?;
+    |               ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+128 |     .map_err(|e: /* Type */| e.to_string())?;
+    |                ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\commands\notifications.rs:137:14
+    |
+137 |             |row| {
+    |              ^^^
+138 |                 Ok(Notification {
+139 |                     id: row.get(0)?,
+    |                         --- type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+137 |             |row: /* Type */| {
+    |                 ++++++++++++
+
+error[E0282]: type annotations needed
+   --> src\commands\notifications.rs:149:19
+    |
+149 |         .map_err(|e| e.to_string())?;
+    |                   ^  - type must be known at this point
+    |
+help: consider giving this closure parameter an explicit type
+    |
+149 |         .map_err(|e: /* Type */| e.to_string())?;
+    |                    ++++++++++++
+
+error[E0063]: missing field `low_stock_ignored` in initializer of `product::Product`
+  --> src\commands\products.rs:96:16
+   |
+96 |             Ok(Product {
+   |                ^^^^^^^ missing `low_stock_ignored`
+
+error[E0063]: missing field `low_stock_ignored` in initializer of `product::Product`
+   --> src\commands\products.rs:233:16
+    |
+233 |             Ok(Product {
+    |                ^^^^^^^ missing `low_stock_ignored`
+
+Some errors have detailed explanations: E0063, E0282, E0609.
+For more information about an error, try `rustc --explain E0063`.
+error: could not compile `things-shop` (lib) due to 21 previous errors

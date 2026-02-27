@@ -1,0 +1,58 @@
+/* App-level base overrides — dark brutalist theme */
+:root {
+  font-family: 'Inter', 'Space Grotesk', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+
+  color: #f1f5f9;
+  background-color: #0B0B0F;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+a {
+  font-weight: 500;
+  color: #00E05A;
+  text-decoration: inherit;
+}
+
+a:hover {
+  color: #00FFA3;
+}
+
+input,
+button {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  color: #f1f5f9;
+  background-color: rgba(255, 255, 255, 0.04);
+  transition: border-color 0.25s, background-color 0.25s;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: rgba(0, 224, 90, 0.4);
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+button:active {
+  border-color: rgba(0, 224, 90, 0.5);
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
+input,
+button {
+  outline: none;
+}

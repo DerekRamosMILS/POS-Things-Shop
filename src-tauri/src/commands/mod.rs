@@ -1,0 +1,13 @@
+pub mod backup;
+pub mod cash_register;
+pub mod categories;
+pub mod config;
+pub mod expenses;
+pub mod inventory;
+pub mod notifications;
+pub mod products;
+pub mod promotions;
+pub mod reports;
+pub mod sales;
+pub mod suppliers;
+pub mod users;
