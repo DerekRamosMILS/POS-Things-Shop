@@ -17,6 +17,7 @@ pub struct Product {
     pub min_stock: i32,
     pub is_active: bool,
     pub low_stock_ignored: bool,
+    pub image_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -4,6 +4,39 @@ use tauri::State;
 use crate::db::connection::DbState;
 use crate::models::product::{CreateProductDto, Product, ProductFilters, UpdateProductDto};
 
+// ─── Shared SELECT fragment ────────────────────────────────────────────────────
+const SEL: &str = "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
+                          p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
+                          p.low_stock_ignored, p.created_at, p.updated_at,
+                          c.name as category_name, s.name as supplier_name,
+                          p.image_url
+                   FROM products p
+                   LEFT JOIN categories c ON p.category_id = c.id
+                   LEFT JOIN suppliers s ON p.supplier_id = s.id";
+
+fn row_to_product(row: &rusqlite::Row) -> rusqlite::Result<Product> {
+    Ok(Product {
+        id:              row.get(0)?,
+        sku:             row.get(1)?,
+        barcode:         row.get(2)?,
+        name:            row.get(3)?,
+        description:     row.get(4)?,
+        category_id:     row.get(5)?,
+        supplier_id:     row.get(6)?,
+        purchase_price:  row.get(7)?,
+        sale_price:      row.get(8)?,
+        stock:           row.get(9)?,
+        min_stock:       row.get(10)?,
+        is_active:       row.get::<_, i32>(11)? == 1,
+        low_stock_ignored: row.get::<_, i32>(12)? == 1,
+        created_at:      row.get(13)?,
+        updated_at:      row.get(14)?,
+        category_name:   row.get(15)?,
+        supplier_name:   row.get(16)?,
+        image_url:       row.get(17)?,
+    })
+}
+
 #[tauri::command]
 pub fn get_products(
     state: State<DbState>,
@@ -12,15 +45,7 @@ pub fn get_products(
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let filters = filters.unwrap_or_default();
 
-    let mut sql = String::from(
-        "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id, 
-                p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active, 
-                p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name
-         FROM products p
-         LEFT JOIN categories c ON p.category_id = c.id
-         LEFT JOIN suppliers s ON p.supplier_id = s.id
-         WHERE 1=1"
-    );
+    let mut sql = format!("{} WHERE 1=1", SEL);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(ref search) = filters.search {
@@ -38,9 +63,8 @@ pub fn get_products(
         param_values.push(Box::new(active as i32));
     }
     if filters.low_stock.unwrap_or(false) {
-        sql.push_str(" AND p.stock <= p.min_stock");
+        sql.push_str(" AND p.stock <= p.min_stock AND p.low_stock_ignored = 0");
     }
-
     sql.push_str(" ORDER BY p.name ASC");
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -48,27 +72,7 @@ pub fn get_products(
 
     let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
     let products = stmt
-        .query_map(params_refs.as_slice(), |row| {
-            Ok(Product {
-                id: row.get(0)?,
-                sku: row.get(1)?,
-                barcode: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                category_id: row.get(5)?,
-                supplier_id: row.get(6)?,
-                purchase_price: row.get(7)?,
-                sale_price: row.get(8)?,
-                stock: row.get(9)?,
-                min_stock: row.get(10)?,
-                is_active: row.get::<_, i32>(11)? == 1,
-                low_stock_ignored: row.get::<_, i32>(12)? == 1,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                category_name: row.get(15)?,
-                supplier_name: row.get(16)?,
-            })
-        })
+        .query_map(params_refs.as_slice(), row_to_product)
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -83,37 +87,8 @@ pub fn get_product_by_barcode(
 ) -> Result<Option<Product>, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
-    let result = db.query_row(
-        "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id, 
-                p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active, 
-                p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name
-         FROM products p
-         LEFT JOIN categories c ON p.category_id = c.id
-         LEFT JOIN suppliers s ON p.supplier_id = s.id
-         WHERE p.barcode = ?1 AND p.is_active = 1",
-        params![barcode],
-        |row| {
-            Ok(Product {
-                id: row.get(0)?,
-                sku: row.get(1)?,
-                barcode: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                category_id: row.get(5)?,
-                supplier_id: row.get(6)?,
-                purchase_price: row.get(7)?,
-                sale_price: row.get(8)?,
-                stock: row.get(9)?,
-                min_stock: row.get(10)?,
-                is_active: row.get::<_, i32>(11)? == 1,
-                low_stock_ignored: row.get::<_, i32>(12)? == 1,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                category_name: row.get(15)?,
-                supplier_name: row.get(16)?,
-            })
-        },
-    );
+    let sql = format!("{} WHERE p.barcode = ?1 AND p.is_active = 1", SEL);
+    let result = db.query_row(&sql, params![barcode], row_to_product);
 
     match result {
         Ok(product) => Ok(Some(product)),
@@ -136,19 +111,13 @@ pub fn create_product(state: State<DbState>, data: CreateProductDto) -> Result<P
         ],
     ).map_err(|e| {
         if e.to_string().contains("UNIQUE") {
-            if e.to_string().contains("sku") {
-                "El SKU ya existe".to_string()
-            } else {
-                "El código de barras ya existe".to_string()
-            }
-        } else {
-            e.to_string()
-        }
+            if e.to_string().contains("sku") { "El SKU ya existe".to_string() }
+            else { "El código de barras ya existe".to_string() }
+        } else { e.to_string() }
     })?;
 
     let id = db.last_insert_rowid();
 
-    // Record initial stock movement if stock > 0
     if data.stock > 0 {
         db.execute(
             "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason)
@@ -164,22 +133,15 @@ pub fn create_product(state: State<DbState>, data: CreateProductDto) -> Result<P
 pub fn update_product(state: State<DbState>, data: UpdateProductDto) -> Result<Product, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
-    // Check for price change and record history
     let old_price: f64 = db
-        .query_row(
-            "SELECT sale_price FROM products WHERE id = ?1",
-            params![data.id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT sale_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
     if (old_price - data.sale_price).abs() > 0.001 {
         db.execute(
-            "INSERT INTO price_history (product_id, old_price, new_price)
-             VALUES (?1, ?2, ?3)",
+            "INSERT INTO price_history (product_id, old_price, new_price) VALUES (?1, ?2, ?3)",
             params![data.id, old_price, data.sale_price],
-        )
-        .map_err(|e| e.to_string())?;
+        ).map_err(|e| e.to_string())?;
     }
 
     db.execute(
@@ -188,68 +150,41 @@ pub fn update_product(state: State<DbState>, data: UpdateProductDto) -> Result<P
          min_stock=?9, is_active=?10, updated_at=datetime('now','localtime')
          WHERE id=?11",
         params![
-            data.sku,
-            data.barcode,
-            data.name,
-            data.description,
-            data.category_id,
-            data.supplier_id,
-            data.purchase_price,
-            data.sale_price,
-            data.min_stock,
-            data.is_active as i32,
-            data.id
+            data.sku, data.barcode, data.name, data.description,
+            data.category_id, data.supplier_id, data.purchase_price,
+            data.sale_price, data.min_stock, data.is_active as i32, data.id
         ],
-    )
-    .map_err(|e| e.to_string())?;
+    ).map_err(|e| e.to_string())?;
 
     get_product_by_id(&db, data.id)
 }
 
 #[tauri::command]
+pub fn set_product_image(
+    state: State<DbState>,
+    product_id: i64,
+    image_url: Option<String>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE products SET image_url=?1, updated_at=datetime('now','localtime') WHERE id=?2",
+        params![image_url, product_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn delete_product(state: State<DbState>, id: i64) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-
-    // Soft delete - just deactivate
     db.execute(
         "UPDATE products SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1",
         params![id],
-    )
-    .map_err(|e| e.to_string())?;
-
+    ).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn get_product_by_id(db: &rusqlite::Connection, id: i64) -> Result<Product, String> {
-    db.query_row(
-        "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id, 
-                p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active, 
-                p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name
-         FROM products p
-         LEFT JOIN categories c ON p.category_id = c.id
-         LEFT JOIN suppliers s ON p.supplier_id = s.id
-         WHERE p.id = ?1",
-        params![id],
-        |row| {
-            Ok(Product {
-                id: row.get(0)?,
-                sku: row.get(1)?,
-                barcode: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                category_id: row.get(5)?,
-                supplier_id: row.get(6)?,
-                purchase_price: row.get(7)?,
-                sale_price: row.get(8)?,
-                stock: row.get(9)?,
-                min_stock: row.get(10)?,
-                is_active: row.get::<_, i32>(11)? == 1,
-                low_stock_ignored: row.get::<_, i32>(12)? == 1,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                category_name: row.get(15)?,
-                supplier_name: row.get(16)?,
-            })
-        },
-    ).map_err(|e| e.to_string())
+    let sql = format!("{} WHERE p.id = ?1", SEL);
+    db.query_row(&sql, params![id], row_to_product)
+        .map_err(|e| e.to_string())
 }

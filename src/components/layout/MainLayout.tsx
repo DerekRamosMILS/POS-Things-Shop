@@ -1,239 +1,261 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useSessionStore } from '../../stores/useSessionStore';
-import NotificationBell from './NotificationBell';
-import {
-    LayoutDashboard,
-    ShoppingCart,
-    Package,
-    Boxes,
-    Receipt,
-    Users,
-    BarChart3,
-    Settings,
-    LogOut,
-    Truck,
-    Wallet,
-    DollarSign,
-    BadgePercent,
-    ShoppingBag,
-} from 'lucide-react';
-import { cn } from '../../utils';
+const IcoLogOut = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>;
+const IcoAlertCircle = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>;
 
-const NAV_ITEMS = [
-    { to: '/', icon: LayoutDashboard, label: 'Dashboard', roles: ['admin', 'cashier'] },
-    { to: '/pos', icon: ShoppingCart, label: 'Punto de Venta', roles: ['admin', 'cashier'] },
-    { to: '/products', icon: Package, label: 'Productos', roles: ['admin'] },
-    { to: '/inventory', icon: Boxes, label: 'Inventario', roles: ['admin'] },
-    { to: '/sales', icon: Receipt, label: 'Ventas', roles: ['admin'] },
-    { to: '/cash-register', icon: Wallet, label: 'Caja', roles: ['admin', 'cashier'] },
-    { to: '/expenses', icon: DollarSign, label: 'Gastos', roles: ['admin', 'cashier'] },
-    { to: '/discounts', icon: BadgePercent, label: 'Descuentos', roles: ['admin', 'cashier'] },
-    { to: '/suppliers', icon: Truck, label: 'Proveedores', roles: ['admin'] },
-    { to: '/reports', icon: BarChart3, label: 'Reportes', roles: ['admin'] },
-    { to: '/users', icon: Users, label: 'Usuarios', roles: ['admin'] },
-    { to: '/settings', icon: Settings, label: 'Configuración', roles: ['admin'] },
-];
+// ─── Nav icons (inline SVG for crisp rendering) ─────────────────────────────
+
+const IconDashboard = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+    <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+  </svg>
+);
+const IconPOS = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/>
+    <path d="M1 1h4l2.68 13.39a2 2 0 002 1.61h9.72a2 2 0 001.99-1.73L23 6H6"/>
+  </svg>
+);
+const IconInventory = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
+  </svg>
+);
+const IconSales = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+  </svg>
+);
+const IconReports = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+  </svg>
+);
+const IconSettings = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+  </svg>
+);
+const IconCash = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="4" width="22" height="16" rx="2"/>
+    <line x1="1" y1="10" x2="23" y2="10"/>
+  </svg>
+);
+const IconTag = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/>
+    <line x1="7" y1="7" x2="7.01" y2="7"/>
+  </svg>
+);
+const IconUsers = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
+    <circle cx="9" cy="7" r="4"/>
+    <path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
+  </svg>
+);
+const IconSupplier = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/>
+    <circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>
+  </svg>
+);
+const IconProducts = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/>
+    <line x1="3" y1="6" x2="21" y2="6"/>
+    <path d="M16 10a4 4 0 01-8 0"/>
+  </svg>
+);
+const IconExpense = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="12" y1="1" x2="12" y2="23"/>
+    <path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
+  </svg>
+);
+const IconStore = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2L3 6v14a2 2 0 002 2h14a2 2 0 002-2V6l-3-4z"/>
+    <line x1="3" y1="6" x2="21" y2="6"/>
+    <path d="M16 10a4 4 0 01-8 0"/>
+  </svg>
+);
+
+// ─── Topbar titles by route ──────────────────────────────────────────────────
+const PAGE_META: Record<string, { title: string; sub: string }> = {
+  '/dashboard':     { title: 'Vista General',    sub: 'ThingsShop POS' },
+  '/pos':           { title: 'Punto de Venta',   sub: 'Crear transacción · F10 cobrar' },
+  '/inventory':     { title: 'Inventario',        sub: 'Control de stock y movimientos' },
+  '/sales':         { title: 'Ventas',            sub: 'Historial de transacciones' },
+  '/products':      { title: 'Productos',         sub: 'Catálogo del negocio' },
+  '/cash-register': { title: 'Caja',              sub: 'Apertura y cierre de turno' },
+  '/expenses':      { title: 'Gastos',            sub: 'Registro de egresos' },
+  '/discounts':     { title: 'Promociones',       sub: 'Códigos y descuentos' },
+  '/suppliers':     { title: 'Proveedores',       sub: 'Gestión de proveedores' },
+  '/users':         { title: 'Usuarios',          sub: 'Accesos y roles' },
+  '/reports':       { title: 'Reportes',          sub: 'Análisis y métricas' },
+  '/settings':      { title: 'Configuración',     sub: 'Ajustes del sistema' },
+};
 
 export default function MainLayout() {
-    const { user, logout } = useSessionStore();
-    const navigate = useNavigate();
+  const { user, cashRegisterId, logout } = useSessionStore();
+  const navigate = useNavigate();
+  const location = useLocation();
 
-    const handleLogout = () => {
-        logout();
-        navigate('/login');
-    };
+  const handleLogout = () => { logout(); navigate('/login'); };
 
-    const visibleItems = NAV_ITEMS.filter(
-        (item) => user && item.roles.includes(user.role)
-    );
+  const isPOS = location.pathname === '/pos';
+  const meta = PAGE_META[location.pathname] ?? { title: 'ThingsShop', sub: '' };
+  const isAdmin = user?.role === 'admin';
 
-    return (
-        <div className="h-full flex no-select">
-            {/* ============================================
-                BRUTALIST GLASSMORPHISM SIDEBAR
-                ============================================ */}
-            <aside
-                className="w-[360px] flex flex-col shrink-0 animate-fade-down"
-                style={{
-                    background: 'rgba(255, 255, 255, 0.06)',
-                    backdropFilter: 'blur(18px)',
-                    WebkitBackdropFilter: 'blur(18px)',
-                    borderRight: '1px solid rgba(255, 255, 255, 0.18)',
-                    boxShadow: '0 20px 60px rgba(0, 0, 0, 0.6)',
-                }}
-            >
-                {/* Logo Section */}
-                <div
-                    className="px-8 py-8"
-                    style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.08)' }}
-                >
-                    <div className="flex items-center gap-5">
-                        {/* Logo icon with glow */}
-                        <div
-                            className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0"
-                            style={{
-                                background: 'linear-gradient(135deg, rgba(0, 224, 90, 0.15), rgba(0, 255, 163, 0.08))',
-                                border: '1px solid rgba(0, 224, 90, 0.25)',
-                                boxShadow: '0 0 20px rgba(0, 224, 90, 0.15)',
-                            }}
-                        >
-                            <ShoppingBag className="w-8 h-8" style={{ color: '#00E05A' }} />
-                        </div>
-                        <div>
-                            <h1
-                                className="text-2xl font-bold leading-tight tracking-wider"
-                                style={{
-                                    fontFamily: "'Space Grotesk', sans-serif",
-                                    textTransform: 'uppercase',
-                                    color: '#00E05A',
-                                }}
-                            >
-                                Things Shop
-                            </h1>
-                            <p
-                                className="text-sm tracking-widest"
-                                style={{
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    color: '#9CA0AA',
-                                    textTransform: 'uppercase',
-                                    letterSpacing: '0.15em',
-                                    marginTop: '4px',
-                                }}
-                            >
-                                punto de venta
-                            </p>
-                        </div>
-                    </div>
-                </div>
+  return (
+    <div className="app-shell">
+      {/* Background blobs */}
+      <div className="blobs" />
 
-                {/* Navigation */}
-                <nav className="flex-1 py-6 px-6 space-y-2 overflow-y-auto">
-                    {visibleItems.map((item, index) => (
-                        <NavLink
-                            key={item.to}
-                            to={item.to}
-                            end={item.to === '/'}
-                            className={({ isActive }) =>
-                                cn(
-                                    'flex items-center gap-5 px-6 py-4 rounded-xl text-base font-medium transition-all duration-200',
-                                    isActive
-                                        ? 'sidebar-link-active'
-                                        : 'sidebar-link'
-                                )
-                            }
-                            style={({ isActive }) => ({
-                                fontFamily: "'Space Grotesk', sans-serif",
-                                fontSize: '16px',
-                                color: isActive ? '#00E05A' : '#9CA0AA',
-                                background: isActive
-                                    ? 'rgba(0, 224, 90, 0.08)'
-                                    : 'transparent',
-                                borderLeft: isActive
-                                    ? '4px solid #00E05A'
-                                    : '4px solid transparent',
-                                boxShadow: isActive
-                                    ? 'inset 0 0 20px rgba(0, 224, 90, 0.05)'
-                                    : 'none',
-                                animationDelay: `${index * 40}ms`,
-                            })}
-                            onMouseEnter={(e) => {
-                                const el = e.currentTarget;
-                                if (!el.classList.contains('sidebar-link-active')) {
-                                    el.style.color = '#f1f5f9';
-                                    el.style.background = 'rgba(255, 255, 255, 0.04)';
-                                }
-                            }}
-                            onMouseLeave={(e) => {
-                                const el = e.currentTarget;
-                                if (!el.classList.contains('sidebar-link-active')) {
-                                    el.style.color = '#9CA0AA';
-                                    el.style.background = 'transparent';
-                                }
-                            }}
-                        >
-                            <item.icon size={24} strokeWidth={1.8} />
-                            <span>{item.label}</span>
-                        </NavLink>
-                    ))}
-                </nav>
-
-                {/* User & Logout */}
-                <div
-                    className="p-6"
-                    style={{ borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}
-                >
-                    {/* User card */}
-                    <div
-                        className="flex items-center gap-4 mb-4 px-4 py-4 rounded-xl"
-                        style={{
-                            background: 'rgba(255, 255, 255, 0.03)',
-                            border: '1px solid rgba(255, 255, 255, 0.06)',
-                        }}
-                    >
-                        <div
-                            className="w-12 h-12 rounded-xl flex items-center justify-center text-base font-bold shrink-0"
-                            style={{
-                                background: 'linear-gradient(135deg, #00E05A, #00FFA3)',
-                                color: '#0B0B0F',
-                                boxShadow: '0 4px 15px rgba(0, 224, 90, 0.25)',
-                            }}
-                        >
-                            {user?.full_name?.charAt(0).toUpperCase()}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <p
-                                className="text-base font-semibold truncate"
-                                style={{
-                                    fontFamily: "'Space Grotesk', sans-serif",
-                                    color: '#f1f5f9',
-                                }}
-                            >
-                                {user?.full_name}
-                            </p>
-                            <p
-                                className="text-sm capitalize mt-0.5"
-                                style={{
-                                    fontFamily: "'IBM Plex Mono', monospace",
-                                    color: '#64748b',
-                                }}
-                            >
-                                {user?.role === 'admin' ? 'Administrador' : 'Cajero'}
-                            </p>
-                        </div>
-                    </div>
-
-                    {/* Logout button — outline style */}
-                    <button
-                        onClick={handleLogout}
-                        className="w-full flex items-center justify-center gap-3 px-6 py-4 rounded-xl text-base font-medium transition-all duration-200 cursor-pointer"
-                        style={{
-                            fontFamily: "'Space Grotesk', sans-serif",
-                            background: 'transparent',
-                            border: '1px solid rgba(239, 68, 68, 0.25)',
-                            color: '#ef4444',
-                        }}
-                        onMouseEnter={(e) => {
-                            e.currentTarget.style.background = 'rgba(239, 68, 68, 0.08)';
-                            e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.4)';
-                        }}
-                        onMouseLeave={(e) => {
-                            e.currentTarget.style.background = 'transparent';
-                            e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.25)';
-                        }}
-                    >
-                        <LogOut size={22} />
-                        <span>Cerrar sesión</span>
-                    </button>
-                </div>
-            </aside>
-
-            {/* Main content */}
-            <main className="flex-1 overflow-y-auto relative" style={{ backgroundColor: '#0B0B0F' }}>
-                <div className="fixed bottom-10 right-10 z-50">
-                    <NotificationBell />
-                </div>
-                <Outlet />
-            </main>
+      {/* ── Sidebar ── */}
+      <aside className="sidebar">
+        {/* Logo */}
+        <div className="sidebar-logo">
+          <div className="sidebar-logo-inner">
+            <div className="sidebar-logo-mark">
+              <IconStore />
+            </div>
+            <div>
+              <p style={{ fontSize: 14, fontWeight: 800, color: 'var(--t1)', letterSpacing: '-0.02em', lineHeight: 1 }}>
+                ThingsShop
+              </p>
+              <p style={{ fontSize: 10, color: 'var(--t3)', fontWeight: 600, marginTop: 2 }}>POS v2.0</p>
+            </div>
+          </div>
         </div>
-    );
+
+        {/* Nav */}
+        <nav className="sidebar-nav no-scrollbar">
+          <NavLink to="/dashboard" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconDashboard /></span>Dashboard
+          </NavLink>
+          <NavLink to="/pos" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconPOS /></span>Punto de Venta
+          </NavLink>
+          {isAdmin && (
+            <NavLink to="/inventory" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconInventory /></span>Inventario
+            </NavLink>
+          )}
+          {isAdmin && (
+            <NavLink to="/sales" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconSales /></span>Ventas
+            </NavLink>
+          )}
+          {isAdmin && (
+            <NavLink to="/reports" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconReports /></span>Reportes
+            </NavLink>
+          )}
+          <NavLink to="/cash-register" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconCash /></span>Caja
+          </NavLink>
+          <NavLink to="/discounts" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconTag /></span>Promociones
+          </NavLink>
+          <NavLink to="/expenses" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconExpense /></span>Gastos
+          </NavLink>
+          {isAdmin && (
+            <NavLink to="/products" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconProducts /></span>Productos
+            </NavLink>
+          )}
+          {isAdmin && (
+            <NavLink to="/suppliers" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconSupplier /></span>Proveedores
+            </NavLink>
+          )}
+          {isAdmin && (
+            <NavLink to="/users" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconUsers /></span>Usuarios
+            </NavLink>
+          )}
+          {isAdmin && (
+            <NavLink to="/settings" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconSettings /></span>Configuración
+            </NavLink>
+          )}
+        </nav>
+
+        {/* Footer */}
+        <div className="sidebar-footer">
+          {!cashRegisterId && (
+            <NavLink
+              to="/cash-register"
+              className="nav-item"
+              style={{ color: 'var(--danger)', background: 'rgba(244,82,112,0.07)', border: '1px solid rgba(244,82,112,0.15)' }}
+            >
+              <IcoAlertCircle /> Caja cerrada
+            </NavLink>
+          )}
+          <div className="sidebar-user">
+            <div className="sidebar-avatar">
+              {user?.full_name?.charAt(0).toUpperCase()}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {user?.full_name}
+              </p>
+              <p style={{ fontSize: 10, color: 'var(--t3)', fontWeight: 600, textTransform: 'uppercase' }}>
+                {user?.role === 'admin' ? 'Administrador' : 'Cajero'}
+              </p>
+            </div>
+          </div>
+          <button onClick={handleLogout} className="sidebar-logout">
+            <IcoLogOut /> Cerrar sesión
+          </button>
+        </div>
+      </aside>
+
+      {/* ── Main content ── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative', zIndex: 1 }}>
+        {/* Topbar — hidden on POS */}
+        {!isPOS && (
+          <div className="topbar">
+            <div>
+              <p className="topbar-title-kicker">{meta.sub}</p>
+              <h1 className="topbar-title">{meta.title}</h1>
+            </div>
+            <div className="topbar-actions">
+              <div className="topbar-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" strokeWidth="2.2" strokeLinecap="round">
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <span style={{ fontSize: 12, color: 'var(--t3)', fontWeight: 500 }}>Buscar...</span>
+                <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--t3)', fontWeight: 600, padding: '1px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.06)' }}>⌘K</span>
+              </div>
+              <button className="topbar-icon-btn" style={{ position: 'relative' }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                  <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                  <path d="M13.73 21a2 2 0 01-3.46 0"/>
+                </svg>
+                <div style={{ position: 'absolute', top: 6, right: 6, width: 8, height: 8, borderRadius: '50%', background: 'var(--danger)', border: '2px solid var(--bg)' }} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Page outlet */}
+        <div className="content-area">
+          {isPOS ? (
+            <Outlet />
+          ) : (
+            <div className="content-scroll no-scrollbar">
+              <Outlet />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }

@@ -8,6 +8,7 @@ interface CartStore {
     updateQuantity: (productId: number, quantity: number) => void;
     applyDiscount: (productId: number, discount: number) => void;
     clear: () => void;
+    restoreItems: (cartItems: CartItem[]) => void;
     getSubtotal: () => number;
     getDiscountTotal: () => number;
     getTotal: () => number;
@@ -67,6 +68,9 @@ export const useCartStore = create<CartStore>((set, get) => ({
     },
 
     clear: () => set({ items: [] }),
+
+    restoreItems: (cartItems: CartItem[]) =>
+        set({ items: cartItems.map(i => ({ ...i })) }),
 
     getSubtotal: () => {
         return get().items.reduce(

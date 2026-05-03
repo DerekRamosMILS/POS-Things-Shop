@@ -3,23 +3,57 @@ import { formatCurrency, formatDateTime, EXPENSE_CATEGORIES } from '../utils';
 import { useSessionStore } from '../stores/useSessionStore';
 import * as api from '../api';
 import type { Expense } from '../types';
-import { DollarSign, Plus, Edit2, Trash2, Loader2 } from 'lucide-react';
+import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
+
+// ─── Inline SVGs ─────────────────────────────────────────────────────────────
+const IcoPlus   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>;
+const IcoX      = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>;
+const IcoEdit   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>;
+const IcoTrash  = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>;
+const IcoSearch = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
+const IcoFilter = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>;
+const IcoLoader = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>;
+const IcoDollar = () => <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="opacity-40"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>;
+
+function IcoBtn({ onClick, children, hoverColor = 'var(--primary)', hoverBg = 'rgba(139,120,245,0.10)' }: {
+    onClick: () => void; children: React.ReactNode; hoverColor?: string; hoverBg?: string;
+}) {
+    return (
+        <button onClick={onClick} className="p-2 rounded-lg" style={{ color: 'var(--t3)' }}
+            onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = hoverColor; (e.currentTarget as HTMLButtonElement).style.background = hoverBg; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+        >{children}</button>
+    );
+}
 
 export default function ExpensesPage() {
     const { user, cashRegisterId } = useSessionStore();
-    const isAdmin = user?.role === 'admin';
     const [expenses, setExpenses] = useState<Expense[]>([]);
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
     const [editing, setEditing] = useState<Expense | null>(null);
     const [form, setForm] = useState({ category: 'Operativos', description: '', amount: '' });
+    const [search, setSearch] = useState('');
+    const [categoryFilter, setCategoryFilter] = useState('');
+    const [dateFrom, setDateFrom] = useState('');
+    const [dateTo, setDateTo] = useState('');
     const [processing, setProcessing] = useState(false);
+    const { showToast } = useToast();
+    const { confirm } = useConfirm();
 
     useEffect(() => { load(); }, []);
-    const load = async () => { try { setExpenses(await api.getExpenses()); } catch (e) { console.error(e); } finally { setLoading(false); } };
 
-    const openCreate = () => { setEditing(null); setForm({ category: 'Operativos', description: '', amount: '' }); setShowForm(true); };
-    const openEdit = (exp: Expense) => { setEditing(exp); setForm({ category: exp.category, description: exp.description, amount: exp.amount.toString() }); setShowForm(true); };
+    const load = async () => {
+        try { setExpenses(await api.getExpenses()); } catch (e) { console.error(e); } finally { setLoading(false); }
+    };
+
+    const openCreate = () => {
+        setEditing(null); setForm({ category: 'Operativos', description: '', amount: '' }); setShowForm(true);
+    };
+    const openEdit = (exp: Expense) => {
+        setEditing(exp); setForm({ category: exp.category, description: exp.description, amount: exp.amount.toString() }); setShowForm(true);
+    };
 
     const handleSave = async () => {
         if (!user || !form.description || !form.amount) return;
@@ -31,99 +65,160 @@ export default function ExpensesPage() {
                 await api.createExpense(user.id, cashRegisterId, { category: form.category, description: form.description, amount: parseFloat(form.amount) || 0 });
             }
             setShowForm(false); setForm({ category: 'Operativos', description: '', amount: '' }); load();
-        } catch (e) { alert(String(e)); } finally { setProcessing(false); }
+        } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
     };
 
     const handleDelete = async (id: number) => {
-        if (!confirm('¿Eliminar este gasto?')) return;
-        try { await api.deleteExpense(id); load(); } catch (e) { alert(String(e)); }
+        const ok = await confirm({ title: 'Eliminar gasto', message: '¿Eliminar este gasto? Esta acción no se puede deshacer.', variant: 'danger', confirmLabel: 'Eliminar' });
+        if (!ok) return;
+        try { await api.deleteExpense(id); load(); } catch (e) { showToast(String(e), 'error'); }
     };
 
-    const total = expenses.reduce((s, e) => s + e.amount, 0);
+    const filtered = expenses.filter(e => {
+        const q = search.toLowerCase().trim();
+        if (q && ![e.description, e.category, e.user_name || ''].some(v => v.toLowerCase().includes(q))) return false;
+        if (categoryFilter && e.category !== categoryFilter) return false;
+        if (dateFrom && e.created_at.slice(0, 10) < dateFrom) return false;
+        if (dateTo && e.created_at.slice(0, 10) > dateTo) return false;
+        return true;
+    });
 
-    if (loading) return <div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>;
+    const total = filtered.reduce((s, e) => s + e.amount, 0);
+    const avgExpense = filtered.length > 0 ? total / filtered.length : 0;
+    const categories = Array.from(new Set(expenses.map(e => e.category)));
+    const hasFilters = !!(search || categoryFilter || dateFrom || dateTo);
+
+    if (loading) return (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <IcoLoader />
+        </div>
+    );
 
     return (
-        <div className="p-10 h-full flex flex-col animate-fade-in">
-            <div className="flex items-center justify-between mb-8">
+        <div className="page-container">
+            {/* Header */}
+            <div className="page-header">
                 <div>
-                    <h1 className="text-4xl font-bold text-text-primary">Gastos</h1>
-                    <p className="text-text-secondary text-lg mt-2">Total acumulado: <span className="font-semibold text-danger">{formatCurrency(total)}</span></p>
+                    <h1 className="page-title">Gastos</h1>
+                    <p className="page-subtitle">Total filtrado: <span style={{ color: 'var(--danger)', fontWeight: 700 }}>{formatCurrency(total)}</span></p>
                 </div>
-                <button onClick={openCreate} className="flex items-center gap-3 px-8 py-4 bg-primary hover:bg-primary-hover text-white rounded-2xl font-bold text-xl transition-colors shadow-[0_4px_20px_rgba(0,224,90,0.25)] hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,224,90,0.4)]">
-                    <Plus size={24} strokeWidth={2.5} /> Registrar Gasto
+                <button onClick={openCreate} className="btn btn-primary" style={{ gap: 7 }}>
+                    <IcoPlus /> Registrar Gasto
                 </button>
             </div>
 
-            <div className="glass rounded-[32px] border border-border flex-1 flex flex-col overflow-hidden shadow-[0_10px_50px_rgba(0,0,0,0.5)]">
-                <div className="overflow-auto flex-1">
-                    <table className="w-full">
+            {/* KPIs */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 14 }}>
+                <div className="card" style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--t3)', marginBottom: 8 }}>Total</p>
+                    <p style={{ fontSize: 22, fontWeight: 900, color: 'var(--danger)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(total)}</p>
+                </div>
+                <div className="card" style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--t3)', marginBottom: 8 }}>Registros</p>
+                    <p style={{ fontSize: 22, fontWeight: 900, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{filtered.length}</p>
+                </div>
+                <div className="card" style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--t3)', marginBottom: 8 }}>Promedio</p>
+                    <p style={{ fontSize: 22, fontWeight: 900, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(avgExpense)}</p>
+                </div>
+            </div>
+
+            {/* Filters */}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ flex: 1, minWidth: 240, position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--t3)', pointerEvents: 'none' }}><IcoSearch /></span>
+                    <input value={search} onChange={e => setSearch(e.target.value)} className="input" style={{ paddingLeft: 36 }} placeholder="Buscar gasto, categoría o cajero…" />
+                </div>
+                <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)} className="input" style={{ width: 'auto', minWidth: 160 }}>
+                    <option value="">Todas las categorías</option>
+                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="input" style={{ width: 'auto' }} />
+                <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="input" style={{ width: 'auto' }} />
+                {hasFilters && (
+                    <button onClick={() => { setSearch(''); setCategoryFilter(''); setDateFrom(''); setDateTo(''); }} className="btn btn-ghost btn-sm" style={{ gap: 6 }}>
+                        <IcoFilter /> Limpiar
+                    </button>
+                )}
+            </div>
+
+            {/* Table */}
+            <div className="card" style={{ flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ overflowX: 'auto', overflowY: 'auto', flex: 1 }}>
+                    <table className="table-base">
                         <thead>
-                            <tr className="border-b border-border/60">
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-10 py-6 tracking-wide">Descripción</th>
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-10 py-6 tracking-wide">Categoría</th>
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-10 py-6 tracking-wide">Usuario</th>
-                                <th className="text-right text-base font-bold text-text-muted uppercase px-10 py-6 tracking-wide">Monto</th>
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-10 py-6 tracking-wide">Fecha</th>
-                                {isAdmin && <th className="text-center text-base font-bold text-text-muted uppercase px-10 py-6 tracking-wide">Acciones</th>}
+                            <tr>
+                                <th>Categoría</th>
+                                <th>Descripción</th>
+                                <th>Cajero</th>
+                                <th>Fecha</th>
+                                <th style={{ textAlign: 'right' }}>Monto</th>
+                                <th style={{ textAlign: 'center', width: 80 }}>Acciones</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {expenses.map((e) => (
-                                <tr key={e.id} className="border-b border-border/50 hover:bg-white/5 transition-colors">
-                                    <td className="px-10 py-6 text-xl font-bold text-text-primary">{e.description}</td>
-                                    <td className="px-10 py-6"><span className="text-lg font-bold px-4 py-2 rounded-xl bg-primary/10 text-primary border border-primary/20">{e.category}</span></td>
-                                    <td className="px-10 py-6 text-xl text-text-secondary">{e.user_name}</td>
-                                    <td className="px-10 py-6 text-right text-2xl font-black text-danger drop-shadow-[0_0_8px_rgba(244,63,94,0.3)]">{formatCurrency(e.amount)}</td>
-                                    <td className="px-10 py-6 text-xl text-text-muted font-mono tracking-wider">{formatDateTime(e.created_at)}</td>
-                                    {isAdmin && (
-                                        <td className="px-10 py-6 text-center">
-                                            <div className="flex items-center justify-center gap-4">
-                                                <button onClick={() => openEdit(e)} className="p-4 text-text-muted hover:text-primary rounded-xl hover:bg-primary/10 transition-all border border-transparent hover:border-primary/30 hover:scale-110 shadow-[0_4px_10px_rgba(0,0,0,0.1)]"><Edit2 size={24} /></button>
-                                                <button onClick={() => handleDelete(e.id)} className="p-4 text-text-muted hover:text-danger rounded-xl hover:bg-danger/10 transition-all border border-transparent hover:border-danger/30 hover:scale-110 shadow-[0_4px_10px_rgba(0,0,0,0.1)]"><Trash2 size={24} /></button>
-                                            </div>
-                                        </td>
-                                    )}
+                            {filtered.map(e => (
+                                <tr key={e.id}>
+                                    <td><span className="badge badge-muted">{e.category}</span></td>
+                                    <td style={{ fontSize: 13, fontWeight: 500, color: 'var(--t1)' }}>{e.description}</td>
+                                    <td style={{ fontSize: 12, color: 'var(--t2)' }}>{e.user_name || '—'}</td>
+                                    <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--t3)' }}>{formatDateTime(e.created_at)}</td>
+                                    <td style={{ textAlign: 'right' }}>
+                                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--danger)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(e.amount)}</span>
+                                    </td>
+                                    <td>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                                            <IcoBtn onClick={() => openEdit(e)}><IcoEdit /></IcoBtn>
+                                            <IcoBtn onClick={() => handleDelete(e.id)} hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)"><IcoTrash /></IcoBtn>
+                                        </div>
+                                    </td>
                                 </tr>
                             ))}
                         </tbody>
                     </table>
-                    {expenses.length === 0 && (
-                        <div className="py-20 text-center text-text-muted">
-                            <DollarSign size={56} className="mx-auto mb-3 opacity-30" />
-                            <p className="text-base">Sin gastos registrados</p>
+                    {filtered.length === 0 && (
+                        <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--t3)' }}>
+                            <IcoDollar />
+                            <p style={{ marginTop: 12, fontSize: 13 }}>Sin gastos registrados</p>
                         </div>
                     )}
                 </div>
             </div>
 
-            {/* Create/Edit Modal */}
+            {/* Form Modal */}
             {showForm && (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 animate-fade-in">
-                    <div className="bg-bg-secondary border border-white/10 rounded-[32px] w-full max-w-2xl p-12 lg:p-14 animate-fade-in shadow-[0_20px_80px_rgba(0,0,0,0.9)]">
-                        <div className="flex justify-between mb-8">
-                            <h3 className="text-3xl font-black text-text-primary">{editing ? 'Editar Gasto' : 'Nuevo Gasto'}</h3>
-                            <button onClick={() => setShowForm(false)} className="text-text-muted hover:text-text-primary text-3xl font-bold">✕</button>
+                <div className="modal-overlay" onClick={() => setShowForm(false)}>
+                    <div className="glass-modal animate-scale-in" style={{ width: '100%', maxWidth: 360, padding: 24 }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                            <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)' }}>{editing ? 'Editar Gasto' : 'Registrar Gasto'}</h3>
+                            <button onClick={() => setShowForm(false)} style={{ padding: 6, borderRadius: 9, color: 'var(--t3)' }}
+                                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.08)'; (e.currentTarget as HTMLButtonElement).style.color = 'var(--t1)'; }}
+                                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; }}
+                            ><IcoX /></button>
                         </div>
-                        <div className="space-y-8">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                             <div>
-                                <label className="text-lg font-bold text-text-secondary block mb-3 uppercase tracking-wider">Categoría</label>
-                                <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="w-full px-8 py-5 bg-bg-primary border border-border rounded-[20px] text-text-primary text-xl">
-                                    {EXPENSE_CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                                <label className="form-label">Categoría</label>
+                                <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} className="input">
+                                    {(EXPENSE_CATEGORIES || ['Operativos','Servicios','Suministros','Transporte','Comida','Mantenimiento','Otros']).map((c: string) => (
+                                        <option key={c} value={c}>{c}</option>
+                                    ))}
                                 </select>
                             </div>
                             <div>
-                                <label className="text-lg font-bold text-text-secondary block mb-3 uppercase tracking-wider">Descripción</label>
-                                <input type="text" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="w-full px-8 py-5 bg-bg-primary border border-border rounded-[20px] text-text-primary text-xl" placeholder="Describe el gasto..." />
+                                <label className="form-label">Descripción</label>
+                                <input type="text" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} className="input" placeholder="Ej. Pago de luz" />
                             </div>
                             <div>
-                                <label className="text-lg font-bold text-text-secondary block mb-3 uppercase tracking-wider">Monto</label>
-                                <input type="number" step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="w-full px-8 py-5 bg-bg-primary border border-border rounded-[20px] text-text-primary text-2xl font-mono tracking-wider" placeholder="0.00" />
+                                <label className="form-label">Monto</label>
+                                <input type="number" step="0.01" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} className="input" style={{ fontFamily: 'monospace' }} placeholder="0.00" />
                             </div>
-                        </div>
-                        <div className="flex gap-6 mt-10">
-                            <button onClick={() => setShowForm(false)} className="flex-1 py-5 bg-bg-primary border-2 border-border rounded-[20px] text-text-secondary text-xl font-bold hover:bg-surface-hover hover:border-border-light transition-all">Cancelar</button>
-                            <button onClick={handleSave} disabled={processing} className="flex-1 py-5 bg-primary hover:bg-primary-hover text-[#0B0B0F] rounded-[20px] text-xl font-black flex items-center justify-center gap-3 transition-all shadow-[0_4px_20px_rgba(0,224,90,0.25)] hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,224,90,0.4)] disabled:opacity-50 disabled:shadow-none disabled:translate-y-0">{processing && <Loader2 size={24} className="animate-spin" />}Guardar</button>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <button onClick={() => setShowForm(false)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Cancelar</button>
+                                <button onClick={handleSave} disabled={processing} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>
+                                    {processing && <IcoLoader />} {editing ? 'Guardar' : 'Registrar'}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

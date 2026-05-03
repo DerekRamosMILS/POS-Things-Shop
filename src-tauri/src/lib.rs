@@ -30,6 +30,7 @@ pub fn run() {
             products::create_product,
             products::update_product,
             products::delete_product,
+            products::set_product_image,
             // Categories
             categories::get_categories,
             categories::create_category,
