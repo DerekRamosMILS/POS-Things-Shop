@@ -31,10 +31,12 @@ function initials(name: string) {
 
 // ─── Product thumbnail — photo OR gradient fallback ───────────────────────────
 function ProductThumb({
-    product, width = 100, height = 72, radius = 12,
-}: { product: Product; width?: number; height?: number; radius?: number }) {
+    product, width = 100, height = 72, radius = 12, fullWidth = false,
+}: { product: Product; width?: number; height?: number; radius?: number; fullWidth?: boolean }) {
     const [imgError, setImgError] = useState(false);
     const [a, b] = getGrad(product.name);
+    const w = fullWidth ? '100%' : width;
+    const fontSize = Math.round(Math.min(width, height) * 0.32);
 
     if (product.image_url && !imgError) {
         return (
@@ -42,17 +44,17 @@ function ProductThumb({
                 src={product.image_url}
                 alt={product.name}
                 onError={() => setImgError(true)}
-                style={{ width, height, borderRadius: radius, objectFit: 'cover', flexShrink: 0, display: 'block' }}
+                style={{ width: w, height, borderRadius: radius, objectFit: 'cover', flexShrink: 0, display: 'block' }}
             />
         );
     }
     return (
         <div style={{
-            width, height, borderRadius: radius, flexShrink: 0,
+            width: w, height, borderRadius: radius, flexShrink: 0,
             background: `linear-gradient(135deg,${a},${b})`,
             display: 'grid', placeItems: 'center',
             color: '#fff', fontWeight: 800,
-            fontSize: Math.round(Math.min(width, height) * 0.32),
+            fontSize,
             boxShadow: `0 4px 14px ${a}55`,
         }}>
             {initials(product.name)}
@@ -413,7 +415,7 @@ export default function POSPage() {
                                         className={`pos-product-card${inCart ? ' in-cart' : ''}`}
                                     >
                                         {/* Product image */}
-                                        <ProductThumb product={product} width={undefined as any} height={90} radius={12} />
+                                        <ProductThumb product={product} fullWidth height={90} radius={12} />
 
                                         <div style={{ width: '100%' }}>
                                             <p style={{ fontSize: 13, fontWeight: 700, color: T.t1, lineHeight: 1.3, marginBottom: 4 }}>{product.name}</p>

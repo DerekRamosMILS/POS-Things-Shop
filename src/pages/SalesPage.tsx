@@ -225,7 +225,7 @@ export default function SalesPage() {
                                         <div>
                                             <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 500 }}>{item.product_name}</span>
                                             <span style={{ fontSize: 11, color: 'var(--t3)', marginLeft: 8 }}>×{item.quantity}</span>
-                                            {item.discount > 0 && <span className="badge badge-accent" style={{ marginLeft: 6 }}>-{item.discount}%</span>}
+                                            {item.discount > 0 && <span className="badge badge-accent" style={{ marginLeft: 6 }}>-{formatCurrency(item.discount)}</span>}
                                         </div>
                                         <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(item.subtotal)}</span>
                                     </div>

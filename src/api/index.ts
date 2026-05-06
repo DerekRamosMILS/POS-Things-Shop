@@ -184,10 +184,32 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return undefined as unknown as T;
         }
 
+        case 'create_product': {
+            const data = args?.data as CreateProductDto;
+            const id = webProducts.length + 1;
+            const newP: Product = {
+                id, sku: data.sku, barcode: data.barcode ?? null, name: data.name,
+                description: data.description ?? null, category_id: data.category_id ?? null,
+                category_name: webCategories.find(c => c.id === data.category_id)?.name ?? null,
+                supplier_id: data.supplier_id ?? null, supplier_name: null,
+                purchase_price: data.purchase_price, sale_price: data.sale_price,
+                stock: data.stock, min_stock: data.min_stock, is_active: true,
+                image_url: null, created_at: nowIso(), updated_at: nowIso(),
+            };
+            webProducts.push(newP);
+            return newP as unknown as T;
+        }
+        case 'update_product': {
+            const data = args?.data as UpdateProductDto;
+            const idx = webProducts.findIndex(p => p.id === data.id);
+            if (idx !== -1) {
+                webProducts[idx] = { ...webProducts[idx], ...data, updated_at: nowIso() };
+                return webProducts[idx] as unknown as T;
+            }
+            return webProducts[0] as unknown as T;
+        }
         case 'adjust_stock':
         case 'register_purchase':
-        case 'create_product':
-        case 'update_product':
         case 'delete_product':
         case 'create_category':
         case 'update_category':
