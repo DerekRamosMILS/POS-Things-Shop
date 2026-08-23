@@ -46,7 +46,15 @@ pub struct CreateSaleDto {
     /// Desglose opcional del cobro. Vacío = un solo método (`payment_method`).
     #[serde(default)]
     pub payments: Vec<PaymentSplitDto>,
+    /// Lo que el cliente cree que suman los descuentos. Se acepta por
+    /// compatibilidad pero se ignora: el backend recalcula el importe a partir
+    /// de las líneas y de la promoción aplicada.
+    #[serde(default)]
+    #[allow(dead_code)]
     pub discount_total: f64,
+    /// Promoción elegida en el punto de venta, si hubo alguna.
+    #[serde(default)]
+    pub promotion_id: Option<i64>,
     pub notes: Option<String>,
     #[serde(default)]
     pub customer_id: Option<i64>,

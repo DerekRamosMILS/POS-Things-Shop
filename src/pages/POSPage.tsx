@@ -422,6 +422,7 @@ export default function POSPage() {
                 items: items.map(item => ({ product_id: item.product.id, quantity: item.quantity, unit_price: item.product.sale_price, discount: item.discount, variant_id: item.variant?.id ?? null })),
                 payment_method: paymentMethod, amount_paid: paid, payments,
                 discount_total: saleLineDiscount + promoDiscount,
+                promotion_id: activePromo?.id ?? null,
                 customer_id: customerId,
                 client_request_id: chargeRequestId.current,
                 notes: [SERVICE_LABELS[serviceType], customerName ? `Cliente: ${customerName}` : '', activePromo ? `Promo: ${activePromo.name}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
@@ -430,6 +431,14 @@ export default function POSPage() {
             // Ticket térmico y apertura del cajón. Si no hay impresora
             // configurada queda el botón de imprimir por diálogo del sistema.
             lastSaleId.current = sale.id;
+            // El backend recalcula descuentos e impuesto. Si su total no coincide
+            // con el que vio el cajero, hay que decirlo, no cobrar en silencio.
+            if (Math.abs(sale.total - total) > 0.01) {
+                showToast(
+                    `El total cobrado fue ${formatCurrency(sale.total)}, no ${formatCurrency(total)}. Revisa la promoción aplicada.`,
+                    'warn',
+                );
+            }
             if (config.printer_auto_print !== '0') {
                 api.printSaleReceipt(sale.id).catch((err) => {
                     if (String(err).includes('SIN_IMPRESORA')) return;

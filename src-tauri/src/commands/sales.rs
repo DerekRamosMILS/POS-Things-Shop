@@ -71,6 +71,59 @@ fn split_tender(payments: &[PaymentSplitDto], total: f64) -> Result<(Vec<Payment
     Ok((applied, change))
 }
 
+/// Descuento que una promoción concede sobre las líneas a las que aplica.
+///
+/// Se evalúa en el servidor: el punto de venta dice *qué* promoción se usó, no
+/// *cuánto* descuenta. Si la promoción no existe, está inactiva o quedó fuera de
+/// vigencia, el descuento es cero y la venta se cobra completa.
+fn promotion_discount(
+    db: &rusqlite::Connection,
+    promotion_id: i64,
+    lines: &[(i64, Option<i64>, f64)],
+) -> Result<f64, String> {
+    let promo: Option<(String, f64, String, Option<i64>)> = db
+        .query_row(
+            "SELECT discount_type, discount_value, applies_to, target_id
+             FROM promotions
+             WHERE id = ?1
+               AND is_active = 1
+               AND date('now','localtime') BETWEEN date(start_date) AND date(end_date)",
+            params![promotion_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .ok();
+
+    let Some((discount_type, value, applies_to, target_id)) = promo else {
+        log::warn!("Promoción {} ignorada: no existe, está inactiva o venció", promotion_id);
+        return Ok(0.0);
+    };
+
+    if value <= 0.0 {
+        return Ok(0.0);
+    }
+
+    // Base: solo lo que la promoción alcanza, ya neto de descuentos de línea.
+    let base: f64 = lines
+        .iter()
+        .filter(|(product_id, category_id, _)| match applies_to.as_str() {
+            "category" => *category_id == target_id,
+            "product" => Some(*product_id) == target_id,
+            _ => true,
+        })
+        .map(|(_, _, net)| net)
+        .sum();
+
+    if base <= 0.0 {
+        return Ok(0.0);
+    }
+
+    let discount = match discount_type.as_str() {
+        "percentage" => base * (value.min(100.0) / 100.0),
+        _ => value.min(base),
+    };
+    Ok(round2(discount))
+}
+
 /// Human-readable label for a variant, e.g. "M / Negro".
 fn variant_label(size: &Option<String>, color: &Option<String>) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -135,6 +188,7 @@ pub fn create_sale(
         // Resolve every line from the DB (authoritative price + cost snapshot).
         struct Line {
             product_id: i64,
+            category_id: Option<i64>,
             name: String,
             sku: String,
             quantity: i32,
@@ -153,13 +207,13 @@ pub fn create_sale(
             if item.quantity <= 0 {
                 return Err("La cantidad de un producto es inválida".to_string());
             }
-            let (name, sku, product_stock, price, cost): (String, String, i32, f64, f64) = db
+            let (name, sku, product_stock, price, cost, category_id): (String, String, i32, f64, f64, Option<i64>) = db
                 .query_row(
-                    "SELECT name, sku, stock, sale_price, purchase_price FROM products WHERE id = ?1",
+                    "SELECT name, sku, stock, sale_price, purchase_price, category_id FROM products WHERE id = ?1",
                     params![item.product_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|_| "Un producto de la venta ya no existe".to_string())?;
 
             // If a variant is specified, availability is checked against the variant.
             let (variant_id, variant_label, available) = if let Some(vid) = item.variant_id {
@@ -183,13 +237,15 @@ pub fn create_sale(
                 ));
             }
 
-            let discount = if item.discount < 0.0 { 0.0 } else { item.discount };
-            let gross = price * item.quantity as f64;
-            let line_subtotal = (gross - discount).max(0.0);
+            // Un descuento de línea nunca puede superar lo que vale la línea.
+            let gross = round2(price * item.quantity as f64);
+            let discount = round2(item.discount.clamp(0.0, gross));
+            let line_subtotal = round2(gross - discount);
             subtotal += gross;
 
             lines.push(Line {
                 product_id: item.product_id,
+                category_id,
                 name,
                 sku,
                 quantity: item.quantity,
@@ -204,8 +260,20 @@ pub fn create_sale(
         }
 
         subtotal = round2(subtotal);
-        let discount_total = round2(data.discount_total.max(0.0));
-        let taxable = (subtotal - discount_total).max(0.0);
+
+        // El importe del descuento se calcula aquí, no se acepta del cliente.
+        let line_discount_total: f64 = round2(lines.iter().map(|l| l.discount).sum());
+        let promo_base: Vec<(i64, Option<i64>, f64)> = lines
+            .iter()
+            .map(|l| (l.product_id, l.category_id, l.line_subtotal))
+            .collect();
+        let promo_discount = match data.promotion_id {
+            Some(id) => promotion_discount(&db, id, &promo_base)?,
+            None => 0.0,
+        };
+
+        let discount_total = round2((line_discount_total + promo_discount).min(subtotal));
+        let taxable = round2((subtotal - discount_total).max(0.0));
         let tax_rate = config_number(&db, "tax_rate", 0.0);
         let tax = round2(taxable * tax_rate / 100.0);
         let total = round2(taxable + tax);
@@ -231,13 +299,13 @@ pub fn create_sale(
 
         // Insert sale
         db.execute(
-            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id, client_request_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id, client_request_id, promotion_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 folio, user_id, register_id, subtotal,
                 discount_total, tax, total, payment_method,
                 amount_paid, change_amount, data.notes, data.customer_id,
-                data.client_request_id
+                data.client_request_id, data.promotion_id
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -676,6 +744,94 @@ mod tests {
         assert_eq!(register_field("card"), "total_card_sales");
         assert_eq!(register_field("transfer"), "total_transfer_sales");
         assert_eq!(register_field("desconocido"), "total_cash_sales");
+    }
+
+    fn db_with_promo(
+        discount_type: &str,
+        value: f64,
+        applies_to: &str,
+        target_id: Option<i64>,
+        active: bool,
+        days_offset: i64,
+    ) -> (rusqlite::Connection, i64) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, is_active, applies_to, target_id)
+             VALUES ('Promo', ?1, ?2, date('now','localtime', ?3 || ' days'), date('now','localtime', ?4 || ' days'), ?5, ?6, ?7)",
+            params![
+                discount_type, value,
+                (days_offset - 1).to_string(), (days_offset + 1).to_string(),
+                active as i32, applies_to, target_id
+            ],
+        ).unwrap();
+        let id = conn.last_insert_rowid();
+        (conn, id)
+    }
+
+    /// (product_id, category_id, importe neto de la línea)
+    fn basket() -> Vec<(i64, Option<i64>, f64)> {
+        vec![(1, Some(10), 200.0), (2, Some(20), 300.0)]
+    }
+
+    #[test]
+    fn a_percentage_promotion_applies_to_the_whole_basket() {
+        let (conn, id) = db_with_promo("percentage", 10.0, "all", None, true, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 50.0);
+    }
+
+    #[test]
+    fn a_category_promotion_only_touches_its_category() {
+        let (conn, id) = db_with_promo("percentage", 50.0, "category", Some(10), true, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 100.0);
+    }
+
+    #[test]
+    fn a_product_promotion_only_touches_its_product() {
+        let (conn, id) = db_with_promo("percentage", 10.0, "product", Some(2), true, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 30.0);
+    }
+
+    #[test]
+    fn a_fixed_promotion_never_exceeds_the_basket() {
+        let (conn, id) = db_with_promo("fixed", 9999.0, "all", None, true, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 500.0);
+    }
+
+    #[test]
+    fn an_expired_promotion_grants_nothing() {
+        let (conn, id) = db_with_promo("percentage", 50.0, "all", None, true, -30);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_future_promotion_grants_nothing() {
+        let (conn, id) = db_with_promo("percentage", 50.0, "all", None, true, 30);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_deactivated_promotion_grants_nothing() {
+        let (conn, id) = db_with_promo("percentage", 50.0, "all", None, false, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn an_invented_promotion_id_grants_nothing() {
+        let (conn, _) = db_with_promo("percentage", 50.0, "all", None, true, 0);
+        assert_eq!(promotion_discount(&conn, 9999, &basket()).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_percentage_over_100_cannot_pay_the_customer() {
+        let (conn, id) = db_with_promo("percentage", 500.0, "all", None, true, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 500.0);
+    }
+
+    #[test]
+    fn a_promotion_whose_category_is_absent_grants_nothing() {
+        let (conn, id) = db_with_promo("percentage", 50.0, "category", Some(99), true, 0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
     }
 
     #[test]

@@ -122,9 +122,21 @@ pub fn get_daily_sales_report(state: State<DbState>, sessions: State<SessionStat
             date(created_at) as sale_date,
             COALESCE(SUM(total), 0) as total_sales,
             COUNT(*) as sale_count,
-            COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total ELSE 0 END), 0) as total_cash,
-            COALESCE(SUM(CASE WHEN payment_method = 'card' THEN total ELSE 0 END), 0) as total_card,
-            COALESCE(SUM(CASE WHEN payment_method = 'transfer' THEN total ELSE 0 END), 0) as total_transfer
+            -- El desglose sale de sale_payments, no de payment_method: una venta
+            -- con pago mixto reparte su importe entre varios métodos y con
+            -- CASE WHEN no aparecería en ninguno.
+            COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                      JOIN sales s2 ON s2.id = sp.sale_id
+                      WHERE sp.method = 'cash' AND s2.status = 'completed'
+                        AND date(s2.created_at) = date(sales.created_at)), 0) as total_cash,
+            COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                      JOIN sales s2 ON s2.id = sp.sale_id
+                      WHERE sp.method = 'card' AND s2.status = 'completed'
+                        AND date(s2.created_at) = date(sales.created_at)), 0) as total_card,
+            COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                      JOIN sales s2 ON s2.id = sp.sale_id
+                      WHERE sp.method = 'transfer' AND s2.status = 'completed'
+                        AND date(s2.created_at) = date(sales.created_at)), 0) as total_transfer
          FROM sales
          WHERE status = 'completed'
            AND created_at >= datetime('now', ?1 || ' days', 'localtime')

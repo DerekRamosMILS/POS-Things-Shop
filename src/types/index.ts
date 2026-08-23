@@ -166,6 +166,8 @@ export interface CreateSaleDto {
     customer_id?: number | null;
     /** Id único del intento de cobro; evita duplicar la venta si se reenvía. */
     client_request_id?: string;
+    /** Promoción aplicada. El backend recalcula el importe; no confía en el cliente. */
+    promotion_id?: number | null;
 }
 
 export interface CreateSaleItemDto {
