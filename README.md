@@ -4,6 +4,13 @@ Punto de venta de escritorio para tienda de ropa. React + TypeScript en el frent
 Tauri 2 + Rust + SQLite en el backend. Funciona sin internet: toda la información
 vive en el equipo donde corre la app.
 
+## Documentación
+
+- [Manual de operación](docs/MANUAL.md) — para el cajero y el administrador.
+  Dentro de la app, **F1** abre lo mismo en pantalla.
+- [Decisiones de arquitectura](docs/ARQUITECTURA.md) — una caja vs. varias,
+  facturación, manejo del dinero y por qué de cada cosa.
+
 ## Requisitos
 
 - Node 20+ y **pnpm** (el proyecto no usa npm ni yarn)
@@ -29,46 +36,54 @@ cd src-tauri && cargo clippy      # linter de Rust
 
 ## Compilar el instalador (Windows)
 
+**El instalador se construye en GitHub Actions, no en local.** El código de la
+impresora y el cajón usa la API de Windows y no compila desde macOS ni Linux
+(`ring`, dependencia del actualizador, necesita el SDK de Microsoft).
+
+Para publicar una versión:
+
+```bash
+git tag v0.2.0 && git push --tags
+```
+
+Eso dispara `.github/workflows/release.yml`, que en un runner de Windows corre
+las pruebas, construye el `.msi`, lo firma si hay certificado, genera el
+manifiesto del actualizador y publica todo en GitHub Releases.
+
+Cada push a `main` también compila y prueba en Windows (`ci.yml`), así que una
+regresión en el código específico de esa plataforma se detecta enseguida.
+
+Si tienes Windows a la mano, el equivalente local es:
+
 ```bash
 pnpm tauri build
 ```
 
-Genera un `.msi` en `src-tauri/target/release/bundle/msi/`.
+### Secretos del repositorio
 
-Para que el instalador quede firmado para el actualizador, exporta la llave antes
-de compilar:
+| Secreto | Para qué | Sin él |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | Firma del actualizador | El `.msi` sale sin `.sig` y el actualizador lo rechaza |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Contraseña de esa llave | Solo si la llave la tiene |
+| `WINDOWS_CERT_BASE64` | Certificado de firma en base64 | Windows advierte "editor desconocido" al instalar |
+| `WINDOWS_CERT_PASSWORD` | Contraseña del `.pfx` | — |
 
-```bash
-export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.things-shop-updater.key"
-```
+El contenido de `TAURI_SIGNING_PRIVATE_KEY` es el archivo
+`~/.things-shop-updater.key`. La firma de código es opcional: sin ella el
+instalador funciona, pero SmartScreen muestra una advertencia en cada
+instalación. Un certificado estándar la reduce con el tiempo; uno EV la elimina
+desde el primer día.
 
 ## Actualizaciones automáticas
 
-La app usa `tauri-plugin-updater`. La llave pública ya está en
-`src-tauri/tauri.conf.json`; **la privada vive fuera del repositorio** en
-`~/.things-shop-updater.key` y no debe versionarse ni perderse: sin ella no se
-pueden firmar versiones nuevas.
+Ya está todo conectado: `plugins.updater.endpoints` apunta al `latest.json` de
+la última release de GitHub, y el flujo de publicación lo genera con la firma
+correcta. Desde **Ajustes → Buscar actualizaciones** la tienda instala la
+versión nueva y la app se reinicia sola.
 
-Falta un paso para activarlo: publicar el manifiesto y apuntar
-`plugins.updater.endpoints` en `src-tauri/tauri.conf.json` a su URL. El manifiesto
-es un JSON con esta forma:
-
-```json
-{
-  "version": "0.2.0",
-  "notes": "Qué cambió en esta versión",
-  "pub_date": "2026-01-01T00:00:00Z",
-  "platforms": {
-    "windows-x86_64": {
-      "signature": "<contenido del .msi.sig generado por tauri build>",
-      "url": "https://tu-servidor/things-shop/ThingsShopPOS_0.2.0_x64.msi"
-    }
-  }
-}
-```
-
-Mientras el endpoint no exista, «Buscar actualizaciones» en Configuración
-simplemente reporta que no hay nada nuevo.
+La llave pública está en `src-tauri/tauri.conf.json`; **la privada vive fuera
+del repositorio** en `~/.things-shop-updater.key` y no debe versionarse ni
+perderse: sin ella no se pueden firmar versiones nuevas.
 
 ## Dónde viven los datos
 

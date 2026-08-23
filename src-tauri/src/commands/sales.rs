@@ -5,6 +5,17 @@ use chrono::Local;
 use crate::db::connection::DbState;
 use crate::models::sale::{CreateSaleDto, PaymentSplitDto, Sale, SaleFilters, SaleItem};
 use crate::money::Cents;
+
+/// Copia de los datos fiscales del cliente al momento de vender:
+/// (rfc, razón social, régimen, código postal, uso de CFDI, nombre).
+type DatosFiscalesCliente = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
 use crate::session::{require_admin, require_auth, SessionState};
 
 /// Read a numeric system_config value, falling back to `default` when missing/invalid.
@@ -17,6 +28,48 @@ fn config_number(db: &rusqlite::Connection, key: &str, default: f64) -> f64 {
     .ok()
     .and_then(|s| s.trim().parse::<f64>().ok())
     .unwrap_or(default)
+}
+
+/// Terminal desde la que se cobra. Con una sola caja siempre es "01".
+fn terminal_id(db: &rusqlite::Connection) -> String {
+    db.query_row(
+        "SELECT value FROM system_config WHERE key = 'terminal_id'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
+    .unwrap_or_else(|| "01".to_string())
+}
+
+/// Siguiente folio del día.
+///
+/// Se calcula desde el consecutivo más alto ya emitido, no contando renglones:
+/// contar produce folios repetidos en cuanto falta una fila, y `folio` es único,
+/// así que la venta fallaría al cobrar. Con más de una terminal el folio lleva
+/// además su identificador, para que dos cajas no emitan el mismo número.
+fn next_folio(db: &rusqlite::Connection) -> Result<String, String> {
+    let today = Local::now().format("%Y%m%d").to_string();
+    let terminal = terminal_id(db);
+
+    let prefix = if terminal == "01" {
+        format!("V-{}-", today)
+    } else {
+        format!("V{}-{}-", terminal, today)
+    };
+
+    // El consecutivo son los caracteres que siguen al prefijo.
+    let last: i64 = db
+        .query_row(
+            "SELECT COALESCE(MAX(CAST(substr(folio, ?2) AS INTEGER)), 0)
+             FROM sales WHERE folio LIKE ?1",
+            params![format!("{}%", prefix), prefix.len() as i64 + 1],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(format!("{}{:03}", prefix, last + 1))
 }
 
 /// Cash register column that accumulates a given payment method.
@@ -176,14 +229,7 @@ pub fn create_sale(
             }
         }
 
-        // Generate folio
-        let today = Local::now().format("%Y%m%d").to_string();
-        let count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM sales WHERE folio LIKE ?1",
-            params![format!("V-{}-%", today)],
-            |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
-        let folio = format!("V-{}-{:03}", today, count + 1);
+        let folio = next_folio(&db)?;
 
         // Resolve every line from the DB (authoritative price + cost snapshot).
         struct Line {
@@ -303,13 +349,13 @@ pub fn create_sale(
 
         // Insert sale
         db.execute(
-            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id, client_request_id, promotion_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id, client_request_id, promotion_id, terminal_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 folio, user_id, register_id, subtotal.to_pesos(),
                 discount_total.to_pesos(), tax.to_pesos(), total.to_pesos(), payment_method,
                 amount_paid.to_pesos(), change_amount.to_pesos(), data.notes, data.customer_id,
-                data.client_request_id, data.promotion_id
+                data.client_request_id, data.promotion_id, terminal_id(&db)
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -320,7 +366,7 @@ pub fn create_sale(
             let Some(customer_id) = data.customer_id else {
                 return Err("Para facturar hay que elegir un cliente con datos fiscales".to_string());
             };
-            let fiscal: (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String) = db
+            let fiscal: DatosFiscalesCliente = db
                 .query_row(
                     "SELECT rfc, razon_social, regimen_fiscal, cp_fiscal, uso_cfdi, name
                      FROM customers WHERE id = ?1",
@@ -880,6 +926,82 @@ mod tests {
     fn a_promotion_whose_category_is_absent_grants_nothing() {
         let (conn, id) = db_with_promo("percentage", 50.0, "category", Some(99), true, 0);
         assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(0.0));
+    }
+
+    fn db_ventas() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'x', 'x', 'X', 'admin')",
+            [],
+        ).unwrap();
+        conn
+    }
+
+    fn insertar_folio(conn: &rusqlite::Connection, folio: &str) {
+        conn.execute(
+            "INSERT INTO sales (folio, user_id, subtotal, discount_total, tax, total,
+                                payment_method, amount_paid, change_amount)
+             VALUES (?1, 1, 0, 0, 0, 0, 'cash', 0, 0)",
+            params![folio],
+        ).unwrap();
+    }
+
+    fn hoy() -> String {
+        Local::now().format("%Y%m%d").to_string()
+    }
+
+    #[test]
+    fn the_first_sale_of_the_day_starts_at_one() {
+        let conn = db_ventas();
+        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-001", hoy()));
+    }
+
+    #[test]
+    fn folios_continue_from_the_highest_already_issued() {
+        let conn = db_ventas();
+        insertar_folio(&conn, &format!("V-{}-001", hoy()));
+        insertar_folio(&conn, &format!("V-{}-002", hoy()));
+        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-003", hoy()));
+    }
+
+    #[test]
+    fn a_missing_row_does_not_make_the_folio_repeat() {
+        // Con COUNT(*) este caso devolvía 003, que ya existía, y la venta
+        // fallaba por folio duplicado.
+        let conn = db_ventas();
+        insertar_folio(&conn, &format!("V-{}-001", hoy()));
+        insertar_folio(&conn, &format!("V-{}-002", hoy()));
+        insertar_folio(&conn, &format!("V-{}-003", hoy()));
+        conn.execute("DELETE FROM sales WHERE folio LIKE '%-002'", []).unwrap();
+
+        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-004", hoy()));
+    }
+
+    #[test]
+    fn folios_from_other_days_do_not_interfere() {
+        let conn = db_ventas();
+        insertar_folio(&conn, "V-20200101-999");
+        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-001", hoy()));
+    }
+
+    #[test]
+    fn a_second_terminal_issues_its_own_series() {
+        let conn = db_ventas();
+        insertar_folio(&conn, &format!("V-{}-001", hoy()));
+
+        conn.execute("UPDATE system_config SET value = '02' WHERE key = 'terminal_id'", []).unwrap();
+
+        // La caja 2 no continúa la serie de la caja 1: emite la suya.
+        assert_eq!(next_folio(&conn).unwrap(), format!("V02-{}-001", hoy()));
+    }
+
+    #[test]
+    fn the_default_terminal_keeps_the_plain_folio_format() {
+        let conn = db_ventas();
+        assert!(next_folio(&conn).unwrap().starts_with("V-"));
+        assert_eq!(terminal_id(&conn), "01");
     }
 
     #[test]

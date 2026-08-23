@@ -72,6 +72,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "015_datos_fiscales",
             include_str!("../../migrations/015_datos_fiscales.sql"),
         ),
+        (
+            "016_terminal",
+            include_str!("../../migrations/016_terminal.sql"),
+        ),
     ];
 
     for (name, sql) in migrations {
@@ -117,7 +121,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 15);
+        assert_eq!(applied, 16);
     }
 
     #[test]
@@ -127,7 +131,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 15);
+        assert_eq!(applied, 16);
     }
 
     #[test]
