@@ -398,7 +398,7 @@ pub fn print_layaway_receipt(
         b.separator().line("Abonos");
         for (date, amount, method) in payments {
             b.pair(
-                &format!("{} {}", &date.chars().take(10).collect::<String>(), method_label(&method)),
+                &format!("{} {}", date.chars().take(10).collect::<String>(), method_label(&method)),
                 &money(&symbol, amount),
             );
         }
