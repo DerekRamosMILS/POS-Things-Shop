@@ -3,15 +3,24 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
+import HardwareSettings from '../components/HardwareSettings';
 import type { SystemConfig } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { useSessionStore } from '../stores/useSessionStore';
 
-const NUMERIC_KEYS = ['tax_rate', 'low_stock_threshold', 'max_backups', 'session_hours', 'log_retention_days'];
+const NUMERIC_KEYS = ['tax_rate', 'low_stock_threshold', 'max_backups', 'session_hours',
+    'log_retention_days', 'scanner_max_gap_ms', 'scanner_min_length', 'printer_width'];
 const MULTILINE_KEYS = ['ticket_footer'];
 // Kept out of the editable grid: it is plumbing, not a shop setting.
 const HIDDEN_KEYS = ['demo_seeded', 'update_endpoint'];
+// Estas se editan en su propia tarjeta, no en la reja genérica de la tienda.
+const HARDWARE_KEYS = [
+    'printer_name', 'printer_width', 'printer_auto_print',
+    'drawer_kick_command', 'drawer_open_on_cash',
+    'scanner_enabled', 'scanner_suffix', 'scanner_prefix',
+    'scanner_max_gap_ms', 'scanner_min_length',
+];
 
 // ─── Inline SVGs ─────────────────────────────────────────────────────────────
 const IcoSave     = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>;
@@ -204,7 +213,7 @@ export default function SettingsPage() {
                     Datos de la Tienda
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14 }}>
-                    {configs.map(cfg => {
+                    {configs.filter(cfg => !HARDWARE_KEYS.includes(cfg.key)).map(cfg => {
                         const changed = values[cfg.key] !== cfg.value;
                         const borderColor = changed ? 'rgba(240,197,71,0.5)' : undefined;
                         return (
@@ -272,6 +281,12 @@ export default function SettingsPage() {
                     </div>
                 )}
             </div>
+
+            {/* Hardware del mostrador */}
+            <HardwareSettings
+                values={values}
+                onChange={(key, value) => setValues(v => ({ ...v, [key]: value }))}
+            />
 
             {/* Security + maintenance */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14 }}>

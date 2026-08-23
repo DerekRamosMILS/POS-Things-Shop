@@ -164,6 +164,8 @@ export interface CreateSaleDto {
     discount_total: number;
     notes?: string | null;
     customer_id?: number | null;
+    /** Id único del intento de cobro; evita duplicar la venta si se reenvía. */
+    client_request_id?: string;
 }
 
 export interface CreateSaleItemDto {
@@ -217,6 +219,10 @@ export interface CashRegister {
     total_cash_sales: number;
     total_card_sales: number;
     total_transfer_sales: number;
+    total_layaway_cash: number;
+    total_layaway_card: number;
+    total_layaway_transfer: number;
+    total_refunds_cash: number;
     total_expenses: number;
     sale_count: number;
     status: string;
@@ -402,6 +408,8 @@ export interface PriceHistoryEntry {
 export interface CreateReturnDto {
     sale_id: number;
     reason: string | null;
+    /** Cómo se le devolvió el dinero; solo 'cash' sale del cajón. */
+    refund_method: string;
     items: { sale_item_id: number; quantity: number }[];
 }
 

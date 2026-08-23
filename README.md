@@ -91,6 +91,75 @@ pueda operar. Mínimo 8 caracteres; tras 5 intentos fallidos la cuenta se bloque
 Los equipos que ya tenían el sistema instalado también quedan obligados a rotar
 la contraseña de `admin` al actualizar.
 
+## Hardware de mostrador
+
+Nada está atado a una marca concreta. Lo que cambia entre modelos se configura
+desde **Ajustes → Impresora / Lector**, no en el código.
+
+### Lector de código de barras
+
+Los lectores se presentan al sistema como un teclado: "teclean" el código y
+terminan con una tecla. No requieren driver ni importa la simbología (EAN-13,
+UPC, Code128, QR, DataMatrix — todas entregan texto).
+
+Conecta el lector, abre **Ajustes → Lector de código de barras**, haz clic en
+"Prueba de lectura" y escanea cualquier producto: la app mide la velocidad real,
+detecta si termina con Enter, Tab o nada, y calcula los umbrales. Guarda y listo.
+
+La lectura se captura aunque el cursor esté dentro de un campo —en el mostrador
+casi siempre lo está— y el campo se restaura para que el código no quede pegado
+en el buscador.
+
+### Impresora de tickets y cajón de dinero
+
+El cajón de dinero **se conecta a la impresora**, no a la computadora: lleva un
+cable tipo telefónico (RJ11/RJ12) al puerto DK de la impresora, y esta lo abre al
+recibir una orden ESC/POS. Por eso ambos se configuran juntos.
+
+La app manda los tickets en ESC/POS directo al spooler de Windows en modo RAW.
+Eso significa que imprime sin abrir el diálogo del sistema, funciona con
+cualquier impresora que tenga driver instalado, y puede accionar el cajón.
+
+| Ajuste | Para qué |
+|---|---|
+| Impresora | Se elige de las instaladas en Windows |
+| Ancho del papel | 58 mm (32 caracteres) u 80 mm (48) |
+| Imprimir al cobrar | Ticket automático al cerrar la venta |
+| Abrir cajón con efectivo | Solo se abre si entró efectivo |
+| Comando del cajón | `1B 70 00 19 FA` (pin 2). Si no responde, prueba `1B 70 01 19 FA` (pin 5) |
+
+Los botones **Imprimir prueba** y **Probar cajón** confirman que el hardware
+responde antes de abrir la tienda. En Caja hay un botón **Abrir Cajón** para dar
+cambio sin cobrar.
+
+Si no se configura impresora, el sistema sigue funcionando igual e imprime por el
+diálogo del sistema, como antes.
+
+Los acentos se transliteran (`Niña` → `Nina`) porque la página de códigos por
+defecto varía entre modelos: un ticket legible en cualquier impresora vale más
+que uno con acentos en unas y basura en otras.
+
+### Qué comprar
+
+El combo estándar de retail es una **impresora térmica de 58 u 80 mm con puerto
+DK** más un **cajón con conector RJ11/RJ12**. Cualquier marca compatible con
+ESC/POS sirve; es lo más barato y lo mejor soportado.
+
+## Conciliación del efectivo
+
+El corte de caja calcula el efectivo esperado así:
+
+```
+fondo de apertura
++ ventas en efectivo
++ abonos de apartados en efectivo
+− devoluciones en efectivo
+− gastos
+```
+
+Cada uno de esos movimientos se registra contra el turno abierto en el momento en
+que ocurre, y el desglose se muestra al cerrar la caja.
+
 ## Seguridad
 
 - Contraseñas con Argon2 y salt por usuario
@@ -98,3 +167,5 @@ la contraseña de `admin` al actualizar.
 - Cada comando del backend resuelve el usuario desde su sesión; el frontend
   nunca decide quién ejecuta una operación
 - Reportes, usuarios, productos, proveedores y respaldos son solo de administrador
+- Cada cobro lleva un identificador único: reenviar el mismo devuelve la venta
+  original en vez de duplicarla

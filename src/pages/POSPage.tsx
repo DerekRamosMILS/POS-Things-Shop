@@ -4,6 +4,7 @@ import { useCartStore, cartLineId, lineIdOf, stockOf } from '../stores/useCartSt
 import { useSessionStore } from '../stores/useSessionStore';
 import { useHoldsStore, type ServiceType } from '../stores/useHoldsStore';
 import { formatCurrency } from '../utils';
+import { configFromSettings, createScannerHandler } from '../utils/scanner';
 import * as api from '../api';
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
@@ -189,6 +190,11 @@ export default function POSPage() {
     const [mixedCard, setMixedCard] = useState('');
     const [mixedTransfer, setMixedTransfer] = useState('');
     const [processing, setProcessing] = useState(false);
+    // Un id por intento de cobro: si el envío se repite (doble clic, reintento
+    // tras un cuelgue), el backend devuelve la venta original en vez de otra.
+    const chargeRequestId = useRef<string>(crypto.randomUUID());
+    // Id de la última venta, para poder reimprimir su ticket desde la base.
+    const lastSaleId = useRef<number | null>(null);
     const [lastSale, setLastSale] = useState<CompletedSale | null>(null);
 
     const [toasts, setToasts] = useState<Toast[]>([]);
@@ -202,8 +208,10 @@ export default function POSPage() {
     const [promoDropdown, setPromoDropdown] = useState(false);
 
     const searchRef = useRef<HTMLInputElement>(null);
-    const barcodeBuffer = useRef('');
-    const barcodeTimeout = useRef<number | null>(null);
+    // Los ajustes del lector viven en un ref para que el manejador global no se
+    // vuelva a montar cada vez que cambian.
+    const scannerConfig = useRef(configFromSettings({}));
+    const onScanRef = useRef<(code: string) => void>(() => {});
     const liveRef = useRef({ showPayment, items, lastSale });
     useEffect(() => { liveRef.current = { showPayment, items, lastSale }; });
 
@@ -227,6 +235,7 @@ export default function POSPage() {
                 const map: Record<string, string> = {};
                 cfg.forEach(c => { map[c.key] = c.value; });
                 setConfig(map);
+                scannerConfig.current = configFromSettings(map);
             } catch (err) { showToast(String(err), 'error'); }
             finally { setLoadingProducts(false); }
         })();
@@ -235,25 +244,18 @@ export default function POSPage() {
     // Keyboard shortcuts + barcode scanner
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            const target = e.target as HTMLElement;
-            const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
             const { showPayment: sp, items: its, lastSale: ls } = liveRef.current;
             if (e.key === 'F10') { e.preventDefault(); if (its.length > 0 && !sp && !ls) setShowPayment(true); return; }
             if (e.key === 'Escape' && sp) { e.preventDefault(); setShowPayment(false); return; }
             if (e.key === 'F2') { e.preventDefault(); searchRef.current?.focus(); return; }
-            // Barcode capture only when NOT typing in a field — otherwise typing
-            // in customer/notes/amount inputs would trigger false barcode scans.
-            if (isInput) return;
-            if (e.key === 'Enter' && barcodeBuffer.current.length >= 4) {
-                e.preventDefault();
-                const code = barcodeBuffer.current; barcodeBuffer.current = '';
-                handleBarcodeScan(code);
-            } else if (e.key.length === 1) {
-                barcodeBuffer.current += e.key;
-                if (barcodeTimeout.current) clearTimeout(barcodeTimeout.current);
-                barcodeTimeout.current = window.setTimeout(() => { barcodeBuffer.current = ''; }, 100);
-            }
+            scanner(e);
         };
+        // El escáner se captura aunque el foco esté en un campo: en el mostrador
+        // el cursor casi siempre está en el buscador, y ahí es donde más se lee.
+        const scanner = createScannerHandler({
+            getConfig: () => scannerConfig.current,
+            onScan: (code) => onScanRef.current(code),
+        });
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -279,6 +281,10 @@ export default function POSPage() {
         if (existing && existing.quantity >= product.stock) { showToast(`"${product.name}" ya alcanzó el máximo (${product.stock})`, 'warn'); return; }
         addItem(product);
     }, [addItem, showToast]);
+
+    // El manejador global es estable; esto mantiene apuntando a la versión
+    // actual sin volver a registrar el listener en cada render.
+    onScanRef.current = (code: string) => { handleBarcodeScan(code); };
 
     const handleBarcodeScan = async (code: string) => {
         try {
@@ -417,15 +423,26 @@ export default function POSPage() {
                 payment_method: paymentMethod, amount_paid: paid, payments,
                 discount_total: saleLineDiscount + promoDiscount,
                 customer_id: customerId,
+                client_request_id: chargeRequestId.current,
                 notes: [SERVICE_LABELS[serviceType], customerName ? `Cliente: ${customerName}` : '', activePromo ? `Promo: ${activePromo.name}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
             });
             setLastSale({ folio: sale.folio, total: sale.total, change: sale.change_amount, items: saleItems, subtotal: saleSubtotal, lineDiscountTotal: saleLineDiscount, promoDiscount, tax: saleTax, paymentMethod, amountPaid: paid, serviceType, customerName, orderNotes });
+            // Ticket térmico y apertura del cajón. Si no hay impresora
+            // configurada queda el botón de imprimir por diálogo del sistema.
+            lastSaleId.current = sale.id;
+            if (config.printer_auto_print !== '0') {
+                api.printSaleReceipt(sale.id).catch((err) => {
+                    if (String(err).includes('SIN_IMPRESORA')) return;
+                    showToast(`No se pudo imprimir el ticket: ${err}`, 'error');
+                });
+            }
             // Reflect the sold units in the on-screen catalog immediately.
             const soldMap = new Map<number, number>();
             saleItems.forEach(i => soldMap.set(i.product.id, (soldMap.get(i.product.id) || 0) + i.quantity));
             const applySold = (list: Product[]) => list.map(p => soldMap.has(p.id) ? { ...p, stock: Math.max(0, p.stock - (soldMap.get(p.id) || 0)) } : p);
             setAllProducts(applySold);
             setSearchResults(applySold);
+            chargeRequestId.current = crypto.randomUUID();
             clear(); setShowPayment(false); setAmountPaid(''); setMixedCard(''); setMixedTransfer(''); setCustomerName(''); setCustomerId(null); setOrderNotes(''); setActivePromo(null); setPromoInput('');
             setOrderSeq(prev => prev + 1);
         } catch (err) { showToast(String(err), 'error'); }
@@ -461,7 +478,26 @@ export default function POSPage() {
         finally { setProcessing(false); }
     };
 
-    const handlePrint = () => {
+    /// Reimpresión manual: intenta el ticket térmico y, si no hay impresora
+    /// configurada, cae al diálogo del sistema con el ticket en HTML.
+    const handlePrint = async () => {
+        if (!lastSale) return;
+        if (lastSaleId.current !== null && config.printer_name) {
+            try {
+                await api.printSaleReceipt(lastSaleId.current, false);
+                showToast('Ticket enviado a la impresora');
+                return;
+            } catch (err) {
+                if (!String(err).includes('SIN_IMPRESORA')) {
+                    showToast(`Impresora: ${err}`, 'error');
+                    return;
+                }
+            }
+        }
+        printReceiptDialog();
+    };
+
+    const printReceiptDialog = () => {
         if (!lastSale) return;
         const html = buildReceiptHTML(lastSale, storeInfo);
         // Hidden iframe printing works reliably inside the Tauri webview,

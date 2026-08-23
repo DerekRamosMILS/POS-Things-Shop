@@ -2,6 +2,7 @@ use chrono::Local;
 use rusqlite::params;
 use tauri::State;
 
+use crate::commands::cash_register::open_register_id;
 use crate::db::connection::DbState;
 use crate::session::{require_admin, require_auth, SessionState};
 use crate::models::layaway::{
@@ -43,6 +44,48 @@ fn row_to_layaway(row: &rusqlite::Row) -> rusqlite::Result<Layaway> {
         items: None,
         payments: None,
     })
+}
+
+/// Column on `cash_registers` that accumulates layaway deposits per method.
+fn layaway_register_field(method: &str) -> &'static str {
+    match method {
+        "card" => "total_layaway_card",
+        "transfer" => "total_layaway_transfer",
+        _ => "total_layaway_cash",
+    }
+}
+
+/// Record a layaway deposit against the open shift. Without this the money is in
+/// the drawer but the close-out never sees it, so the cut reports a surplus.
+fn post_layaway_payment(
+    db: &rusqlite::Connection,
+    layaway_id: i64,
+    amount: f64,
+    method: &str,
+    user_id: i64,
+) -> Result<(), String> {
+    let register_id = open_register_id(db);
+
+    db.execute(
+        "INSERT INTO layaway_payments (layaway_id, amount, payment_method, user_id, cash_register_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![layaway_id, amount, method, user_id, register_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    if let Some(cr_id) = register_id {
+        db.execute(
+            &format!(
+                "UPDATE cash_registers SET {} = {} + ?1 WHERE id = ?2",
+                layaway_register_field(method),
+                layaway_register_field(method)
+            ),
+            params![amount, cr_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -143,10 +186,7 @@ pub fn create_layaway(state: State<DbState>, sessions: State<SessionState>, toke
         }
 
         if data.initial_payment > 0.0 {
-            db.execute(
-                "INSERT INTO layaway_payments (layaway_id, amount, payment_method, user_id) VALUES (?1, ?2, ?3, ?4)",
-                params![layaway_id, data.initial_payment, data.payment_method, user_id],
-            ).map_err(|e| e.to_string())?;
+            post_layaway_payment(&db, layaway_id, data.initial_payment, &data.payment_method, user_id)?;
         }
 
         db.execute(
@@ -228,10 +268,7 @@ pub fn add_layaway_payment(
         return Err("El abono supera el saldo pendiente".to_string());
     }
 
-    db.execute(
-        "INSERT INTO layaway_payments (layaway_id, amount, payment_method, user_id) VALUES (?1, ?2, ?3, ?4)",
-        params![layaway_id, amount, payment_method, user_id],
-    ).map_err(|e| e.to_string())?;
+    post_layaway_payment(&db, layaway_id, amount, &payment_method, user_id)?;
     db.execute(
         "UPDATE layaways SET paid = paid + ?1 WHERE id = ?2",
         params![amount, layaway_id],

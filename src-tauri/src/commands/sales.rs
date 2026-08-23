@@ -95,22 +95,27 @@ pub fn create_sale(
         return Err("La venta no tiene productos".to_string());
     }
 
+    // Idempotency: a retried or double-fired charge must not become two sales.
+    if let Some(ref rid) = data.client_request_id {
+        if let Ok(existing_id) = db.query_row(
+            "SELECT id FROM sales WHERE client_request_id = ?1",
+            params![rid],
+            |row| row.get::<_, i64>(0),
+        ) {
+            log::warn!("Cobro repetido ignorado (request {}), se devuelve la venta {}", rid, existing_id);
+            return get_sale_by_id(&db, existing_id);
+        }
+    }
+
     // Begin atomic transaction
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let result = (|| -> Result<Sale, String> {
         // A sale requires an OPEN cash register. Derive it from the DB instead of
         // trusting the (possibly stale) id persisted in the client.
-        let register_id: i64 = match db.query_row(
-            "SELECT id FROM cash_registers WHERE status = 'open' ORDER BY opened_at DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        ) {
-            Ok(id) => id,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                return Err("La caja no está abierta. Ábrela antes de cobrar.".to_string())
-            }
-            Err(e) => return Err(e.to_string()),
+        let register_id: i64 = match crate::commands::cash_register::open_register_id(&db) {
+            Some(id) => id,
+            None => return Err("La caja no está abierta. Ábrela antes de cobrar.".to_string()),
         };
         if let Some(cr) = cash_register_id {
             if cr != register_id {
@@ -226,12 +231,13 @@ pub fn create_sale(
 
         // Insert sale
         db.execute(
-            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id, client_request_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 folio, user_id, register_id, subtotal,
                 discount_total, tax, total, payment_method,
-                amount_paid, change_amount, data.notes, data.customer_id
+                amount_paid, change_amount, data.notes, data.customer_id,
+                data.client_request_id
             ],
         ).map_err(|e| e.to_string())?;
 

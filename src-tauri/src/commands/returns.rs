@@ -2,6 +2,7 @@ use rusqlite::params;
 use serde::Deserialize;
 use tauri::State;
 
+use crate::commands::cash_register::open_register_id;
 use crate::db::connection::DbState;
 use crate::session::{require_admin, SessionState};
 
@@ -19,12 +20,22 @@ pub struct ReturnItemDto {
 pub struct CreateReturnDto {
     pub sale_id: i64,
     pub reason: Option<String>,
+    /// Cómo se le regresó el dinero al cliente: "cash", "card" o "transfer".
+    /// Solo el efectivo sale del cajón.
+    #[serde(default = "default_refund_method")]
+    pub refund_method: String,
     pub items: Vec<ReturnItemDto>,
+}
+
+fn default_refund_method() -> String {
+    "cash".to_string()
 }
 
 /// Register a (partial or full) return: restocks inventory, records the movement,
 /// tracks returned_quantity per line, and marks the sale 'returned' when fully returned.
-/// Note: cash drawer / revenue are intentionally NOT auto-adjusted here.
+///
+/// A cash refund physically empties the drawer, so it is subtracted from the open
+/// shift; card and transfer refunds are recorded but leave the drawer untouched.
 #[tauri::command]
 pub fn create_return(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateReturnDto) -> Result<f64, String> {
     let user_id = require_admin(&sessions, &token)?;
@@ -83,11 +94,30 @@ pub fn create_return(state: State<DbState>, sessions: State<SessionState>, token
         }
         total_refund = round2(total_refund);
 
+        let register_id = open_register_id(&db);
+
         db.execute(
-            "INSERT INTO returns (sale_id, user_id, total_refund, reason) VALUES (?1, ?2, ?3, ?4)",
-            params![data.sale_id, user_id, total_refund, data.reason],
+            "INSERT INTO returns (sale_id, user_id, total_refund, reason, refund_method, cash_register_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![data.sale_id, user_id, total_refund, data.reason, data.refund_method, register_id],
         ).map_err(|e| e.to_string())?;
         let return_id = db.last_insert_rowid();
+
+        if data.refund_method == "cash" && total_refund > 0.0 {
+            match register_id {
+                Some(cr_id) => {
+                    db.execute(
+                        "UPDATE cash_registers SET total_refunds_cash = total_refunds_cash + ?1 WHERE id = ?2",
+                        params![total_refund, cr_id],
+                    ).map_err(|e| e.to_string())?;
+                }
+                // Sin turno abierto no hay de dónde sacar el efectivo sin
+                // descuadrar el siguiente corte.
+                None => return Err(
+                    "Abre la caja antes de devolver en efectivo.".to_string()
+                ),
+            }
+        }
 
         for ri in &ris {
             db.execute(

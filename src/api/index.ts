@@ -249,8 +249,8 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'open_register': {
             webOpenRegister = {
                 id: 1,
-                user_id: args?.userId as number,
-                user_name: webUsers.find(u => u.id === (args?.userId as number))?.full_name ?? 'Web User',
+                user_id: 1,
+                user_name: webUsers[0].full_name,
                 opening_amount: (args?.data as { opening_amount: number }).opening_amount,
                 closing_amount: null,
                 expected_amount: null,
@@ -259,6 +259,10 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
                 total_cash_sales: 0,
                 total_card_sales: 0,
                 total_transfer_sales: 0,
+                total_layaway_cash: 0,
+                total_layaway_card: 0,
+                total_layaway_transfer: 0,
+                total_refunds_cash: 0,
                 total_expenses: 0,
                 sale_count: 0,
                 status: 'open',
@@ -329,6 +333,16 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
 
         case 'get_backup_list':
             return [] as unknown as T;
+
+        case 'list_printers':
+            return ['Impresora de ejemplo (modo web)'] as unknown as T;
+
+        case 'open_cash_drawer':
+        case 'test_printer':
+            throw new Error('El hardware solo está disponible en la app de escritorio');
+
+        case 'print_sale_receipt':
+            throw new Error('SIN_IMPRESORA');
 
         case 'get_log_path':
             return '(no disponible en modo web)' as unknown as T;
@@ -497,6 +511,14 @@ export const createBackup = () => invoke<string>('create_backup');
 export const exportDatabase = (path: string) => invoke<void>('export_database', { path });
 export const getBackupList = () => invoke<string[]>('get_backup_list');
 export const getLogPath = () => invoke<string>('get_log_path');
+
+// Hardware de mostrador
+export const listPrinters = () => invoke<string[]>('list_printers');
+export const openCashDrawer = () => invoke<void>('open_cash_drawer');
+export const testPrinter = (printer: string | null, openDrawer: boolean) =>
+    invoke<void>('test_printer', { printer, openDrawer });
+export const printSaleReceipt = (saleId: number, openDrawer?: boolean) =>
+    invoke<void>('print_sale_receipt', { saleId, openDrawer });
 export const restoreBackup = (filename: string) => invoke<string>('restore_backup', { filename });
 
 // Demo data

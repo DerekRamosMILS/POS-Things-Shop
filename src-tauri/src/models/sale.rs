@@ -50,6 +50,11 @@ pub struct CreateSaleDto {
     pub notes: Option<String>,
     #[serde(default)]
     pub customer_id: Option<i64>,
+    /// Identificador único del intento de cobro, generado por el cliente.
+    /// Si el mismo llega dos veces se devuelve la venta original en vez de
+    /// duplicarla (doble clic, reintento tras un cuelgue del webview).
+    #[serde(default)]
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

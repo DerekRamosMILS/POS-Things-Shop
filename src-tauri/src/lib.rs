@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod hardware;
 mod logging;
 mod models;
 mod session;
@@ -152,6 +153,11 @@ pub fn run() {
             layaways::add_layaway_payment,
             layaways::complete_layaway,
             layaways::cancel_layaway,
+            // Hardware de mostrador
+            hardware::list_printers,
+            hardware::open_cash_drawer,
+            hardware::test_printer,
+            hardware::print_sale_receipt,
             // Demo data
             seed::seed_demo_data,
         ])

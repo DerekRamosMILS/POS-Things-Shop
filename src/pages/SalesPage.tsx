@@ -42,6 +42,7 @@ export default function SalesPage() {
     const [returnMode, setReturnMode] = useState(false);
     const [returnQtys, setReturnQtys] = useState<Record<number, number>>({});
     const [returnReason, setReturnReason] = useState('');
+    const [refundMethod, setRefundMethod] = useState('cash');
     const [processing, setProcessing] = useState(false);
 
     const handleReturn = async () => {
@@ -52,7 +53,7 @@ export default function SalesPage() {
         if (items.length === 0) { showToast('Selecciona cantidades a devolver', 'error'); return; }
         setProcessing(true);
         try {
-            await api.createReturn({ sale_id: detail.id, reason: returnReason || null, items });
+            await api.createReturn({ sale_id: detail.id, reason: returnReason || null, refund_method: refundMethod, items });
             showToast('Devolución registrada', 'success');
             const fresh = await api.getSaleDetail(detail.id);
             setDetail(fresh); setReturnMode(false); setReturnQtys({}); setReturnReason('');
@@ -278,9 +279,19 @@ export default function SalesPage() {
                             </div>
 
                             {returnMode && (
-                                <div>
-                                    <label className="form-label">Motivo (opcional)</label>
-                                    <input value={returnReason} onChange={e => setReturnReason(e.target.value)} className="input" placeholder="Ej. Talla equivocada" />
+                                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+                                    <div>
+                                        <label className="form-label">Motivo (opcional)</label>
+                                        <input value={returnReason} onChange={e => setReturnReason(e.target.value)} className="input" placeholder="Ej. Talla equivocada" />
+                                    </div>
+                                    <div>
+                                        <label className="form-label">Se devuelve en</label>
+                                        <select value={refundMethod} onChange={e => setRefundMethod(e.target.value)} className="input">
+                                            <option value="cash">Efectivo</option>
+                                            <option value="card">Tarjeta</option>
+                                            <option value="transfer">Transferencia</option>
+                                        </select>
+                                    </div>
                                 </div>
                             )}
 

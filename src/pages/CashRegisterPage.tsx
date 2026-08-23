@@ -19,6 +19,12 @@ export default function CashRegisterPage() {
     const [loading, setLoading] = useState(true);
     const [showOpen, setShowOpen] = useState(false);
     const [showClose, setShowClose] = useState(false);
+
+    /// Apertura manual del cajón, para dar cambio sin cobrar nada.
+    const handleOpenDrawer = async () => {
+        try { await api.openCashDrawer(); }
+        catch (err) { showToast(String(err), 'error'); }
+    };
     const [showExpense, setShowExpense] = useState(false);
     const [openAmount, setOpenAmount] = useState('');
     const [closeAmount, setCloseAmount] = useState('');
@@ -75,7 +81,20 @@ export default function CashRegisterPage() {
     );
 
     const closedHistory = history.filter(h => h.status === 'closed');
-    const expectedCash = register ? register.opening_amount + register.total_cash_sales - register.total_expenses : 0;
+    // Debe reflejar exactamente el mismo cálculo que expected_cash() en el
+    // backend: todo lo que entra o sale del cajón en billetes.
+    const cashLines = register ? [
+        { label: 'Fondo de apertura', amount: register.opening_amount },
+        { label: 'Ventas en efectivo', amount: register.total_cash_sales },
+        { label: 'Abonos de apartados', amount: register.total_layaway_cash },
+        { label: 'Devoluciones en efectivo', amount: -register.total_refunds_cash },
+        { label: 'Gastos', amount: -register.total_expenses },
+    ].filter(l => l.amount !== 0) : [];
+
+    const expectedCash = register
+        ? Math.round((register.opening_amount + register.total_cash_sales + register.total_layaway_cash
+            - register.total_refunds_cash - register.total_expenses) * 100) / 100
+        : 0;
     const closeDifference = register ? (parseFloat(closeAmount) || 0) - expectedCash : 0;
 
     return (
@@ -93,6 +112,9 @@ export default function CashRegisterPage() {
                         </button>
                     ) : (
                         <>
+                            <button onClick={handleOpenDrawer} className="btn btn-ghost" style={{ gap: 7 }}>
+                                <IcoUnlock /> Abrir Cajón
+                            </button>
                             <button onClick={() => setShowExpense(true)} className="btn btn-primary" style={{ gap: 7 }}>
                                 <IcoPlus /> Registrar Gasto
                             </button>
@@ -210,9 +232,21 @@ export default function CashRegisterPage() {
                         <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)', marginBottom: 20 }}>Cerrar Caja</h3>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                             {register && (
-                                <div style={{ padding: '14px 18px', borderRadius: 14, background: 'rgba(139,120,245,0.08)', border: '1px solid rgba(139,120,245,0.2)', textAlign: 'center' }}>
-                                    <p style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--primary)', marginBottom: 6 }}>Efectivo Esperado</p>
-                                    <p style={{ fontSize: 26, fontWeight: 900, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>{formatCurrency(expectedCash)}</p>
+                                <div style={{ padding: '14px 18px', borderRadius: 14, background: 'rgba(139,120,245,0.08)', border: '1px solid rgba(139,120,245,0.2)' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}>
+                                        {cashLines.map(l => (
+                                            <div key={l.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--t3)' }}>
+                                                <span>{l.label}</span>
+                                                <span style={{ fontVariantNumeric: 'tabular-nums', color: l.amount < 0 ? 'var(--danger)' : 'var(--t2)' }}>
+                                                    {l.amount < 0 ? '-' : ''}{formatCurrency(Math.abs(l.amount))}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div style={{ borderTop: '1px solid rgba(139,120,245,0.2)', paddingTop: 10, textAlign: 'center' }}>
+                                        <p style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--primary)', marginBottom: 6 }}>Efectivo Esperado</p>
+                                        <p style={{ fontSize: 26, fontWeight: 900, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>{formatCurrency(expectedCash)}</p>
+                                    </div>
                                 </div>
                             )}
                             <div>

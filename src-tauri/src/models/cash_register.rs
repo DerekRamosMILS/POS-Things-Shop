@@ -13,6 +13,12 @@ pub struct CashRegister {
     pub total_cash_sales: f64,
     pub total_card_sales: f64,
     pub total_transfer_sales: f64,
+    /// Abonos de apartados cobrados durante este turno, por método.
+    pub total_layaway_cash: f64,
+    pub total_layaway_card: f64,
+    pub total_layaway_transfer: f64,
+    /// Devoluciones pagadas en efectivo: salen del cajón.
+    pub total_refunds_cash: f64,
     pub total_expenses: f64,
     pub sale_count: i32,
     pub status: String,
