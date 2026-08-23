@@ -3,6 +3,7 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::cash_register::{CashRegister, CloseRegisterDto, OpenRegisterDto};
+use crate::money::Cents;
 use crate::session::{require_auth, SessionState};
 
 /// Explicit column list: `cr.*` would silently shift every index the moment a
@@ -43,10 +44,13 @@ fn map_register(row: &rusqlite::Row) -> rusqlite::Result<CashRegister> {
 /// reports a phantom surplus/shortfall: sales in cash come in, layaway deposits in
 /// cash come in, cash refunds go out, and petty-cash expenses go out.
 pub fn expected_cash(r: &CashRegister) -> f64 {
-    let raw = r.opening_amount + r.total_cash_sales + r.total_layaway_cash
-        - r.total_refunds_cash
-        - r.total_expenses;
-    (raw * 100.0).round() / 100.0
+    let p = Cents::from_pesos;
+    // En centavos enteros: un turno con cientos de movimientos no acumula el
+    // error de redondeo que arrastraría sumar f64 uno tras otro.
+    let expected = p(r.opening_amount) + p(r.total_cash_sales) + p(r.total_layaway_cash)
+        - p(r.total_refunds_cash)
+        - p(r.total_expenses);
+    expected.to_pesos()
 }
 
 /// Id of the shift currently open, if any. Shared by sales, layaways and returns
@@ -103,7 +107,8 @@ pub fn close_register(state: State<DbState>, sessions: State<SessionState>, toke
     let register = get_open_register_internal(&db)?;
 
     let expected = expected_cash(&register);
-    let difference = ((data.closing_amount - expected) * 100.0).round() / 100.0;
+    let difference =
+        (Cents::from_pesos(data.closing_amount) - Cents::from_pesos(expected)).to_pesos();
 
     db.execute(
         "UPDATE cash_registers SET closing_amount=?1, expected_amount=?2, difference=?3, status='closed', closed_at=datetime('now','localtime') WHERE id=?4",
@@ -113,7 +118,7 @@ pub fn close_register(state: State<DbState>, sessions: State<SessionState>, toke
     db.execute(
         "INSERT INTO app_logs (level, module, message, user_id) VALUES (?1, 'caja', ?2, ?3)",
         params![
-            if difference.abs() > 0.009 { "warn" } else { "info" },
+            if Cents::from_pesos(difference).abs().is_positive() { "warn" } else { "info" },
             format!(
                 "Caja cerrada: esperado {}, contado {}, diferencia {}",
                 expected, data.closing_amount, difference
@@ -249,5 +254,18 @@ mod tests {
     fn the_result_is_rounded_to_cents() {
         let r = CashRegister { total_cash_sales: 0.1, total_layaway_cash: 0.2, ..register() };
         assert_eq!(expected_cash(&r), 1000.30);
+    }
+
+    #[test]
+    fn many_small_movements_do_not_drift_a_single_cent() {
+        // Sumar 0.1 + 0.2 en f64 da 0.30000000000000004; en centavos, 0.30.
+        let r = CashRegister {
+            opening_amount: 0.0,
+            total_cash_sales: 0.1,
+            total_layaway_cash: 0.2,
+            total_expenses: 0.3,
+            ..register()
+        };
+        assert_eq!(expected_cash(&r), 0.0);
     }
 }

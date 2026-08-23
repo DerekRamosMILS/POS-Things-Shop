@@ -79,10 +79,19 @@ pub fn init_db() -> Result<Connection, rusqlite::Error> {
     Ok(conn)
 }
 
+/// Nombre del archivo que `restore_backup` deja preparado para el próximo arranque.
+pub const PENDING_RESTORE: &str = "things_shop.db.restore-pending";
+
 /// Replace the main DB with a staged restore (created by `restore_backup`),
 /// clearing any leftover WAL/SHM sidecar files so the restored data is used.
-fn apply_pending_restore(db_path: &std::path::Path) {
-    let pending = get_db_dir().join("things_shop.db.restore-pending");
+///
+/// Se deriva del propio `db_path` en vez de consultar el directorio global para
+/// que la lógica pueda probarse sobre un directorio temporal.
+pub fn apply_pending_restore(db_path: &std::path::Path) {
+    let pending = match db_path.parent() {
+        Some(dir) => dir.join(PENDING_RESTORE),
+        None => return,
+    };
     if !pending.exists() {
         return;
     }

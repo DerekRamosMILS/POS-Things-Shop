@@ -3,6 +3,7 @@ mod db;
 mod hardware;
 mod logging;
 mod models;
+mod money;
 mod session;
 
 use commands::{

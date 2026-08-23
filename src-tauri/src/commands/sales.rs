@@ -4,6 +4,7 @@ use chrono::Local;
 
 use crate::db::connection::DbState;
 use crate::models::sale::{CreateSaleDto, PaymentSplitDto, Sale, SaleFilters, SaleItem};
+use crate::money::Cents;
 use crate::session::{require_admin, require_auth, SessionState};
 
 /// Read a numeric system_config value, falling back to `default` when missing/invalid.
@@ -16,10 +17,6 @@ fn config_number(db: &rusqlite::Connection, key: &str, default: f64) -> f64 {
     .ok()
     .and_then(|s| s.trim().parse::<f64>().ok())
     .unwrap_or(default)
-}
-
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
 }
 
 /// Cash register column that accumulates a given payment method.
@@ -35,37 +32,41 @@ fn register_field(method: &str) -> &'static str {
 ///
 /// Only cash can be over-tendered (the surplus becomes change), so the non-cash
 /// legs must not exceed the total. Returns the applied splits plus the change.
-fn split_tender(payments: &[PaymentSplitDto], total: f64) -> Result<(Vec<PaymentSplitDto>, f64), String> {
-    let mut non_cash = 0.0;
-    let mut cash = 0.0;
+fn split_tender(
+    payments: &[PaymentSplitDto],
+    total: Cents,
+) -> Result<(Vec<(String, Cents)>, Cents), String> {
+    let mut non_cash = Cents::ZERO;
+    let mut cash = Cents::ZERO;
     for p in payments {
-        if p.amount <= 0.0 {
+        let amount = Cents::from_pesos(p.amount);
+        if !amount.is_positive() {
             return Err("Cada forma de pago debe ser mayor a cero".to_string());
         }
         if p.method == "cash" {
-            cash += p.amount;
+            cash = cash + amount;
         } else {
-            non_cash += p.amount;
+            non_cash = non_cash + amount;
         }
     }
 
-    if non_cash > total + 0.001 {
+    if non_cash > total {
         return Err("Los pagos que no son en efectivo superan el total de la venta".to_string());
     }
-    if cash + non_cash + 0.001 < total {
+    if cash + non_cash < total {
         return Err("El monto recibido es insuficiente".to_string());
     }
 
-    let cash_applied = round2((total - non_cash).max(0.0));
-    let change = round2((cash - cash_applied).max(0.0));
+    let cash_applied = (total - non_cash).clamp_non_negative();
+    let change = (cash - cash_applied).clamp_non_negative();
 
-    let mut applied: Vec<PaymentSplitDto> = payments
+    let mut applied: Vec<(String, Cents)> = payments
         .iter()
         .filter(|p| p.method != "cash")
-        .map(|p| PaymentSplitDto { method: p.method.clone(), amount: round2(p.amount) })
+        .map(|p| (p.method.clone(), Cents::from_pesos(p.amount)))
         .collect();
-    if cash_applied > 0.0 {
-        applied.push(PaymentSplitDto { method: "cash".to_string(), amount: cash_applied });
+    if cash_applied.is_positive() {
+        applied.push(("cash".to_string(), cash_applied));
     }
 
     Ok((applied, change))
@@ -79,8 +80,8 @@ fn split_tender(payments: &[PaymentSplitDto], total: f64) -> Result<(Vec<Payment
 fn promotion_discount(
     db: &rusqlite::Connection,
     promotion_id: i64,
-    lines: &[(i64, Option<i64>, f64)],
-) -> Result<f64, String> {
+    lines: &[(i64, Option<i64>, Cents)],
+) -> Result<Cents, String> {
     let promo: Option<(String, f64, String, Option<i64>)> = db
         .query_row(
             "SELECT discount_type, discount_value, applies_to, target_id
@@ -95,33 +96,32 @@ fn promotion_discount(
 
     let Some((discount_type, value, applies_to, target_id)) = promo else {
         log::warn!("Promoción {} ignorada: no existe, está inactiva o venció", promotion_id);
-        return Ok(0.0);
+        return Ok(Cents::ZERO);
     };
 
     if value <= 0.0 {
-        return Ok(0.0);
+        return Ok(Cents::ZERO);
     }
 
     // Base: solo lo que la promoción alcanza, ya neto de descuentos de línea.
-    let base: f64 = lines
+    let base: Cents = lines
         .iter()
         .filter(|(product_id, category_id, _)| match applies_to.as_str() {
             "category" => *category_id == target_id,
             "product" => Some(*product_id) == target_id,
             _ => true,
         })
-        .map(|(_, _, net)| net)
+        .map(|(_, _, net)| *net)
         .sum();
 
-    if base <= 0.0 {
-        return Ok(0.0);
+    if !base.is_positive() {
+        return Ok(Cents::ZERO);
     }
 
-    let discount = match discount_type.as_str() {
-        "percentage" => base * (value.min(100.0) / 100.0),
-        _ => value.min(base),
-    };
-    Ok(round2(discount))
+    Ok(match discount_type.as_str() {
+        "percentage" => base.percent(value.min(100.0)),
+        _ => Cents::from_pesos(value).min(base),
+    })
 }
 
 /// Human-readable label for a variant, e.g. "M / Negro".
@@ -192,16 +192,16 @@ pub fn create_sale(
             name: String,
             sku: String,
             quantity: i32,
-            unit_price: f64,
-            unit_cost: f64,
-            discount: f64,
-            line_subtotal: f64,
+            unit_price: Cents,
+            unit_cost: Cents,
+            discount: Cents,
+            line_subtotal: Cents,
             prev_stock: i32,
             variant_id: Option<i64>,
             variant_label: Option<String>,
         }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
-        let mut subtotal = 0.0; // gross, before any discount
+        let mut subtotal = Cents::ZERO; // bruto, antes de cualquier descuento
 
         for item in &data.items {
             if item.quantity <= 0 {
@@ -238,10 +238,12 @@ pub fn create_sale(
             }
 
             // Un descuento de línea nunca puede superar lo que vale la línea.
-            let gross = round2(price * item.quantity as f64);
-            let discount = round2(item.discount.clamp(0.0, gross));
-            let line_subtotal = round2(gross - discount);
-            subtotal += gross;
+            let gross = Cents::from_pesos(price).times(item.quantity as i64);
+            let discount = Cents::from_pesos(item.discount)
+                .clamp_non_negative()
+                .min(gross);
+            let line_subtotal = gross - discount;
+            subtotal = subtotal + gross;
 
             lines.push(Line {
                 product_id: item.product_id,
@@ -249,8 +251,8 @@ pub fn create_sale(
                 name,
                 sku,
                 quantity: item.quantity,
-                unit_price: price,
-                unit_cost: cost,
+                unit_price: Cents::from_pesos(price),
+                unit_cost: Cents::from_pesos(cost),
                 discount,
                 line_subtotal,
                 prev_stock: product_stock,
@@ -259,30 +261,32 @@ pub fn create_sale(
             });
         }
 
-        subtotal = round2(subtotal);
-
         // El importe del descuento se calcula aquí, no se acepta del cliente.
-        let line_discount_total: f64 = round2(lines.iter().map(|l| l.discount).sum());
-        let promo_base: Vec<(i64, Option<i64>, f64)> = lines
+        let line_discount_total: Cents = lines.iter().map(|l| l.discount).sum();
+        let promo_base: Vec<(i64, Option<i64>, Cents)> = lines
             .iter()
             .map(|l| (l.product_id, l.category_id, l.line_subtotal))
             .collect();
         let promo_discount = match data.promotion_id {
             Some(id) => promotion_discount(&db, id, &promo_base)?,
-            None => 0.0,
+            None => Cents::ZERO,
         };
 
-        let discount_total = round2((line_discount_total + promo_discount).min(subtotal));
-        let taxable = round2((subtotal - discount_total).max(0.0));
+        let discount_total = (line_discount_total + promo_discount).min(subtotal);
+        let taxable = (subtotal - discount_total).clamp_non_negative();
         let tax_rate = config_number(&db, "tax_rate", 0.0);
-        let tax = round2(taxable * tax_rate / 100.0);
-        let total = round2(taxable + tax);
+        let tax = taxable.percent(tax_rate);
+        let total = taxable + tax;
 
         // Normalise the tender. A single-method sale is just a one-leg split.
         let tender: Vec<PaymentSplitDto> = if data.payments.is_empty() {
             vec![PaymentSplitDto {
                 method: data.payment_method.clone(),
-                amount: if data.payment_method == "cash" { data.amount_paid } else { total },
+                amount: if data.payment_method == "cash" {
+                    data.amount_paid
+                } else {
+                    total.to_pesos()
+                },
             }]
         } else {
             data.payments.clone()
@@ -293,18 +297,18 @@ pub fn create_sale(
         let payment_method = if applied.len() > 1 {
             "mixed".to_string()
         } else {
-            applied[0].method.clone()
+            applied[0].0.clone()
         };
-        let amount_paid = round2(applied.iter().map(|p| p.amount).sum::<f64>() + change_amount);
+        let amount_paid = applied.iter().map(|(_, a)| *a).sum::<Cents>() + change_amount;
 
         // Insert sale
         db.execute(
             "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id, client_request_id, promotion_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
-                folio, user_id, register_id, subtotal,
-                discount_total, tax, total, payment_method,
-                amount_paid, change_amount, data.notes, data.customer_id,
+                folio, user_id, register_id, subtotal.to_pesos(),
+                discount_total.to_pesos(), tax.to_pesos(), total.to_pesos(), payment_method,
+                amount_paid.to_pesos(), change_amount.to_pesos(), data.notes, data.customer_id,
                 data.client_request_id, data.promotion_id
             ],
         ).map_err(|e| e.to_string())?;
@@ -318,7 +322,8 @@ pub fn create_sale(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     sale_id, line.product_id, line.name, line.sku,
-                    line.quantity, line.unit_price, line.discount, line.line_subtotal, line.unit_cost,
+                    line.quantity, line.unit_price.to_pesos(), line.discount.to_pesos(),
+                    line.line_subtotal.to_pesos(), line.unit_cost.to_pesos(),
                     line.variant_id, line.variant_label
                 ],
             ).map_err(|e| e.to_string())?;
@@ -351,23 +356,23 @@ pub fn create_sale(
         }
 
         // Persist the breakdown and move each leg into its register column.
-        for p in &applied {
+        for (method, amount) in &applied {
             db.execute(
                 "INSERT INTO sale_payments (sale_id, method, amount) VALUES (?1, ?2, ?3)",
-                params![sale_id, p.method, p.amount],
+                params![sale_id, method, amount.to_pesos()],
             ).map_err(|e| e.to_string())?;
 
             db.execute(
                 &format!(
                     "UPDATE cash_registers SET {} = {} + ?1 WHERE id = ?2",
-                    register_field(&p.method), register_field(&p.method)
+                    register_field(method), register_field(method)
                 ),
-                params![p.amount, register_id],
+                params![amount.to_pesos(), register_id],
             ).map_err(|e| e.to_string())?;
         }
         db.execute(
             "UPDATE cash_registers SET total_sales = total_sales + ?1, sale_count = sale_count + 1 WHERE id = ?2",
-            params![total, register_id],
+            params![total.to_pesos(), register_id],
         ).map_err(|e| e.to_string())?;
 
         // Best-effort audit log
@@ -673,13 +678,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round2_keeps_money_to_two_decimals() {
-        assert_eq!(round2(10.005), 10.01);
-        assert_eq!(round2(0.1 + 0.2), 0.3);
-        assert_eq!(round2(249.0), 249.0);
-    }
-
-    #[test]
     fn variant_label_joins_present_attributes() {
         let s = |v: &str| Some(v.to_string());
         assert_eq!(variant_label(&s("M"), &s("Negro")), "M / Negro");
@@ -693,49 +691,66 @@ mod tests {
         PaymentSplitDto { method: method.to_string(), amount }
     }
 
+    fn pesos(v: f64) -> Cents {
+        Cents::from_pesos(v)
+    }
+
+    fn leg(applied: &[(String, Cents)], method: &str) -> Cents {
+        applied.iter().find(|(m, _)| m == method).map(|(_, a)| *a).unwrap_or(Cents::ZERO)
+    }
+
     #[test]
     fn cash_only_tender_returns_the_change() {
-        let (applied, change) = split_tender(&[split("cash", 500.0)], 249.0).unwrap();
+        let (applied, change) = split_tender(&[split("cash", 500.0)], pesos(249.0)).unwrap();
         assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].amount, 249.0);
-        assert_eq!(change, 251.0);
+        assert_eq!(applied[0].1, pesos(249.0));
+        assert_eq!(change, pesos(251.0));
     }
 
     #[test]
     fn mixed_tender_applies_cash_to_the_remainder() {
         let (applied, change) =
-            split_tender(&[split("card", 200.0), split("cash", 100.0)], 249.0).unwrap();
+            split_tender(&[split("card", 200.0), split("cash", 100.0)], pesos(249.0)).unwrap();
 
-        let card = applied.iter().find(|p| p.method == "card").unwrap().amount;
-        let cash = applied.iter().find(|p| p.method == "cash").unwrap().amount;
-        assert_eq!(card, 200.0);
-        assert_eq!(cash, 49.0);
-        assert_eq!(change, 51.0);
-        assert_eq!(card + cash, 249.0);
+        assert_eq!(leg(&applied, "card"), pesos(200.0));
+        assert_eq!(leg(&applied, "cash"), pesos(49.0));
+        assert_eq!(change, pesos(51.0));
+        assert_eq!(leg(&applied, "card") + leg(&applied, "cash"), pesos(249.0));
     }
 
     #[test]
     fn insufficient_tender_is_rejected() {
-        assert!(split_tender(&[split("cash", 100.0)], 249.0).is_err());
-        assert!(split_tender(&[split("card", 100.0), split("cash", 40.0)], 249.0).is_err());
+        assert!(split_tender(&[split("cash", 100.0)], pesos(249.0)).is_err());
+        assert!(split_tender(&[split("card", 100.0), split("cash", 40.0)], pesos(249.0)).is_err());
     }
 
     #[test]
     fn non_cash_cannot_exceed_the_total() {
-        assert!(split_tender(&[split("card", 300.0)], 249.0).is_err());
+        assert!(split_tender(&[split("card", 300.0)], pesos(249.0)).is_err());
     }
 
     #[test]
     fn zero_or_negative_legs_are_rejected() {
-        assert!(split_tender(&[split("cash", 0.0)], 249.0).is_err());
-        assert!(split_tender(&[split("card", -50.0), split("cash", 300.0)], 249.0).is_err());
+        assert!(split_tender(&[split("cash", 0.0)], pesos(249.0)).is_err());
+        assert!(split_tender(&[split("card", -50.0), split("cash", 300.0)], pesos(249.0)).is_err());
     }
 
     #[test]
     fn card_only_tender_leaves_no_change() {
-        let (applied, change) = split_tender(&[split("card", 249.0)], 249.0).unwrap();
+        let (applied, change) = split_tender(&[split("card", 249.0)], pesos(249.0)).unwrap();
         assert_eq!(applied.len(), 1);
-        assert_eq!(change, 0.0);
+        assert_eq!(change, Cents::ZERO);
+    }
+
+    #[test]
+    fn a_tender_paid_to_the_exact_cent_leaves_no_change() {
+        // Con f64 este caso podía dejar un centavo fantasma de cambio.
+        let (applied, change) = split_tender(
+            &[split("card", 0.1), split("card", 0.2), split("cash", 0.3)],
+            pesos(0.6),
+        ).unwrap();
+        assert_eq!(change, Cents::ZERO);
+        assert_eq!(applied.iter().map(|(_, a)| *a).sum::<Cents>(), pesos(0.6));
     }
 
     #[test]
@@ -770,68 +785,68 @@ mod tests {
     }
 
     /// (product_id, category_id, importe neto de la línea)
-    fn basket() -> Vec<(i64, Option<i64>, f64)> {
-        vec![(1, Some(10), 200.0), (2, Some(20), 300.0)]
+    fn basket() -> Vec<(i64, Option<i64>, Cents)> {
+        vec![(1, Some(10), pesos(200.0)), (2, Some(20), pesos(300.0))]
     }
 
     #[test]
     fn a_percentage_promotion_applies_to_the_whole_basket() {
         let (conn, id) = db_with_promo("percentage", 10.0, "all", None, true, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 50.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(50.0));
     }
 
     #[test]
     fn a_category_promotion_only_touches_its_category() {
         let (conn, id) = db_with_promo("percentage", 50.0, "category", Some(10), true, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 100.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(100.0));
     }
 
     #[test]
     fn a_product_promotion_only_touches_its_product() {
         let (conn, id) = db_with_promo("percentage", 10.0, "product", Some(2), true, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 30.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(30.0));
     }
 
     #[test]
     fn a_fixed_promotion_never_exceeds_the_basket() {
         let (conn, id) = db_with_promo("fixed", 9999.0, "all", None, true, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 500.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(500.0));
     }
 
     #[test]
     fn an_expired_promotion_grants_nothing() {
         let (conn, id) = db_with_promo("percentage", 50.0, "all", None, true, -30);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(0.0));
     }
 
     #[test]
     fn a_future_promotion_grants_nothing() {
         let (conn, id) = db_with_promo("percentage", 50.0, "all", None, true, 30);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(0.0));
     }
 
     #[test]
     fn a_deactivated_promotion_grants_nothing() {
         let (conn, id) = db_with_promo("percentage", 50.0, "all", None, false, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(0.0));
     }
 
     #[test]
     fn an_invented_promotion_id_grants_nothing() {
         let (conn, _) = db_with_promo("percentage", 50.0, "all", None, true, 0);
-        assert_eq!(promotion_discount(&conn, 9999, &basket()).unwrap(), 0.0);
+        assert_eq!(promotion_discount(&conn, 9999, &basket()).unwrap(), pesos(0.0));
     }
 
     #[test]
     fn a_percentage_over_100_cannot_pay_the_customer() {
         let (conn, id) = db_with_promo("percentage", 500.0, "all", None, true, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 500.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(500.0));
     }
 
     #[test]
     fn a_promotion_whose_category_is_absent_grants_nothing() {
         let (conn, id) = db_with_promo("percentage", 50.0, "category", Some(99), true, 0);
-        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), 0.0);
+        assert_eq!(promotion_discount(&conn, id, &basket()).unwrap(), pesos(0.0));
     }
 
     #[test]
