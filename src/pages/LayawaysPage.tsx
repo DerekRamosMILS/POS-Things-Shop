@@ -47,7 +47,24 @@ export default function LayawaysPage() {
             const updated = await api.addLayawayPayment(detail.id, amount, payMethod);
             setDetail(updated); setPayAmount(''); load();
             showToast('Abono registrado', 'success');
+            // El cliente se lleva el comprobante con su saldo actualizado.
+            printReceipt(detail.id, { silent: true });
         } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
+    };
+
+    /// Imprime el comprobante del apartado. `silent` evita molestar cuando el
+    /// aviso sería solo "no hay impresora configurada".
+    const printReceipt = async (layawayId: number, { silent = false } = {}) => {
+        try {
+            await api.printLayawayReceipt(layawayId);
+            if (!silent) showToast('Comprobante enviado a la impresora');
+        } catch (e) {
+            if (String(e).includes('SIN_IMPRESORA')) {
+                if (!silent) showToast('Configura la impresora de tickets en Ajustes', 'error');
+                return;
+            }
+            showToast(String(e), 'error');
+        }
     };
 
     const handleComplete = async () => {
@@ -197,6 +214,7 @@ export default function LayawaysPage() {
                                         </div>
                                     )}
                                     <div style={{ display: 'flex', gap: 10 }}>
+                                        <button onClick={() => printReceipt(detail.id)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Comprobante</button>
                                         <button onClick={handleCancel} disabled={processing} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>Cancelar apartado</button>
                                         <button onClick={handleComplete} disabled={processing || balance > 0.001} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>
                                             {processing && <IcoLoader />} Entregar

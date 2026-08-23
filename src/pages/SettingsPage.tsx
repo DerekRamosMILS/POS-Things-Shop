@@ -140,6 +140,22 @@ export default function SettingsPage() {
         finally { setCheckingUpdate(false); }
     };
 
+    /// Junta versión, estado de la base, configuración y bitácora en un archivo
+    /// que el encargado de la tienda puede mandar sin tener que explicar nada.
+    const handleDiagnostics = async () => {
+        try {
+            const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+            const target = await save({
+                title: 'Guardar reporte de diagnóstico',
+                defaultPath: `diagnostico-things-shop-${stamp}.txt`,
+                filters: [{ name: 'Texto', extensions: ['txt'] }],
+            });
+            if (!target) return;
+            await api.generateDiagnosticReport(target);
+            showToast('Reporte guardado. Envíalo a soporte.');
+        } catch (err) { showToast(String(err), 'error'); }
+    };
+
     const handleChangeOwnPassword = async () => {
         if (pwNext.length < 8) { showToast('La nueva contraseña debe tener al menos 8 caracteres', 'error'); return; }
         setPwSaving(true);
@@ -312,9 +328,14 @@ export default function SettingsPage() {
                     <label className="form-label">Bitácora de la aplicación</label>
                     <input readOnly value={logPath || '—'} className="input" style={{ fontFamily: 'monospace', fontSize: 11, marginBottom: 14 }}
                         onFocus={e => e.currentTarget.select()} />
-                    <button onClick={handleCheckUpdate} disabled={checkingUpdate} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
-                        {checkingUpdate ? <IcoLoader /> : null} Buscar actualizaciones
-                    </button>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button onClick={handleCheckUpdate} disabled={checkingUpdate} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
+                            {checkingUpdate ? <IcoLoader /> : null} Buscar actualizaciones
+                        </button>
+                        <button onClick={handleDiagnostics} className="btn btn-ghost btn-sm">
+                            Reporte de diagnóstico
+                        </button>
+                    </div>
                 </div>
             </div>
 

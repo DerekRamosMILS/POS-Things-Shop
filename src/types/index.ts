@@ -14,7 +14,10 @@ export interface Product {
     stock: number;
     min_stock: number;
     is_active: boolean;
+    /** Solo se llena al pedir la foto; los listados la omiten a propósito. */
     image_url: string | null;
+    /** Indica que hay foto sin haber cargado sus bytes. */
+    has_image: boolean;
     has_variants: boolean;
     created_at: string;
     updated_at: string;
@@ -168,6 +171,8 @@ export interface CreateSaleDto {
     client_request_id?: string;
     /** Promoción aplicada. El backend recalcula el importe; no confía en el cliente. */
     promotion_id?: number | null;
+    /** El cliente pidió factura; el backend copia sus datos fiscales. */
+    requiere_factura?: boolean;
 }
 
 export interface CreateSaleItemDto {
@@ -368,7 +373,20 @@ export interface CreatePromotionDto {
 }
 
 // Customer types
-export interface Customer {
+export interface DatosFiscales {
+    rfc: string | null;
+    razon_social: string | null;
+    regimen_fiscal: string | null;
+    cp_fiscal: string | null;
+    uso_cfdi: string | null;
+}
+
+export interface CatalogoFiscal {
+    regimenes: { clave: string; nombre: string }[];
+    usos_cfdi: { clave: string; nombre: string }[];
+}
+
+export interface Customer extends DatosFiscales {
     id: number;
     name: string;
     phone: string | null;
@@ -381,14 +399,14 @@ export interface Customer {
     purchase_count: number | null;
 }
 
-export interface CreateCustomerDto {
+export interface CreateCustomerDto extends Partial<DatosFiscales> {
     name: string;
     phone: string | null;
     email: string | null;
     notes: string | null;
 }
 
-export interface UpdateCustomerDto {
+export interface UpdateCustomerDto extends Partial<DatosFiscales> {
     id: number;
     name: string;
     phone: string | null;

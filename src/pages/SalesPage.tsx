@@ -43,6 +43,22 @@ export default function SalesPage() {
     const [returnQtys, setReturnQtys] = useState<Record<number, number>>({});
     const [returnReason, setReturnReason] = useState('');
     const [refundMethod, setRefundMethod] = useState('cash');
+
+    /// Reimprime el ticket de una venta anterior — el cliente que vuelve al día
+    /// siguiente por su comprobante. El ticket se arma desde lo guardado.
+    const handleReprint = async (saleId: number) => {
+        try {
+            await api.printSaleReceipt(saleId, false);
+            showToast('Ticket enviado a la impresora');
+        } catch (err) {
+            showToast(
+                String(err).includes('SIN_IMPRESORA')
+                    ? 'Configura la impresora de tickets en Ajustes para reimprimir'
+                    : String(err),
+                'error',
+            );
+        }
+    };
     const [processing, setProcessing] = useState(false);
 
     const handleReturn = async () => {
@@ -323,6 +339,9 @@ export default function SalesPage() {
                                     </div>
                                 ) : (
                                     <div style={{ display: 'flex', gap: 10 }}>
+                                        <button onClick={() => handleReprint(detail.id)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>
+                                            Reimprimir ticket
+                                        </button>
                                         <button onClick={() => setReturnMode(true)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Devolver artículos</button>
                                         <button onClick={() => handleCancel(detail.id)} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>
                                             <IcoBan /> Cancelar Venta

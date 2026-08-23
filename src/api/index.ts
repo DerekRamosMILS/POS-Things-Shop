@@ -14,7 +14,7 @@ import type {
     SystemConfig,
     Promotion, CreatePromotionDto,
     Notification, CreateReminderDto,
-    Customer, CreateCustomerDto, UpdateCustomerDto,
+    Customer, CreateCustomerDto, UpdateCustomerDto, CatalogoFiscal,
     PriceHistoryEntry, CreateReturnDto,
     Layaway, CreateLayawayDto,
 } from '../types';
@@ -62,25 +62,29 @@ const webProducts: Product[] = [
         id: 1, sku: 'CAM-001', barcode: '750000000001', name: 'Camisa Negra', description: null,
         category_id: 1, category_name: 'Ropa', supplier_id: null, supplier_name: null,
         purchase_price: 120, sale_price: 249, stock: 18, min_stock: 5, is_active: true,
-        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null,
+        has_image: false, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
     {
         id: 2, sku: 'PAN-002', barcode: '750000000002', name: 'Pantalón Slim', description: null,
         category_id: 1, category_name: 'Ropa', supplier_id: null, supplier_name: null,
         purchase_price: 180, sale_price: 369, stock: 10, min_stock: 4, is_active: true,
-        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null,
+        has_image: false, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
     {
         id: 3, sku: 'TEN-003', barcode: '750000000003', name: 'Tenis Urban', description: null,
         category_id: 2, category_name: 'Calzado', supplier_id: null, supplier_name: null,
         purchase_price: 420, sale_price: 799, stock: 7, min_stock: 3, is_active: true,
-        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null,
+        has_image: false, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
     {
         id: 4, sku: 'GOR-004', barcode: '750000000004', name: 'Gorra Logo', description: null,
         category_id: 3, category_name: 'Accesorios', supplier_id: null, supplier_name: null,
         purchase_price: 70, sale_price: 159, stock: 24, min_stock: 6, is_active: true,
-        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null,
+        has_image: false, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
 ];
 
@@ -206,7 +210,8 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
                 supplier_id: data.supplier_id ?? null, supplier_name: null,
                 purchase_price: data.purchase_price, sale_price: data.sale_price,
                 stock: data.stock, min_stock: data.min_stock, is_active: true,
-                image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
+                image_url: null,
+                has_image: false, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
             };
             webProducts.push(newP);
             return newP as unknown as T;
@@ -242,6 +247,11 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'set_config':
         case 'export_database':
             return undefined as unknown as T;
+
+        case 'get_product_images':
+            return (args?.productIds as number[] ?? [])
+                .map(id => [id, webProducts.find(p => p.id === id)?.image_url])
+                .filter(([, url]) => Boolean(url)) as unknown as T;
 
         case 'get_low_stock_products':
             return webProducts.filter(p => p.stock <= p.min_stock) as unknown as T;
@@ -342,7 +352,16 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             throw new Error('El hardware solo está disponible en la app de escritorio');
 
         case 'print_sale_receipt':
+        case 'print_layaway_receipt':
             throw new Error('SIN_IMPRESORA');
+
+        case 'get_catalogos_fiscales':
+            return { regimenes: [], usos_cfdi: [] } as unknown as T;
+
+        case 'exportar_pendientes_factura':
+        case 'marcar_facturada':
+        case 'generate_diagnostic_report':
+            throw new Error('El diagnóstico solo está disponible en la app de escritorio');
 
         case 'get_log_path':
             return '(no disponible en modo web)' as unknown as T;
@@ -431,6 +450,8 @@ export const updateProduct = (data: UpdateProductDto) => invoke<Product>('update
 export const deleteProduct = (id: number) => invoke<void>('delete_product', { id });
 export const setProductImage = (productId: number, imageUrl: string | null) =>
     invoke<void>('set_product_image', { productId, imageUrl });
+export const getProductImages = (productIds: number[]) =>
+    invoke<[number, string][]>('get_product_images', { productIds });
 
 // Variants
 export const getVariants = (productId: number) => invoke<ProductVariant[]>('get_variants', { productId });
@@ -511,6 +532,15 @@ export const createBackup = () => invoke<string>('create_backup');
 export const exportDatabase = (path: string) => invoke<void>('export_database', { path });
 export const getBackupList = () => invoke<string[]>('get_backup_list');
 export const getLogPath = () => invoke<string>('get_log_path');
+export const generateDiagnosticReport = (path: string) =>
+    invoke<string>('generate_diagnostic_report', { path });
+
+// Facturación
+export const getCatalogosFiscales = () => invoke<CatalogoFiscal>('get_catalogos_fiscales');
+export const exportarPendientesFactura = (path: string, desde?: string, hasta?: string) =>
+    invoke<number>('exportar_pendientes_factura', { path, desde, hasta });
+export const marcarFacturada = (saleId: number, uuid: string) =>
+    invoke<void>('marcar_facturada', { saleId, uuid });
 
 // Hardware de mostrador
 export const listPrinters = () => invoke<string[]>('list_printers');
@@ -519,6 +549,8 @@ export const testPrinter = (printer: string | null, openDrawer: boolean) =>
     invoke<void>('test_printer', { printer, openDrawer });
 export const printSaleReceipt = (saleId: number, openDrawer?: boolean) =>
     invoke<void>('print_sale_receipt', { saleId, openDrawer });
+export const printLayawayReceipt = (layawayId: number) =>
+    invoke<void>('print_layaway_receipt', { layawayId });
 export const restoreBackup = (filename: string) => invoke<string>('restore_backup', { filename });
 
 // Demo data

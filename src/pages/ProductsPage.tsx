@@ -6,6 +6,7 @@ import * as api from '../api';
 import type { Product, Category, CreateProductDto, UpdateProductDto, Notification, Supplier, PriceHistoryEntry, SaveVariantDto } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { invalidateProductImage, useProductImage } from '../hooks/useProductImages';
 
 // ─── Image compression ───────────────────────────────────────────────────────
 // Product photos are stored inline (data URL) in the DB, so downscale + compress
@@ -57,10 +58,11 @@ function initials(name: string) {
 function ProductAvatar({ product, size = 40, radius = 10 }: { product: Product; size?: number; radius?: number }) {
     const [err, setErr] = useState(false);
     const [a, b] = getGrad(product.name);
-    if (product.image_url && !err) {
+    const photo = useProductImage(product.id, product.has_image);
+    if (photo && !err) {
         return (
             <img
-                src={product.image_url}
+                src={photo}
                 alt={product.name}
                 onError={() => setErr(true)}
                 style={{ width: size, height: size, borderRadius: radius, objectFit: 'cover', flexShrink: 0 }}
@@ -199,7 +201,13 @@ export default function ProductsPage() {
     const openEditForm = (product: Product) => {
         setEditingProduct(product);
         setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active });
-        setPhotoPreview(product.image_url ?? null);
+        // El listado ya no trae la foto: se pide solo al abrir la ficha.
+        setPhotoPreview(null);
+        if (product.has_image) {
+            api.getProductImages([product.id])
+                .then(rows => setPhotoPreview(rows.find(([id]) => id === product.id)?.[1] ?? null))
+                .catch(() => setPhotoPreview(null));
+        }
         setPhotoChanged(false);
         setPriceHistory([]);
         api.getPriceHistory(product.id).then(setPriceHistory).catch(() => setPriceHistory([]));
@@ -268,6 +276,7 @@ export default function ProductsPage() {
             // Save photo if changed
             if (photoChanged) {
                 await api.setProductImage(productId, photoPreview);
+                invalidateProductImage(productId);
             }
             // Save variants (or clear them if variants were turned off)
             if (hasVariants) {

@@ -17,7 +17,10 @@ pub struct Product {
     pub min_stock: i32,
     pub is_active: bool,
     pub low_stock_ignored: bool,
+    /// Solo se llena al pedir la imagen; los listados la omiten a propósito.
     pub image_url: Option<String>,
+    /// Indica si hay foto sin cargar sus bytes.
+    pub has_image: bool,
     pub has_variants: bool,
     pub created_at: String,
     pub updated_at: String,

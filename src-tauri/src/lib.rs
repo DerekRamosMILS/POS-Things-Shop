@@ -7,7 +7,7 @@ mod money;
 mod session;
 
 use commands::{
-    backup, cash_register, categories, config, customers, expenses, inventory, layaways,
+    backup, cash_register, categories, config, customers, diagnostics, expenses, fiscal, inventory, layaways,
     notifications, products, promotions, reports, returns, sales, seed, suppliers, users, variants,
 };
 use db::connection::{init_db, purge_old_logs, DbState};
@@ -72,6 +72,7 @@ pub fn run() {
             products::update_product,
             products::delete_product,
             products::set_product_image,
+            products::get_product_images,
             products::get_price_history,
             // Variants
             variants::get_variants,
@@ -130,6 +131,11 @@ pub fn run() {
             backup::create_backup,
             backup::export_database,
             backup::get_log_path,
+            diagnostics::generate_diagnostic_report,
+            // Datos fiscales
+            fiscal::get_catalogos_fiscales,
+            fiscal::exportar_pendientes_factura,
+            fiscal::marcar_facturada,
             backup::get_backup_list,
             backup::restore_backup,
             // Config
@@ -159,6 +165,7 @@ pub fn run() {
             hardware::open_cash_drawer,
             hardware::test_printer,
             hardware::print_sale_receipt,
+            hardware::print_layaway_receipt,
             // Demo data
             seed::seed_demo_data,
         ])

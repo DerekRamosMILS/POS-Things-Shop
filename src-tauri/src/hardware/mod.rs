@@ -290,6 +290,136 @@ pub fn print_sale_receipt(
     spooler::print_raw(&setup.name, &format!("Ticket {}", folio), &b.finish())
 }
 
+/// Comprobante de un apartado: lo que el cliente se lleva con su saldo.
+///
+/// Se imprime al crearlo y en cada abono, porque el saldo pendiente es
+/// justamente el dato que el cliente necesita conservar.
+#[tauri::command]
+pub fn print_layaway_receipt(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    layaway_id: i64,
+) -> Result<(), String> {
+    require_auth(&sessions, &token)?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    let setup = printer_setup(&db);
+    if setup.name.is_empty() {
+        return Err("SIN_IMPRESORA".to_string());
+    }
+
+    let symbol = config(&db, "currency_symbol", "$");
+    let width = setup.width;
+
+    let (folio, total, paid, status, due_date, created_at, customer):
+        (String, f64, f64, String, Option<String>, String, Option<String>) = db
+        .query_row(
+            "SELECT l.folio, l.total, l.paid, l.status, l.due_date, l.created_at, c.name
+             FROM layaways l LEFT JOIN customers c ON l.customer_id = c.id
+             WHERE l.id = ?1",
+            params![layaway_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .map_err(|_| "No se encontró el apartado".to_string())?;
+
+    let balance = crate::money::Cents::from_pesos(total) - crate::money::Cents::from_pesos(paid);
+
+    let mut b = escpos::Builder::new(width);
+    b.align_center().bold(true).line(&config(&db, "store_name", "Things Shop")).bold(false);
+    b.line("COMPROBANTE DE APARTADO");
+    b.align_left().separator();
+    b.pair("Folio", &folio);
+    b.pair("Fecha", &created_at);
+    if let Some(name) = customer {
+        b.pair("Cliente", &name);
+    }
+    if let Some(due) = due_date {
+        b.pair("Vence", &due);
+    }
+    b.separator();
+
+    let mut stmt = db
+        .prepare(
+            "SELECT product_name, variant_label, quantity, subtotal
+             FROM layaway_items WHERE layaway_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let items = stmt
+        .query_map(params![layaway_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i32>(2)?,
+                r.get::<_, f64>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    for (name, variant, qty, line_total) in items {
+        let title = match variant {
+            Some(v) if !v.is_empty() => format!("{} ({})", name, v),
+            _ => name,
+        };
+        for line in escpos::wrap(&title, width) {
+            b.line(&line);
+        }
+        b.pair(&format!("  {} pz", qty), &money(&symbol, line_total));
+    }
+
+    b.separator();
+    b.pair("Total del apartado", &money(&symbol, total));
+    b.pair("Abonado", &money(&symbol, paid));
+
+    b.bold(true).double_size(true);
+    b.pair("RESTA", &money(&symbol, balance.to_pesos()));
+    b.double_size(false).bold(false);
+
+    // Historial de abonos: el cliente puede cotejar lo que ya entregó.
+    let mut stmt = db
+        .prepare(
+            "SELECT created_at, amount, payment_method FROM layaway_payments
+             WHERE layaway_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let payments = stmt
+        .query_map(params![layaway_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    if !payments.is_empty() {
+        b.separator().line("Abonos");
+        for (date, amount, method) in payments {
+            b.pair(
+                &format!("{} {}", &date.chars().take(10).collect::<String>(), method_label(&method)),
+                &money(&symbol, amount),
+            );
+        }
+    }
+
+    if status == "completed" {
+        b.separator().align_center().bold(true).line("LIQUIDADO").bold(false).align_left();
+    }
+
+    let footer = config(&db, "ticket_footer", "");
+    if !footer.is_empty() {
+        b.align_center().line("");
+        for line in escpos::wrap(&footer, width) {
+            b.line(&line);
+        }
+    }
+    b.feed(3).cut();
+
+    spooler::print_raw(&setup.name, &format!("Apartado {}", folio), &b.finish())
+}
+
 fn method_label(method: &str) -> &'static str {
     match method {
         "cash" => "Efectivo",

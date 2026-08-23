@@ -184,7 +184,7 @@ pub fn get_low_stock_products(
         "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
                 p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
                 p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name,
-                p.image_url, p.has_variants
+                (p.image_url IS NOT NULL AND p.image_url != '') as has_image, p.has_variants
          FROM products p
          LEFT JOIN categories c ON p.category_id = c.id
          LEFT JOIN suppliers s ON p.supplier_id = s.id
@@ -212,7 +212,9 @@ pub fn get_low_stock_products(
                 updated_at: row.get(14)?,
                 category_name: row.get(15)?,
                 supplier_name: row.get(16)?,
-                image_url: row.get(17)?,
+                // El aviso de stock bajo no muestra fotos: no vale la pena cargarlas.
+                image_url: None,
+                has_image: row.get::<_, i32>(17)? == 1,
                 has_variants: row.get::<_, i32>(18)? == 1,
             })
         })

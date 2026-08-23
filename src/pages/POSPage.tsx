@@ -5,6 +5,8 @@ import { useSessionStore } from '../stores/useSessionStore';
 import { useHoldsStore, type ServiceType } from '../stores/useHoldsStore';
 import { formatCurrency } from '../utils';
 import { configFromSettings, createScannerHandler } from '../utils/scanner';
+import { useProductImage } from '../hooks/useProductImages';
+import KeyboardHelp from '../components/KeyboardHelp';
 import * as api from '../api';
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
@@ -44,11 +46,13 @@ function ProductThumb({
     const [a, b] = getGrad(product.name);
     const w = fullWidth ? '100%' : width;
     const fontSize = Math.round(Math.min(width, height) * 0.32);
+    // La foto no viene en el listado; se pide solo para lo que está en pantalla.
+    const photo = useProductImage(product.id, product.has_image);
 
-    if (product.image_url && !imgError) {
+    if (photo && !imgError) {
         return (
             <img
-                src={product.image_url}
+                src={photo}
                 alt={product.name}
                 onError={() => setImgError(true)}
                 style={{ width: w, height, borderRadius: radius, objectFit: 'cover', flexShrink: 0, display: 'block' }}
@@ -73,10 +77,11 @@ function ProductThumb({
 function CartThumb({ product, size = 40 }: { product: Product; size?: number }) {
     const [imgError, setImgError] = useState(false);
     const [a, b] = getGrad(product.name);
-    if (product.image_url && !imgError) {
+    const photo = useProductImage(product.id, product.has_image);
+    if (photo && !imgError) {
         return (
             <img
-                src={product.image_url} alt={product.name}
+                src={photo} alt={product.name}
                 onError={() => setImgError(true)}
                 style={{ width: size, height: size, borderRadius: 10, objectFit: 'cover', flexShrink: 0 }}
             />
@@ -168,6 +173,13 @@ export default function POSPage() {
 
     const [serviceType, setServiceType] = useState<ServiceType>('direct');
     const [customerName, setCustomerName] = useState('');
+    // Línea del ticket seleccionada con el teclado, para operarla sin mouse.
+    const [selectedLine, setSelectedLine] = useState(0);
+    // Facturación: solo tiene sentido con un cliente que tenga RFC capturado.
+    const [requiereFactura, setRequiereFactura] = useState(false);
+    const [showHelp, setShowHelp] = useState(false);
+    const customerRef = useRef<HTMLInputElement>(null);
+    const discountRefs = useRef<Record<string, HTMLInputElement | null>>({});
     const [customers, setCustomers] = useState<Customer[]>([]);
     const [customerId, setCustomerId] = useState<number | null>(null);
     const [orderNotes, setOrderNotes] = useState('');
@@ -211,6 +223,11 @@ export default function POSPage() {
     // Los ajustes del lector viven en un ref para que el manejador global no se
     // vuelva a montar cada vez que cambian.
     const scannerConfig = useRef(configFromSettings({}));
+    // El manejador global se registra una sola vez; estos refs lo mantienen
+    // apuntando al estado actual sin volver a montarlo en cada render.
+    const selectedLineRef = useRef(0);
+    const showHelpRef = useRef(false);
+    const handleHoldRef = useRef<() => void>(() => {});
     const onScanRef = useRef<(code: string) => void>(() => {});
     const liveRef = useRef({ showPayment, items, lastSale });
     useEffect(() => { liveRef.current = { showPayment, items, lastSale }; });
@@ -245,9 +262,67 @@ export default function POSPage() {
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             const { showPayment: sp, items: its, lastSale: ls } = liveRef.current;
+            const target = e.target as HTMLElement | null;
+            const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+
+            if (e.key === 'F1') { e.preventDefault(); setShowHelp(h => !h); return; }
             if (e.key === 'F10') { e.preventDefault(); if (its.length > 0 && !sp && !ls) setShowPayment(true); return; }
-            if (e.key === 'Escape' && sp) { e.preventDefault(); setShowPayment(false); return; }
+            if (e.key === 'Escape') {
+                if (sp) { e.preventDefault(); setShowPayment(false); return; }
+                if (showHelpRef.current) { e.preventDefault(); setShowHelp(false); return; }
+                // Salir de un campo devuelve el foco al buscador, que es donde
+                // el cajero quiere estar entre una venta y otra.
+                if (typing) { e.preventDefault(); (target as HTMLElement).blur(); searchRef.current?.focus(); }
+                return;
+            }
             if (e.key === 'F2') { e.preventDefault(); searchRef.current?.focus(); return; }
+            if (e.key === 'F3') { e.preventDefault(); customerRef.current?.focus(); return; }
+
+            // El resto opera sobre el ticket y no debe dispararse mientras se
+            // escribe, salvo las teclas de función.
+            const lines = liveRef.current.items;
+            if (e.key === 'F4') {
+                e.preventDefault();
+                const line = lines[selectedLineRef.current];
+                if (line) discountRefs.current[cartLineId(line)]?.focus();
+                return;
+            }
+            if (e.key === 'F8') { e.preventDefault(); if (lines.length > 0) handleHoldRef.current(); return; }
+            if (e.key === 'F9') { e.preventDefault(); if (lines.length > 0) { setServiceType('layaway'); setShowLayaway(true); } return; }
+
+            if (typing || sp || ls || lines.length === 0) { scanner(e); return; }
+
+            const current = Math.min(selectedLineRef.current, lines.length - 1);
+            const line = lines[current];
+
+            switch (e.key) {
+                case 'ArrowDown':
+                    e.preventDefault();
+                    setSelectedLine(Math.min(current + 1, lines.length - 1));
+                    return;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    setSelectedLine(Math.max(current - 1, 0));
+                    return;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    if (line && line.quantity < stockOf(line)) {
+                        updateQuantity(cartLineId(line), line.quantity + 1);
+                    }
+                    return;
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    if (line) updateQuantity(cartLineId(line), line.quantity - 1);
+                    return;
+                case 'Delete':
+                    e.preventDefault();
+                    if (line) {
+                        removeItem(cartLineId(line));
+                        setSelectedLine(Math.max(0, current - 1));
+                    }
+                    return;
+            }
+
             scanner(e);
         };
         // El escáner se captura aunque el foco esté en un campo: en el mostrador
@@ -285,6 +360,9 @@ export default function POSPage() {
     // El manejador global es estable; esto mantiene apuntando a la versión
     // actual sin volver a registrar el listener en cada render.
     onScanRef.current = (code: string) => { handleBarcodeScan(code); };
+    selectedLineRef.current = selectedLine;
+    showHelpRef.current = showHelp;
+    handleHoldRef.current = () => handleHold();
 
     const handleBarcodeScan = async (code: string) => {
         try {
@@ -369,6 +447,13 @@ export default function POSPage() {
     const cannotCharge = processing || !cashRegisterId || mixedInvalid
         || (paymentMethod === 'cash' && cashGiven < total);
 
+    const selectedCustomer = customerId ? customers.find(c => c.id === customerId) ?? null : null;
+
+    // Cambiar de cliente no debe arrastrar la intención de facturar del anterior.
+    useEffect(() => {
+        if (!selectedCustomer?.rfc) setRequiereFactura(false);
+    }, [selectedCustomer?.id, selectedCustomer?.rfc]);
+
     const storeInfo: StoreInfo = {
         name: config.store_name || '', address: config.store_address || '',
         phone: config.store_phone || '', footer: config.ticket_footer || '',
@@ -423,6 +508,7 @@ export default function POSPage() {
                 payment_method: paymentMethod, amount_paid: paid, payments,
                 discount_total: saleLineDiscount + promoDiscount,
                 promotion_id: activePromo?.id ?? null,
+                requiere_factura: requiereFactura,
                 customer_id: customerId,
                 client_request_id: chargeRequestId.current,
                 notes: [SERVICE_LABELS[serviceType], customerName ? `Cliente: ${customerName}` : '', activePromo ? `Promo: ${activePromo.name}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
@@ -452,7 +538,7 @@ export default function POSPage() {
             setAllProducts(applySold);
             setSearchResults(applySold);
             chargeRequestId.current = crypto.randomUUID();
-            clear(); setShowPayment(false); setAmountPaid(''); setMixedCard(''); setMixedTransfer(''); setCustomerName(''); setCustomerId(null); setOrderNotes(''); setActivePromo(null); setPromoInput('');
+            clear(); setShowPayment(false); setAmountPaid(''); setMixedCard(''); setMixedTransfer(''); setCustomerName(''); setRequiereFactura(false); setCustomerId(null); setOrderNotes(''); setActivePromo(null); setPromoInput('');
             setOrderSeq(prev => prev + 1);
         } catch (err) { showToast(String(err), 'error'); }
         finally { setProcessing(false); }
@@ -570,7 +656,7 @@ export default function POSPage() {
                         <input
                             ref={searchRef} value={searchQuery}
                             onChange={e => handleSearch(e.target.value)}
-                            placeholder="Buscar producto... (F2)"
+                            placeholder="Buscar producto o escanear... (F2)"
                             style={{ flex: 1, background: 'none', border: 'none', color: T.t1, fontSize: 14, outline: 'none', fontFamily: 'inherit' }}
                             autoFocus
                         />
@@ -675,9 +761,21 @@ export default function POSPage() {
                                 {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                             </select>
                         )}
+                        {selectedCustomer?.rfc && (
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, fontSize: 12, color: T.t2, cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={requiereFactura}
+                                    onChange={e => setRequiereFactura(e.target.checked)}
+                                    style={{ width: 15, height: 15, accentColor: T.primary, cursor: 'pointer' }}
+                                />
+                                Requiere factura <span style={{ color: T.t3, fontFamily: 'monospace', fontSize: 11 }}>{selectedCustomer.rfc}</span>
+                            </label>
+                        )}
                         <input
+                            ref={customerRef}
                             value={customerName} onChange={e => { setCustomerName(e.target.value); setCustomerId(null); }}
-                            placeholder="Nombre del cliente (opcional)"
+                            placeholder="Nombre del cliente (F3)"
                             style={{ width: '100%', padding: '9px 12px', borderRadius: 11, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)', color: T.t2, fontSize: 12, fontFamily: 'inherit', outline: 'none' }}
                             onFocus={e => (e.target.style.borderColor = 'rgba(139,120,245,0.4)')}
                             onBlur={e => (e.target.style.borderColor = 'rgba(255,255,255,0.09)')}
@@ -722,12 +820,18 @@ export default function POSPage() {
                                     <p style={{ fontSize: 12, color: T.t3, marginTop: 4 }}>Selecciona una prenda del catálogo</p>
                                 </div>
                             </div>
-                        ) : items.map(item => {
+                        ) : items.map((item, index) => {
                             const lineTotal = item.product.sale_price * item.quantity - item.discount;
                             const lineId = cartLineId(item);
                             const maxStock = stockOf(item);
+                            const selected = index === Math.min(selectedLine, items.length - 1);
                             return (
-                                <div key={lineId} className="cart-item">
+                                <div
+                                    key={lineId}
+                                    className="cart-item"
+                                    onClick={() => setSelectedLine(index)}
+                                    style={selected ? { outline: `1px solid ${T.primary}`, outlineOffset: -1 } : undefined}
+                                >
                                     <div className="cart-item-top">
                                         <CartThumb product={item.product} size={40} />
                                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -751,6 +855,7 @@ export default function POSPage() {
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1 }}>
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={T.t3} strokeWidth="2.2" strokeLinecap="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
                                             <input
+                                                ref={el => { discountRefs.current[lineId] = el; }}
                                                 type="number" min="0" step="0.01"
                                                 value={item.discount || ''}
                                                 onChange={e => applyDiscount(lineId, Math.max(0, Math.min(parseFloat(e.target.value) || 0, item.product.sale_price * item.quantity)))}
@@ -993,6 +1098,8 @@ export default function POSPage() {
                     </div>
                 </div>
             )}
+
+            {showHelp && <KeyboardHelp onClose={() => setShowHelp(false)} />}
 
             {/* ── Variant picker ── */}
             {variantPickerProduct && (

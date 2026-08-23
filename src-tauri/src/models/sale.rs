@@ -55,6 +55,11 @@ pub struct CreateSaleDto {
     /// Promoción elegida en el punto de venta, si hubo alguna.
     #[serde(default)]
     pub promotion_id: Option<i64>,
+    /// El cliente pidió factura. Los datos fiscales se copian del cliente en
+    /// ese momento, porque después puede cambiarlos y la factura debe emitirse
+    /// con los que estaban vigentes al vender.
+    #[serde(default)]
+    pub requiere_factura: bool,
     pub notes: Option<String>,
     #[serde(default)]
     pub customer_id: Option<i64>,

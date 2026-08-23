@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { save } from '@tauri-apps/plugin-dialog';
 import { formatCurrency } from '../utils';
 import * as api from '../api';
 import type { DailySalesReport, TopProduct, CashierReport } from '../types';
@@ -16,6 +17,24 @@ export default function ReportsPage() {
     const { showToast } = useToast();
 
     useEffect(() => { loadData(); }, [days]);
+
+    /// Exporta las ventas marcadas como facturables que aún no tienen folio
+    /// fiscal, en el formato que un PAC o el contador puede procesar.
+    const exportarFacturas = async () => {
+        try {
+            const desde = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+            const target = await save({
+                title: 'Exportar ventas por facturar',
+                defaultPath: `por-facturar-${desde}.csv`,
+                filters: [{ name: 'CSV', extensions: ['csv'] }],
+            });
+            if (!target) return;
+            const count = await api.exportarPendientesFactura(target, desde);
+            showToast(count === 0
+                ? 'No hay ventas pendientes de facturar en el periodo'
+                : `${count} venta(s) exportadas`);
+        } catch (err) { showToast(String(err), 'error'); }
+    };
 
     const exportCSV = () => {
         try {
@@ -71,6 +90,9 @@ export default function ReportsPage() {
                     </select>
                     <button onClick={exportCSV} disabled={dailyReport.length === 0} className="btn btn-ghost" style={{ gap: 7 }}>
                         <IcoDownload /> Exportar CSV
+                    </button>
+                    <button onClick={exportarFacturas} className="btn btn-ghost" style={{ gap: 7 }}>
+                        <IcoDownload /> Por facturar
                     </button>
                 </div>
             </div>

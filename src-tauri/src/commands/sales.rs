@@ -315,6 +315,39 @@ pub fn create_sale(
 
         let sale_id = db.last_insert_rowid();
 
+        // Copia de los datos fiscales vigentes al momento de vender.
+        if data.requiere_factura {
+            let Some(customer_id) = data.customer_id else {
+                return Err("Para facturar hay que elegir un cliente con datos fiscales".to_string());
+            };
+            let fiscal: (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, String) = db
+                .query_row(
+                    "SELECT rfc, razon_social, regimen_fiscal, cp_fiscal, uso_cfdi, name
+                     FROM customers WHERE id = ?1",
+                    params![customer_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .map_err(|_| "El cliente de la factura no existe".to_string())?;
+
+            if fiscal.0.as_deref().unwrap_or("").trim().is_empty() {
+                return Err(format!(
+                    "'{}' no tiene RFC capturado. Complétalo en Clientes antes de facturar.",
+                    fiscal.5
+                ));
+            }
+
+            db.execute(
+                "UPDATE sales SET requiere_factura = 1, fiscal_rfc = ?1, fiscal_razon_social = ?2,
+                        fiscal_regimen = ?3, fiscal_cp = ?4, fiscal_uso_cfdi = ?5
+                 WHERE id = ?6",
+                params![
+                    fiscal.0,
+                    fiscal.1.filter(|v| !v.trim().is_empty()).unwrap_or(fiscal.5),
+                    fiscal.2, fiscal.3, fiscal.4, sale_id
+                ],
+            ).map_err(|e| e.to_string())?;
+        }
+
         // Insert sale items, decrease stock, record movements
         for line in &lines {
             db.execute(

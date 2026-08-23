@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { formatCurrency } from '../utils';
 import * as api from '../api';
-import type { Customer } from '../types';
+import type { CatalogoFiscal, Customer } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 
@@ -27,7 +27,9 @@ export default function CustomersPage() {
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
     const [editing, setEditing] = useState<Customer | null>(null);
-    const [form, setForm] = useState({ name: '', phone: '', email: '', notes: '' });
+    const [form, setForm] = useState({ name: '', phone: '', email: '', notes: '', rfc: '', razon_social: '', regimen_fiscal: '', cp_fiscal: '', uso_cfdi: '' });
+    const [catalogos, setCatalogos] = useState<CatalogoFiscal>({ regimenes: [], usos_cfdi: [] });
+    const [showFiscal, setShowFiscal] = useState(false);
     const [searchParams] = useSearchParams();
     const [search, setSearch] = useState(searchParams.get('search') || '');
     const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
@@ -35,24 +37,45 @@ export default function CustomersPage() {
     const { showToast } = useToast();
     const { confirm } = useConfirm();
 
-    useEffect(() => { load(); }, []);
+    useEffect(() => { load(); api.getCatalogosFiscales().then(setCatalogos).catch(() => {}); }, []);
     useEffect(() => { const s = searchParams.get('search'); if (s) setSearch(s); }, [searchParams]);
 
     const load = async () => {
         try { setCustomers(await api.getCustomers()); } catch (e) { showToast(String(e), 'error'); } finally { setLoading(false); }
     };
 
-    const openCreate = () => { setEditing(null); setForm({ name: '', phone: '', email: '', notes: '' }); setShowForm(true); };
-    const openEdit = (c: Customer) => { setEditing(c); setForm({ name: c.name, phone: c.phone || '', email: c.email || '', notes: c.notes || '' }); setShowForm(true); };
+    const openCreate = () => { setEditing(null); setForm({ name: '', phone: '', email: '', notes: '', rfc: '', razon_social: '', regimen_fiscal: '', cp_fiscal: '', uso_cfdi: '' }); setShowFiscal(false); setShowForm(true); };
+    const openEdit = (c: Customer) => {
+        setEditing(c);
+        setForm({
+            name: c.name, phone: c.phone || '', email: c.email || '', notes: c.notes || '',
+            rfc: c.rfc || '', razon_social: c.razon_social || '',
+            regimen_fiscal: c.regimen_fiscal || '', cp_fiscal: c.cp_fiscal || '',
+            uso_cfdi: c.uso_cfdi || '',
+        });
+        // Si el cliente ya factura, la sección se abre sola.
+        setShowFiscal(Boolean(c.rfc));
+        setShowForm(true);
+    };
+
+    /// Los campos fiscales vacíos se mandan como null: el backend distingue
+    /// "sin capturar" de "capturado vacío" al validar.
+    const fiscalPayload = () => ({
+        rfc: form.rfc.trim() || null,
+        razon_social: form.razon_social.trim() || null,
+        regimen_fiscal: form.regimen_fiscal || null,
+        cp_fiscal: form.cp_fiscal.trim() || null,
+        uso_cfdi: form.uso_cfdi || null,
+    });
 
     const handleSave = async () => {
         if (!form.name.trim()) { showToast('El nombre es requerido', 'error'); return; }
         setProcessing(true);
         try {
             if (editing) {
-                await api.updateCustomer({ id: editing.id, name: form.name, phone: form.phone || null, email: form.email || null, notes: form.notes || null, is_active: editing.is_active });
+                await api.updateCustomer({ id: editing.id, name: form.name, phone: form.phone || null, email: form.email || null, notes: form.notes || null, ...fiscalPayload(), is_active: editing.is_active });
             } else {
-                await api.createCustomer({ name: form.name, phone: form.phone || null, email: form.email || null, notes: form.notes || null });
+                await api.createCustomer({ name: form.name, phone: form.phone || null, email: form.email || null, notes: form.notes || null, ...fiscalPayload() });
             }
             setShowForm(false); load();
             showToast(editing ? 'Cliente actualizado' : 'Cliente creado', 'success');
@@ -148,6 +171,52 @@ export default function CustomersPage() {
                             <div><label className="form-label">Teléfono</label><input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className="input" /></div>
                             <div><label className="form-label">Email</label><input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} className="input" /></div>
                             <div><label className="form-label">Notas</label><textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} className="input" style={{ resize: 'none', height: 64 }} /></div>
+
+                            {/* Datos fiscales: se piden una vez y sirven para todas
+                                sus facturas. Plegados porque la mayoría no factura. */}
+                            <button
+                                type="button"
+                                onClick={() => setShowFiscal(v => !v)}
+                                style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, color: 'var(--primary)' }}
+                            >
+                                {showFiscal ? '−' : '+'} Datos para facturar {form.rfc && !showFiscal ? `(${form.rfc})` : ''}
+                            </button>
+
+                            {showFiscal && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 14, borderRadius: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+                                    <div>
+                                        <label className="form-label">RFC</label>
+                                        <input value={form.rfc} onChange={e => setForm({ ...form, rfc: e.target.value.toUpperCase() })}
+                                            className="input" placeholder="XAXX010101000" style={{ fontFamily: 'monospace' }} />
+                                    </div>
+                                    <div>
+                                        <label className="form-label">Razón social</label>
+                                        <input value={form.razon_social} onChange={e => setForm({ ...form, razon_social: e.target.value })}
+                                            className="input" placeholder="Como aparece en su constancia fiscal" />
+                                    </div>
+                                    <div>
+                                        <label className="form-label">Régimen fiscal</label>
+                                        <select value={form.regimen_fiscal} onChange={e => setForm({ ...form, regimen_fiscal: e.target.value })} className="input">
+                                            <option value="">Sin especificar</option>
+                                            {catalogos.regimenes.map(r => <option key={r.clave} value={r.clave}>{r.clave} — {r.nombre}</option>)}
+                                        </select>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 10 }}>
+                                        <div>
+                                            <label className="form-label">C.P. fiscal</label>
+                                            <input value={form.cp_fiscal} onChange={e => setForm({ ...form, cp_fiscal: e.target.value })}
+                                                className="input" placeholder="64000" maxLength={5} />
+                                        </div>
+                                        <div>
+                                            <label className="form-label">Uso del CFDI</label>
+                                            <select value={form.uso_cfdi} onChange={e => setForm({ ...form, uso_cfdi: e.target.value })} className="input">
+                                                <option value="">Sin especificar</option>
+                                                {catalogos.usos_cfdi.map(u => <option key={u.clave} value={u.clave}>{u.clave} — {u.nombre}</option>)}
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <button onClick={() => setShowForm(false)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Cancelar</button>
                                 <button onClick={handleSave} disabled={processing} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>{processing && <IcoLoader />} {editing ? 'Guardar' : 'Crear'}</button>

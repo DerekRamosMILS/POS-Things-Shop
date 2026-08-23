@@ -6,11 +6,17 @@ use crate::models::product::{CreateProductDto, Product, ProductFilters, UpdatePr
 use crate::session::{require_admin, require_auth, SessionState};
 
 // ─── Shared SELECT fragment ────────────────────────────────────────────────────
+//
+// Las fotos se guardan como data URL dentro de la propia fila (~54 KB cada una),
+// así que devolverlas en los listados haría que abrir el punto de venta con 500
+// productos moviera decenas de megabytes por IPC. El listado solo informa si el
+// producto *tiene* foto; la imagen se pide aparte para los que están a la vista.
 const SEL: &str = "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
                           p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
                           p.low_stock_ignored, p.created_at, p.updated_at,
                           c.name as category_name, s.name as supplier_name,
-                          p.image_url, p.has_variants
+                          (p.image_url IS NOT NULL AND p.image_url != '') as has_image,
+                          p.has_variants
                    FROM products p
                    LEFT JOIN categories c ON p.category_id = c.id
                    LEFT JOIN suppliers s ON p.supplier_id = s.id";
@@ -34,7 +40,8 @@ fn row_to_product(row: &rusqlite::Row) -> rusqlite::Result<Product> {
         updated_at:      row.get(14)?,
         category_name:   row.get(15)?,
         supplier_name:   row.get(16)?,
-        image_url:       row.get(17)?,
+        image_url:       None,
+        has_image:       row.get::<_, i32>(17)? == 1,
         has_variants:    row.get::<_, i32>(18)? == 1,
     })
 }
@@ -210,6 +217,48 @@ pub struct PriceHistoryEntry {
     pub new_price: f64,
     pub user_name: Option<String>,
     pub created_at: String,
+}
+
+/// Fotos de los productos que están en pantalla, pedidas por lote.
+///
+/// El punto de venta muestra unas dos docenas a la vez, así que traerlas por
+/// lote mantiene el catálogo ligero sin dejar la pantalla sin imágenes.
+#[tauri::command]
+pub fn get_product_images(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    product_ids: Vec<i64>,
+) -> Result<Vec<(i64, String)>, String> {
+    require_auth(&sessions, &token)?;
+    if product_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Tope defensivo: un lote enorme anularía el propósito de haberlas sacado
+    // del listado.
+    if product_ids.len() > 60 {
+        return Err("Demasiadas imágenes en una sola petición".to_string());
+    }
+
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let placeholders = vec!["?"; product_ids.len()].join(",");
+
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT id, image_url FROM products
+             WHERE id IN ({}) AND image_url IS NOT NULL AND image_url != ''",
+            placeholders
+        ))
+        .map_err(|e| e.to_string())?;
+
+    let params = rusqlite::params_from_iter(product_ids.iter());
+    let images = stmt
+        .query_map(params, |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(images)
 }
 
 #[tauri::command]
