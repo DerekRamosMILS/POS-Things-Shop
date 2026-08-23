@@ -15,8 +15,29 @@ export interface Product {
     min_stock: number;
     is_active: boolean;
     image_url: string | null;
+    has_variants: boolean;
     created_at: string;
     updated_at: string;
+}
+
+export interface ProductVariant {
+    id: number;
+    product_id: number;
+    size: string | null;
+    color: string | null;
+    sku: string | null;
+    barcode: string | null;
+    stock: number;
+    is_active: boolean;
+}
+
+export interface SaveVariantDto {
+    id: number | null;
+    size: string | null;
+    color: string | null;
+    sku: string | null;
+    barcode: string | null;
+    stock: number;
 }
 
 export interface CreateProductDto {
@@ -108,6 +129,8 @@ export interface Sale {
     change_amount: number;
     status: string;
     notes: string | null;
+    customer_id: number | null;
+    customer_name: string | null;
     items: SaleItem[] | null;
     created_at: string;
 }
@@ -122,14 +145,25 @@ export interface SaleItem {
     unit_price: number;
     discount: number;
     subtotal: number;
+    returned_quantity: number;
+    variant_id: number | null;
+    variant_label: string | null;
+}
+
+export interface PaymentSplit {
+    method: string;
+    amount: number;
 }
 
 export interface CreateSaleDto {
     items: CreateSaleItemDto[];
     payment_method: string;
     amount_paid: number;
+    /** Desglose del cobro. Vacío u omitido = un solo método. */
+    payments?: PaymentSplit[];
     discount_total: number;
     notes?: string | null;
+    customer_id?: number | null;
 }
 
 export interface CreateSaleItemDto {
@@ -137,6 +171,7 @@ export interface CreateSaleItemDto {
     quantity: number;
     unit_price: number;
     discount: number;
+    variant_id?: number | null;
 }
 
 export interface SaleFilters {
@@ -154,6 +189,7 @@ export interface User {
     full_name: string;
     role: 'admin' | 'cashier';
     is_active: boolean;
+    must_change_password: boolean;
     created_at: string;
     updated_at: string;
 }
@@ -251,6 +287,14 @@ export interface TopProduct {
     total_revenue: number;
 }
 
+export interface CashierReport {
+    user_id: number;
+    user_name: string;
+    sale_count: number;
+    total_sales: number;
+    gross_profit: number;
+}
+
 // Config
 export interface SystemConfig {
     key: string;
@@ -259,8 +303,16 @@ export interface SystemConfig {
 }
 
 // Cart types (frontend only)
+export interface CartVariant {
+    id: number;
+    size: string | null;
+    color: string | null;
+    stock: number;
+}
+
 export interface CartItem {
     product: Product;
+    variant: CartVariant | null;
     quantity: number;
     discount: number;
 }
@@ -305,4 +357,100 @@ export interface CreatePromotionDto {
     end_date: string;
     applies_to: string;
     target_id: number | null;
+}
+
+// Customer types
+export interface Customer {
+    id: number;
+    name: string;
+    phone: string | null;
+    email: string | null;
+    notes: string | null;
+    is_active: boolean;
+    created_at: string;
+    updated_at: string;
+    total_purchases: number | null;
+    purchase_count: number | null;
+}
+
+export interface CreateCustomerDto {
+    name: string;
+    phone: string | null;
+    email: string | null;
+    notes: string | null;
+}
+
+export interface UpdateCustomerDto {
+    id: number;
+    name: string;
+    phone: string | null;
+    email: string | null;
+    notes: string | null;
+    is_active: boolean;
+}
+
+// Price history
+export interface PriceHistoryEntry {
+    id: number;
+    old_price: number;
+    new_price: number;
+    user_name: string | null;
+    created_at: string;
+}
+
+// Return types
+export interface CreateReturnDto {
+    sale_id: number;
+    reason: string | null;
+    items: { sale_item_id: number; quantity: number }[];
+}
+
+// Layaway (apartado) types
+export interface Layaway {
+    id: number;
+    folio: string;
+    customer_id: number | null;
+    customer_name: string | null;
+    user_id: number;
+    user_name: string | null;
+    total: number;
+    paid: number;
+    status: string;
+    notes: string | null;
+    due_date: string | null;
+    created_at: string;
+    completed_at: string | null;
+    items: LayawayItem[] | null;
+    payments: LayawayPayment[] | null;
+}
+
+export interface LayawayItem {
+    id: number;
+    layaway_id: number;
+    product_id: number;
+    product_name: string;
+    product_sku: string;
+    quantity: number;
+    unit_price: number;
+    subtotal: number;
+    variant_label: string | null;
+}
+
+export interface LayawayPayment {
+    id: number;
+    layaway_id: number;
+    amount: number;
+    payment_method: string;
+    user_id: number;
+    user_name: string | null;
+    created_at: string;
+}
+
+export interface CreateLayawayDto {
+    customer_id: number | null;
+    notes: string | null;
+    due_date: string | null;
+    initial_payment: number;
+    payment_method: string;
+    items: { product_id: number; quantity: number; unit_price: number; variant_id?: number | null }[];
 }

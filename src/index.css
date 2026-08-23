@@ -307,11 +307,32 @@ button { cursor: pointer; padding: 0; }
   display: grid; place-items: center;
   box-shadow: 0 6px 20px rgba(139,120,245,0.4);
 }
-.sidebar-nav {
-  flex: 1; padding: 14px 12px;
-  display: flex; flex-direction: column; gap: 3px;
-  overflow-y: auto;
+.sidebar-nav-wrap {
+  flex: 1; min-height: 0; position: relative;
 }
+/* Fade at the bottom edge so a clipped list reads as scrollable instead of
+   looking like the menu simply ends there. */
+.sidebar-nav-wrap::after {
+  content: '';
+  position: absolute; left: 0; right: 0; bottom: 0; height: 44px;
+  background: linear-gradient(to top, rgba(10,7,22,0.95) 20%, rgba(10,7,22,0));
+  pointer-events: none;
+  opacity: 0; transition: opacity .18s;
+}
+.sidebar-nav-wrap[data-overflowing='true']::after { opacity: 1; }
+.sidebar-nav {
+  height: 100%; padding: 14px 12px 20px;
+  display: flex; flex-direction: column; gap: 3px;
+  overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.16) transparent;
+}
+.sidebar-nav::-webkit-scrollbar { width: 6px; }
+.sidebar-nav::-webkit-scrollbar-track { background: transparent; }
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.14); border-radius: 3px;
+}
+.sidebar-nav::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.26); }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
   width: 100%; padding: 10px 12px; border-radius: 12px;
@@ -384,6 +405,15 @@ button { cursor: pointer; padding: 0; }
   transition: all 0.15s;
 }
 .topbar-icon-btn:hover { background: rgba(255,255,255,0.09); color: var(--t1); }
+
+/* ─── GLOBAL SEARCH (⌘K) ─────────────────────────────────────────────────────────── */
+.gs-group { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t3); padding: 10px 10px 4px; }
+.gs-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 9px 12px; border-radius: 10px; background: none; border: none;
+  cursor: pointer; text-align: left; transition: background 0.12s; font-family: inherit;
+}
+.gs-item:hover { background: rgba(255,255,255,0.06); }
 
 /* ─── CONTENT AREA ───────────────────────────────────────────────────────────────── */
 .content-area {

@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useCartStore } from '../stores/useCartStore';
+import { useCartStore, cartLineId, lineIdOf, stockOf } from '../stores/useCartStore';
 import { useSessionStore } from '../stores/useSessionStore';
+import { useHoldsStore, type ServiceType } from '../stores/useHoldsStore';
 import { formatCurrency } from '../utils';
 import * as api from '../api';
-import type { CartItem, Category, Product, Promotion } from '../types';
+
+const round2 = (v: number) => Math.round(v * 100) / 100;
+import type { CartItem, CartVariant, Category, Customer, PaymentSplit, Product, ProductVariant, Promotion } from '../types';
+
+const variantLabel = (v: CartVariant | null): string =>
+    v ? ([v.size, v.color].filter(x => x && x.trim()).join(' / ') || 'Único') : '';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -88,51 +94,67 @@ function CartThumb({ product, size = 40 }: { product: Product; size?: number }) 
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type ServiceType = 'direct' | 'layaway';
 const SERVICE_LABELS: Record<ServiceType, string> = { direct: 'Venta directa', layaway: 'Apartado' };
 
-interface HeldCart { items: CartItem[]; customerName: string; orderNotes: string; serviceType: ServiceType; orderNo: number; }
+interface StoreInfo { name: string; address: string; phone: string; footer: string; }
 interface Toast { id: number; msg: string; type: 'success' | 'warn' | 'error'; }
 interface CompletedSale {
     folio: string; total: number; change: number; items: CartItem[];
-    subtotal: number; lineDiscountTotal: number; promoDiscount: number;
+    subtotal: number; lineDiscountTotal: number; promoDiscount: number; tax: number;
     paymentMethod: string; amountPaid: number; serviceType: ServiceType;
     customerName: string; orderNotes: string;
 }
 let toastSeq = 0;
 
+// A promotion applies only within its date window (compared in local time).
+function isPromoValidToday(p: Promotion): boolean {
+    const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local
+    const start = (p.start_date || '').slice(0, 10);
+    const end = (p.end_date || '').slice(0, 10);
+    if (start && today < start) return false;
+    if (end && today > end) return false;
+    return true;
+}
+
 // ─── Print receipt ─────────────────────────────────────────────────────────────
-function buildReceiptHTML(sale: CompletedSale): string {
+const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] || c));
+
+function buildReceiptHTML(sale: CompletedSale, store: StoreInfo): string {
     const rows = sale.items.map(item =>
-        `<tr><td>${item.product.name}</td><td style="text-align:center">${item.quantity}</td>
+        `<tr><td>${esc(item.product.name)}${item.variant ? ` <small>(${esc(variantLabel(item.variant))})</small>` : ''}</td><td style="text-align:center">${item.quantity}</td>
          <td style="text-align:right">${formatCurrency(item.product.sale_price)}</td>
          <td style="text-align:right">${formatCurrency(item.product.sale_price * item.quantity - item.discount)}</td></tr>`
     ).join('');
     const now = new Date().toLocaleString('es-MX');
-    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Ticket ${sale.folio}</title>
+    const storeName = store.name || 'ThingsShop';
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Ticket ${esc(sale.folio)}</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:monospace;font-size:12px;width:80mm;margin:0 auto;padding:10px}
-h1{font-size:18px;text-align:center;margin-bottom:4px}.c{text-align:center}.hr{border:none;border-top:1px dashed #000;margin:8px 0}
+h1{font-size:18px;text-align:center;margin-bottom:4px}.c{text-align:center}.sm{font-size:11px}.hr{border:none;border-top:1px dashed #000;margin:8px 0}
 table{width:100%;border-collapse:collapse;margin:6px 0}th{text-align:left;padding:2px 0;border-bottom:1px solid #000}
 td{padding:3px 0;vertical-align:top}.grand td{font-weight:bold;font-size:14px;border-top:1px dashed #000;padding-top:6px}
-</style></head><body><h1>ThingsShop</h1><p class="c">Folio: <b>${sale.folio}</b></p><p class="c">${now}</p>
-<hr class="hr"><p>Tipo: ${SERVICE_LABELS[sale.serviceType]}</p>${sale.customerName ? `<p>Cliente: ${sale.customerName}</p>` : ''}
+</style></head><body><h1>${esc(storeName)}</h1>
+${store.address ? `<p class="c sm">${esc(store.address)}</p>` : ''}
+${store.phone ? `<p class="c sm">Tel: ${esc(store.phone)}</p>` : ''}
+<p class="c">Folio: <b>${esc(sale.folio)}</b></p><p class="c sm">${now}</p>
+<hr class="hr"><p>Tipo: ${SERVICE_LABELS[sale.serviceType]}</p>${sale.customerName ? `<p>Cliente: ${esc(sale.customerName)}</p>` : ''}
 <hr class="hr"><table><thead><tr><th>Artículo</th><th style="text-align:center">Cant</th><th style="text-align:right">Precio</th><th style="text-align:right">Total</th></tr></thead>
 <tbody>${rows}</tbody></table><hr class="hr"><table>
 <tr><td>Subtotal</td><td style="text-align:right">${formatCurrency(sale.subtotal)}</td></tr>
 ${sale.lineDiscountTotal > 0 ? `<tr><td>Desc. línea</td><td style="text-align:right">-${formatCurrency(sale.lineDiscountTotal)}</td></tr>` : ''}
 ${sale.promoDiscount > 0 ? `<tr><td>Promoción</td><td style="text-align:right">-${formatCurrency(sale.promoDiscount)}</td></tr>` : ''}
+${sale.tax > 0 ? `<tr><td>Impuesto</td><td style="text-align:right">${formatCurrency(sale.tax)}</td></tr>` : ''}
 <tr class="grand"><td>TOTAL</td><td style="text-align:right">${formatCurrency(sale.total)}</td></tr>
 <tr><td>Pago</td><td style="text-align:right">${formatCurrency(sale.amountPaid)}</td></tr>
 ${sale.change > 0 ? `<tr><td>Cambio</td><td style="text-align:right">${formatCurrency(sale.change)}</td></tr>` : ''}
-</table>${sale.orderNotes ? `<hr class="hr"><p>Notas: ${sale.orderNotes}</p>` : ''}
-<hr class="hr"><p class="c">¡Gracias por su compra en ThingsShop!</p></body></html>`;
+</table>${sale.orderNotes ? `<hr class="hr"><p>Notas: ${esc(sale.orderNotes)}</p>` : ''}
+<hr class="hr"><p class="c">${esc(store.footer || '¡Gracias por su compra!')}</p></body></html>`;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function POSPage() {
     const {
         items, addItem, removeItem, updateQuantity, clear, restoreItems,
-        applyDiscount, getSubtotal, getDiscountTotal, getTotal, getItemCount,
+        applyDiscount, getSubtotal, getDiscountTotal, getItemCount,
     } = useCartStore();
     const { user, cashRegisterId } = useSessionStore();
 
@@ -145,18 +167,34 @@ export default function POSPage() {
 
     const [serviceType, setServiceType] = useState<ServiceType>('direct');
     const [customerName, setCustomerName] = useState('');
+    const [customers, setCustomers] = useState<Customer[]>([]);
+    const [customerId, setCustomerId] = useState<number | null>(null);
     const [orderNotes, setOrderNotes] = useState('');
+
+    // Layaway (apartado) creation
+    const [showLayaway, setShowLayaway] = useState(false);
+    const [layawayInitial, setLayawayInitial] = useState('');
+    const [layawayMethod, setLayawayMethod] = useState('cash');
+    const [layawayDue, setLayawayDue] = useState('');
+
+    // Variant picker
+    const [variantPickerProduct, setVariantPickerProduct] = useState<Product | null>(null);
+    const [variantOptions, setVariantOptions] = useState<ProductVariant[]>([]);
     const [orderSeq, setOrderSeq] = useState(() => Math.floor(Math.random() * 500) + 1000);
 
     const [showPayment, setShowPayment] = useState(false);
     const [paymentMethod, setPaymentMethod] = useState('cash');
     const [amountPaid, setAmountPaid] = useState('');
+    // Non-cash legs of a mixed tender; cash covers whatever is left over.
+    const [mixedCard, setMixedCard] = useState('');
+    const [mixedTransfer, setMixedTransfer] = useState('');
     const [processing, setProcessing] = useState(false);
     const [lastSale, setLastSale] = useState<CompletedSale | null>(null);
 
     const [toasts, setToasts] = useState<Toast[]>([]);
 
-    const [holds, setHolds] = useState<(HeldCart | null)[]>([null, null, null]);
+    const { holds, setHolds } = useHoldsStore();
+    const [config, setConfig] = useState<Record<string, string>>({});
 
     const [promos, setPromos] = useState<Promotion[]>([]);
     const [promoInput, setPromoInput] = useState('');
@@ -178,13 +216,18 @@ export default function POSPage() {
     useEffect(() => {
         (async () => {
             try {
-                const [cats, prods, promoList] = await Promise.all([
-                    api.getCategories(), api.getProducts({ is_active: true }), api.getPromotions(),
+                const [cats, prods, promoList, cfg, custs] = await Promise.all([
+                    api.getCategories(), api.getProducts({ is_active: true }), api.getPromotions(), api.getAllConfig(),
+                    api.getCustomers().catch(() => []),
                 ]);
                 setCategories(cats.filter(c => c.is_active));
                 setAllProducts(prods);
                 setPromos(promoList.filter(p => p.is_active));
-            } catch (err) { console.error(err); }
+                setCustomers(custs.filter(c => c.is_active));
+                const map: Record<string, string> = {};
+                cfg.forEach(c => { map[c.key] = c.value; });
+                setConfig(map);
+            } catch (err) { showToast(String(err), 'error'); }
             finally { setLoadingProducts(false); }
         })();
     }, []);
@@ -198,48 +241,57 @@ export default function POSPage() {
             if (e.key === 'F10') { e.preventDefault(); if (its.length > 0 && !sp && !ls) setShowPayment(true); return; }
             if (e.key === 'Escape' && sp) { e.preventDefault(); setShowPayment(false); return; }
             if (e.key === 'F2') { e.preventDefault(); searchRef.current?.focus(); return; }
-            if (isInput && target !== searchRef.current) {
-                if (e.key === 'Enter' && barcodeBuffer.current.length >= 4) {
-                    e.preventDefault();
-                    const code = barcodeBuffer.current; barcodeBuffer.current = '';
-                    handleBarcodeScan(code);
-                } else if (e.key.length === 1) {
-                    barcodeBuffer.current += e.key;
-                    if (barcodeTimeout.current) clearTimeout(barcodeTimeout.current);
-                    barcodeTimeout.current = window.setTimeout(() => { barcodeBuffer.current = ''; }, 100);
-                }
-                return;
-            }
-            if (!isInput) {
-                if (e.key === 'Enter' && barcodeBuffer.current.length >= 4) {
-                    e.preventDefault();
-                    const code = barcodeBuffer.current; barcodeBuffer.current = '';
-                    handleBarcodeScan(code);
-                } else if (e.key.length === 1) {
-                    barcodeBuffer.current += e.key;
-                    if (barcodeTimeout.current) clearTimeout(barcodeTimeout.current);
-                    barcodeTimeout.current = window.setTimeout(() => { barcodeBuffer.current = ''; }, 100);
-                }
+            // Barcode capture only when NOT typing in a field — otherwise typing
+            // in customer/notes/amount inputs would trigger false barcode scans.
+            if (isInput) return;
+            if (e.key === 'Enter' && barcodeBuffer.current.length >= 4) {
+                e.preventDefault();
+                const code = barcodeBuffer.current; barcodeBuffer.current = '';
+                handleBarcodeScan(code);
+            } else if (e.key.length === 1) {
+                barcodeBuffer.current += e.key;
+                if (barcodeTimeout.current) clearTimeout(barcodeTimeout.current);
+                barcodeTimeout.current = window.setTimeout(() => { barcodeBuffer.current = ''; }, 100);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const handleBarcodeScan = async (code: string) => {
-        try {
-            const product = await api.getProductByBarcode(code);
-            if (product) { handleAddItem(product); setSearchQuery(''); setSearchResults([]); }
-            else showToast('Producto no encontrado', 'error');
-        } catch (err) { console.error(err); }
+    const openVariantPicker = async (product: Product) => {
+        setVariantPickerProduct(product);
+        setVariantOptions([]);
+        try { setVariantOptions(await api.getVariants(product.id)); } catch { setVariantOptions([]); }
     };
 
+    const addVariantToCart = useCallback((product: Product, v: ProductVariant) => {
+        const cv: CartVariant = { id: v.id, size: v.size, color: v.color, stock: v.stock };
+        if (v.stock <= 0) { showToast(`Sin stock: ${product.name} ${variantLabel(cv)}`, 'error'); return; }
+        const existing = liveRef.current.items.find(i => cartLineId(i) === lineIdOf(product.id, v.id));
+        if (existing && existing.quantity >= v.stock) { showToast(`"${product.name} ${variantLabel(cv)}" alcanzó el máximo (${v.stock})`, 'warn'); return; }
+        addItem(product, cv);
+    }, [addItem, showToast]);
+
     const handleAddItem = useCallback((product: Product) => {
-        const existing = liveRef.current.items.find(i => i.product.id === product.id);
         if (product.stock <= 0) { showToast(`Sin stock: ${product.name}`, 'error'); return; }
+        if (product.has_variants) { openVariantPicker(product); return; }
+        const existing = liveRef.current.items.find(i => cartLineId(i) === lineIdOf(product.id, null));
         if (existing && existing.quantity >= product.stock) { showToast(`"${product.name}" ya alcanzó el máximo (${product.stock})`, 'warn'); return; }
         addItem(product);
     }, [addItem, showToast]);
+
+    const handleBarcodeScan = async (code: string) => {
+        try {
+            const variant = await api.getVariantByBarcode(code);
+            if (variant) {
+                const product = allProducts.find(p => p.id === variant.product_id);
+                if (product) { addVariantToCart(product, variant); setSearchQuery(''); setSearchResults([]); return; }
+            }
+            const product = await api.getProductByBarcode(code);
+            if (product) { handleAddItem(product); setSearchQuery(''); setSearchResults([]); }
+            else showToast('Producto no encontrado', 'error');
+        } catch (err) { showToast(String(err), 'error'); }
+    };
 
     const handleSearch = useCallback(async (query: string) => {
         setSearchQuery(query);
@@ -247,7 +299,7 @@ export default function POSPage() {
         try {
             const products = await api.getProducts({ search: query, is_active: true });
             setSearchResults(products.slice(0, 24));
-        } catch (err) { console.error(err); }
+        } catch (err) { showToast(String(err), 'error'); }
     }, []);
 
     const visibleProducts = useMemo(() => {
@@ -257,18 +309,27 @@ export default function POSPage() {
     }, [activeCategory, allProducts, searchQuery.length, searchResults]);
 
     const filteredPromos = useMemo(() => {
-        if (!promoInput) return promos.slice(0, 6);
+        const valid = promos.filter(isPromoValidToday);
+        if (!promoInput) return valid.slice(0, 6);
         const q = promoInput.toLowerCase();
-        return promos.filter(p => p.name.toLowerCase().includes(q)).slice(0, 6);
+        return valid.filter(p => p.name.toLowerCase().includes(q)).slice(0, 6);
     }, [promos, promoInput]);
 
     const promoDiscount = useMemo(() => {
-        if (!activePromo) return 0;
-        const base = getSubtotal() - getDiscountTotal();
+        if (!activePromo || !isPromoValidToday(activePromo)) return 0;
+        // Only the items the promo applies to contribute to its base.
+        let base = 0;
+        for (const it of items) {
+            const lineNet = it.product.sale_price * it.quantity - it.discount;
+            if (activePromo.applies_to === 'all') base += lineNet;
+            else if (activePromo.applies_to === 'category' && it.product.category_id === activePromo.target_id) base += lineNet;
+            else if (activePromo.applies_to === 'product' && it.product.id === activePromo.target_id) base += lineNet;
+        }
+        base = Math.max(0, base);
         if (base <= 0) return 0;
         if (activePromo.discount_type === 'percentage') return Math.round(base * (activePromo.discount_value / 100) * 100) / 100;
         return Math.min(activePromo.discount_value, base);
-    }, [activePromo, getSubtotal, getDiscountTotal]);
+    }, [activePromo, items]);
 
     const handleApplyPromo = (promo: Promotion) => {
         setActivePromo(promo); setPromoInput(promo.name); setPromoDropdown(false);
@@ -279,14 +340,41 @@ export default function POSPage() {
 
     const subtotal = getSubtotal();
     const lineDiscountTotal = getDiscountTotal();
-    const total = Math.max(0, getTotal() - promoDiscount);
-    const changeAmount = paymentMethod === 'cash' ? (parseFloat(amountPaid) || 0) - total : 0;
+    const taxableBase = Math.max(0, subtotal - lineDiscountTotal - promoDiscount);
+    const taxRate = parseFloat(config.tax_rate || '0') || 0;
+    const tax = Math.round(taxableBase * taxRate / 100 * 100) / 100;
+    const total = Math.round((taxableBase + tax) * 100) / 100;
+    const mixedNonCash = round2((parseFloat(mixedCard) || 0) + (parseFloat(mixedTransfer) || 0));
+    // What still has to be paid in cash once card/transfer are applied.
+    const mixedCashDue = round2(Math.max(0, total - mixedNonCash));
+    const cashGiven = parseFloat(amountPaid) || 0;
+
+    const changeAmount = paymentMethod === 'cash'
+        ? cashGiven - total
+        : paymentMethod === 'mixed'
+            ? cashGiven - mixedCashDue
+            : 0;
+
+    // A mixed tender is only valid when the card/transfer legs stay within the
+    // total and the cash on the counter covers the rest.
+    const mixedInvalid = paymentMethod === 'mixed'
+        && (mixedNonCash <= 0 || mixedNonCash > total + 0.001 || cashGiven + 0.001 < mixedCashDue);
+
+    const cannotCharge = processing || !cashRegisterId || mixedInvalid
+        || (paymentMethod === 'cash' && cashGiven < total);
+
+    const storeInfo: StoreInfo = {
+        name: config.store_name || '', address: config.store_address || '',
+        phone: config.store_phone || '', footer: config.ticket_footer || '',
+    };
 
     const handleHold = () => {
         if (items.length === 0) return;
         const emptyIdx = holds.findIndex(h => h === null);
         if (emptyIdx === -1) { showToast('Máximo 3 órdenes en espera', 'error'); return; }
-        setHolds(prev => { const next = [...prev]; next[emptyIdx] = { items: items.map(i => ({ ...i })), customerName, orderNotes, serviceType, orderNo: orderSeq }; return next; });
+        const next = [...holds];
+        next[emptyIdx] = { items: items.map(i => ({ ...i })), customerName, orderNotes, serviceType, orderNo: orderSeq, promo: activePromo };
+        setHolds(next);
         clear(); setCustomerName(''); setOrderNotes(''); setServiceType('direct'); setActivePromo(null); setPromoInput('');
         setOrderSeq(prev => prev + 1); showToast(`Orden #${orderSeq} en espera`, 'success');
     };
@@ -297,31 +385,77 @@ export default function POSPage() {
         if (items.length > 0) {
             const emptyIdx = holds.findIndex((h, i) => h === null && i !== slotIdx);
             if (emptyIdx === -1) { showToast('Libera un espacio antes de cambiar de orden', 'error'); return; }
-            newHolds[emptyIdx] = { items: items.map(i => ({ ...i })), customerName, orderNotes, serviceType, orderNo: orderSeq };
+            newHolds[emptyIdx] = { items: items.map(i => ({ ...i })), customerName, orderNotes, serviceType, orderNo: orderSeq, promo: activePromo };
         }
         newHolds[slotIdx] = null; setHolds(newHolds);
         restoreItems(slot.items); setCustomerName(slot.customerName); setOrderNotes(slot.orderNotes);
-        setServiceType(slot.serviceType); setOrderSeq(slot.orderNo); setActivePromo(null); setPromoInput('');
+        setServiceType(slot.serviceType); setOrderSeq(slot.orderNo);
+        setActivePromo(slot.promo); setPromoInput(slot.promo?.name || '');
         showToast(`Orden #${slot.orderNo} restaurada`, 'success');
     };
 
     const handleCompleteSale = async () => {
         if (items.length === 0 || !user) return;
         if (!cashRegisterId) { showToast('Abre la caja antes de cobrar', 'error'); setShowPayment(false); return; }
-        const paid = paymentMethod === 'cash' ? parseFloat(amountPaid) || 0 : total;
-        if (paymentMethod === 'cash' && paid < total) return;
+        if (cannotCharge) return;
+
+        const payments: PaymentSplit[] = paymentMethod === 'mixed'
+            ? [
+                ...(parseFloat(mixedCard) > 0 ? [{ method: 'card', amount: parseFloat(mixedCard) }] : []),
+                ...(parseFloat(mixedTransfer) > 0 ? [{ method: 'transfer', amount: parseFloat(mixedTransfer) }] : []),
+                ...(cashGiven > 0 ? [{ method: 'cash', amount: cashGiven }] : []),
+              ]
+            : [{ method: paymentMethod, amount: paymentMethod === 'cash' ? cashGiven : total }];
+
+        const paid = round2(payments.reduce((sum, p) => sum + p.amount, 0));
         setProcessing(true);
         const saleItems = items.map(i => ({ ...i }));
-        const saleSubtotal = subtotal, saleLineDiscount = lineDiscountTotal;
+        const saleSubtotal = subtotal, saleLineDiscount = lineDiscountTotal, saleTax = tax;
         try {
-            const sale = await api.createSale(user.id, cashRegisterId, {
-                items: items.map(item => ({ product_id: item.product.id, quantity: item.quantity, unit_price: item.product.sale_price, discount: item.discount })),
-                payment_method: paymentMethod, amount_paid: paid,
+            const sale = await api.createSale(cashRegisterId, {
+                items: items.map(item => ({ product_id: item.product.id, quantity: item.quantity, unit_price: item.product.sale_price, discount: item.discount, variant_id: item.variant?.id ?? null })),
+                payment_method: paymentMethod, amount_paid: paid, payments,
                 discount_total: saleLineDiscount + promoDiscount,
+                customer_id: customerId,
                 notes: [SERVICE_LABELS[serviceType], customerName ? `Cliente: ${customerName}` : '', activePromo ? `Promo: ${activePromo.name}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
             });
-            setLastSale({ folio: sale.folio, total: sale.total, change: sale.change_amount, items: saleItems, subtotal: saleSubtotal, lineDiscountTotal: saleLineDiscount, promoDiscount, paymentMethod, amountPaid: paid, serviceType, customerName, orderNotes });
-            clear(); setShowPayment(false); setAmountPaid(''); setCustomerName(''); setOrderNotes(''); setActivePromo(null); setPromoInput('');
+            setLastSale({ folio: sale.folio, total: sale.total, change: sale.change_amount, items: saleItems, subtotal: saleSubtotal, lineDiscountTotal: saleLineDiscount, promoDiscount, tax: saleTax, paymentMethod, amountPaid: paid, serviceType, customerName, orderNotes });
+            // Reflect the sold units in the on-screen catalog immediately.
+            const soldMap = new Map<number, number>();
+            saleItems.forEach(i => soldMap.set(i.product.id, (soldMap.get(i.product.id) || 0) + i.quantity));
+            const applySold = (list: Product[]) => list.map(p => soldMap.has(p.id) ? { ...p, stock: Math.max(0, p.stock - (soldMap.get(p.id) || 0)) } : p);
+            setAllProducts(applySold);
+            setSearchResults(applySold);
+            clear(); setShowPayment(false); setAmountPaid(''); setMixedCard(''); setMixedTransfer(''); setCustomerName(''); setCustomerId(null); setOrderNotes(''); setActivePromo(null); setPromoInput('');
+            setOrderSeq(prev => prev + 1);
+        } catch (err) { showToast(String(err), 'error'); }
+        finally { setProcessing(false); }
+    };
+
+    // Apartado total = gross (no line/promo discounts apply to layaways).
+    const layawayTotal = subtotal;
+
+    const handleCreateLayaway = async () => {
+        if (items.length === 0 || !user) return;
+        const initial = parseFloat(layawayInitial) || 0;
+        if (initial > layawayTotal) { showToast('El anticipo no puede superar el total', 'error'); return; }
+        setProcessing(true);
+        const soldMap = new Map<number, number>();
+        items.forEach(i => soldMap.set(i.product.id, (soldMap.get(i.product.id) || 0) + i.quantity));
+        try {
+            await api.createLayaway({
+                customer_id: customerId,
+                notes: [customerName ? `Cliente: ${customerName}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
+                due_date: layawayDue || null,
+                initial_payment: initial,
+                payment_method: layawayMethod,
+                items: items.map(i => ({ product_id: i.product.id, quantity: i.quantity, unit_price: i.product.sale_price, variant_id: i.variant?.id ?? null })),
+            });
+            const applySold = (list: Product[]) => list.map(p => soldMap.has(p.id) ? { ...p, stock: Math.max(0, p.stock - (soldMap.get(p.id) || 0)) } : p);
+            setAllProducts(applySold); setSearchResults(applySold);
+            showToast('Apartado creado', 'success');
+            clear(); setShowLayaway(false); setLayawayInitial(''); setLayawayDue('');
+            setCustomerName(''); setCustomerId(null); setOrderNotes(''); setServiceType('direct'); setActivePromo(null); setPromoInput('');
             setOrderSeq(prev => prev + 1);
         } catch (err) { showToast(String(err), 'error'); }
         finally { setProcessing(false); }
@@ -329,9 +463,32 @@ export default function POSPage() {
 
     const handlePrint = () => {
         if (!lastSale) return;
-        const html = buildReceiptHTML(lastSale);
-        const win = window.open('', '_blank', 'width=420,height=640');
-        if (win) { win.document.write(html); win.document.close(); win.focus(); win.print(); }
+        const html = buildReceiptHTML(lastSale, storeInfo);
+        // Hidden iframe printing works reliably inside the Tauri webview,
+        // where window.open can be blocked or return null.
+        const iframe = document.createElement('iframe');
+        iframe.style.position = 'fixed';
+        iframe.style.right = '0';
+        iframe.style.bottom = '0';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = '0';
+        document.body.appendChild(iframe);
+        const doc = iframe.contentWindow?.document;
+        if (!doc) {
+            const win = window.open('', '_blank', 'width=420,height=640');
+            if (win) { win.document.write(html); win.document.close(); win.focus(); win.print(); }
+            document.body.removeChild(iframe);
+            return;
+        }
+        doc.open(); doc.write(html); doc.close();
+        const run = () => {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+            setTimeout(() => { if (iframe.parentNode) document.body.removeChild(iframe); }, 1000);
+        };
+        // Give the browser a tick to lay out before printing.
+        setTimeout(run, 200);
     };
 
     const isSearching = searchQuery.length >= 2;
@@ -341,6 +498,7 @@ export default function POSPage() {
         { k: 'cash', label: 'Efectivo', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg> },
         { k: 'card', label: 'Tarjeta', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg> },
         { k: 'transfer', label: 'Transfer.', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg> },
+        { k: 'mixed', label: 'Mixto', icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="7" width="14" height="10" rx="2"/><path d="M8 17v2a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-2"/></svg> },
     ];
 
     return (
@@ -455,10 +613,25 @@ export default function POSPage() {
                         )}
                     </div>
 
-                    {/* Customer name */}
-                    <div style={{ marginBottom: 14 }}>
+                    {/* Customer selector + free-text name */}
+                    <div style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {customers.length > 0 && (
+                            <select
+                                value={customerId ?? ''}
+                                onChange={e => {
+                                    const id = e.target.value ? Number(e.target.value) : null;
+                                    setCustomerId(id);
+                                    const c = customers.find(cu => cu.id === id);
+                                    if (c) setCustomerName(c.name);
+                                }}
+                                style={{ width: '100%', padding: '9px 12px', borderRadius: 11, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)', color: T.t2, fontSize: 12, fontFamily: 'inherit', outline: 'none' }}
+                            >
+                                <option value="">Cliente registrado (opcional)…</option>
+                                {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                        )}
                         <input
-                            value={customerName} onChange={e => setCustomerName(e.target.value)}
+                            value={customerName} onChange={e => { setCustomerName(e.target.value); setCustomerId(null); }}
                             placeholder="Nombre del cliente (opcional)"
                             style={{ width: '100%', padding: '9px 12px', borderRadius: 11, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)', color: T.t2, fontSize: 12, fontFamily: 'inherit', outline: 'none' }}
                             onFocus={e => (e.target.style.borderColor = 'rgba(139,120,245,0.4)')}
@@ -506,24 +679,28 @@ export default function POSPage() {
                             </div>
                         ) : items.map(item => {
                             const lineTotal = item.product.sale_price * item.quantity - item.discount;
+                            const lineId = cartLineId(item);
+                            const maxStock = stockOf(item);
                             return (
-                                <div key={item.product.id} className="cart-item">
+                                <div key={lineId} className="cart-item">
                                     <div className="cart-item-top">
                                         <CartThumb product={item.product} size={40} />
                                         <div style={{ flex: 1, minWidth: 0 }}>
                                             <p style={{ fontSize: 13, fontWeight: 700, color: T.t1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.product.name}</p>
-                                            <p style={{ fontSize: 11, color: T.t3, fontWeight: 600 }}>{formatCurrency(item.product.sale_price)} c/u</p>
+                                            {item.variant
+                                                ? <p style={{ fontSize: 11, color: T.primary, fontWeight: 700 }}>{variantLabel(item.variant)} · {formatCurrency(item.product.sale_price)} c/u</p>
+                                                : <p style={{ fontSize: 11, color: T.t3, fontWeight: 600 }}>{formatCurrency(item.product.sale_price)} c/u</p>}
                                         </div>
-                                        <button className="cart-item-del" onClick={() => removeItem(item.product.id)}>
+                                        <button className="cart-item-del" onClick={() => removeItem(lineId)}>
                                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
                                         </button>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
                                         {/* Qty */}
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                            <button className="cart-qty-btn" onClick={() => updateQuantity(item.product.id, item.quantity - 1)}>−</button>
+                                            <button className="cart-qty-btn" onClick={() => updateQuantity(lineId, item.quantity - 1)}>−</button>
                                             <span style={{ fontSize: 14, fontWeight: 800, color: T.t1, width: 24, textAlign: 'center' }}>{item.quantity}</span>
-                                            <button className="cart-qty-btn" onClick={() => updateQuantity(item.product.id, item.quantity + 1)} disabled={item.quantity >= item.product.stock}>+</button>
+                                            <button className="cart-qty-btn" onClick={() => updateQuantity(lineId, item.quantity + 1)} disabled={item.quantity >= maxStock}>+</button>
                                         </div>
                                         {/* Discount */}
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1 }}>
@@ -531,7 +708,7 @@ export default function POSPage() {
                                             <input
                                                 type="number" min="0" step="0.01"
                                                 value={item.discount || ''}
-                                                onChange={e => applyDiscount(item.product.id, Math.max(0, Math.min(parseFloat(e.target.value) || 0, item.product.sale_price * item.quantity)))}
+                                                onChange={e => applyDiscount(lineId, Math.max(0, Math.min(parseFloat(e.target.value) || 0, item.product.sale_price * item.quantity)))}
                                                 placeholder="Desc."
                                                 style={{ width: '100%', padding: '5px 8px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.10)', color: T.t2, fontSize: 12, fontFamily: 'inherit', outline: 'none' }}
                                             />
@@ -604,13 +781,19 @@ export default function POSPage() {
                                         <span style={{ fontSize: 13, color: T.primary, fontWeight: 600 }}>−{formatCurrency(promoDiscount)}</span>
                                     </div>
                                 )}
+                                {tax > 0 && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        <span style={{ fontSize: 13, color: T.t3 }}>IVA ({taxRate}%)</span>
+                                        <span style={{ fontSize: 13, color: T.t2, fontWeight: 600 }}>{formatCurrency(tax)}</span>
+                                    </div>
+                                )}
                                 <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.07)', marginTop: 4 }}>
                                     <span style={{ fontSize: 16, fontWeight: 800, color: T.t1 }}>Total</span>
                                     <span style={{ fontSize: 20, fontWeight: 900, color: T.primary, fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(total)}</span>
                                 </div>
                             </div>
                             <button
-                                onClick={() => setShowPayment(true)}
+                                onClick={() => serviceType === 'layaway' ? setShowLayaway(true) : setShowPayment(true)}
                                 style={{
                                     width: '100%', padding: '13px', borderRadius: 14, border: 'none',
                                     background: 'linear-gradient(135deg, #F0C547, #C8A030)',
@@ -621,7 +804,7 @@ export default function POSPage() {
                                 onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 10px 28px rgba(240,197,71,0.45)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
                                 onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 6px 20px rgba(240,197,71,0.3)'; e.currentTarget.style.transform = 'none'; }}
                             >
-                                Cobrar
+                                {serviceType === 'layaway' ? 'Crear apartado' : 'Cobrar'}
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
                             </button>
                             <button onClick={handleHold} style={{ width: '100%', marginTop: 8, padding: '9px', borderRadius: 11, fontSize: 12, fontWeight: 700, color: T.t3, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.09)', cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s' }}
@@ -660,13 +843,62 @@ export default function POSPage() {
                         </div>
 
                         {/* Payment methods */}
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 22 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10, marginBottom: 22 }}>
                             {payMethods.map(m => (
                                 <button key={m.k} onClick={() => setPaymentMethod(m.k)} className={`pay-method-btn${paymentMethod === m.k ? ' active' : ''}`}>
                                     {m.icon}{m.label}
                                 </button>
                             ))}
                         </div>
+
+                        {/* Mixed tender: card/transfer legs, cash covers the rest */}
+                        {paymentMethod === 'mixed' && (
+                            <div style={{ marginBottom: 20 }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+                                    <div>
+                                        <label className="form-label">Tarjeta</label>
+                                        <input type="number" step="1" min="0" value={mixedCard} autoFocus
+                                            onChange={e => setMixedCard(e.target.value)} placeholder="0.00"
+                                            style={{ width: '100%', padding: '11px 14px', borderRadius: 12, fontSize: 15, fontWeight: 700, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: T.t1, fontFamily: 'inherit', outline: 'none', fontVariantNumeric: 'tabular-nums' }} />
+                                    </div>
+                                    <div>
+                                        <label className="form-label">Transferencia</label>
+                                        <input type="number" step="1" min="0" value={mixedTransfer}
+                                            onChange={e => setMixedTransfer(e.target.value)} placeholder="0.00"
+                                            style={{ width: '100%', padding: '11px 14px', borderRadius: 12, fontSize: 15, fontWeight: 700, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: T.t1, fontFamily: 'inherit', outline: 'none', fontVariantNumeric: 'tabular-nums' }} />
+                                    </div>
+                                </div>
+
+                                <label className="form-label">Efectivo recibido</label>
+                                <input type="number" step="1" min="0" value={amountPaid}
+                                    onChange={e => setAmountPaid(e.target.value)} placeholder="0.00"
+                                    style={{ width: '100%', padding: '13px 16px', borderRadius: 13, fontSize: 18, fontWeight: 800, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: T.t1, fontFamily: 'inherit', outline: 'none', fontVariantNumeric: 'tabular-nums' }} />
+
+                                <div style={{ marginTop: 12, padding: '12px 16px', borderRadius: 13, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: T.t3 }}>
+                                        <span>Cubierto sin efectivo</span>
+                                        <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(mixedNonCash)}</span>
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 700, color: T.t1 }}>
+                                        <span>Falta en efectivo</span>
+                                        <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(mixedCashDue)}</span>
+                                    </div>
+                                </div>
+
+                                {mixedNonCash > total + 0.001 && (
+                                    <p style={{ marginTop: 10, fontSize: 12, color: T.danger }}>
+                                        Tarjeta y transferencia suman más que el total de la venta.
+                                    </p>
+                                )}
+
+                                {changeAmount > 0 && !mixedInvalid && (
+                                    <div style={{ marginTop: 12, padding: '12px 16px', borderRadius: 13, background: 'rgba(34,211,160,0.10)', border: '1px solid rgba(34,211,160,0.20)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span style={{ fontSize: 13, fontWeight: 600, color: T.success }}>Cambio</span>
+                                        <span style={{ fontSize: 18, fontWeight: 900, color: T.success, fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(changeAmount)}</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Cash input */}
                         {paymentMethod === 'cash' && (
@@ -698,13 +930,13 @@ export default function POSPage() {
 
                         <button
                             onClick={handleCompleteSale}
-                            disabled={processing || !cashRegisterId || (paymentMethod === 'cash' && (parseFloat(amountPaid) || 0) < total)}
+                            disabled={cannotCharge}
                             style={{
                                 width: '100%', padding: '14px', borderRadius: 14, border: 'none',
                                 background: 'linear-gradient(135deg, #22D3A0, #18A880)',
                                 color: '#001a13', fontSize: 15, fontWeight: 800, cursor: processing ? 'wait' : 'pointer',
                                 fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                                boxShadow: '0 8px 28px rgba(34,211,160,0.35)', opacity: (processing || !cashRegisterId || (paymentMethod === 'cash' && (parseFloat(amountPaid) || 0) < total)) ? 0.45 : 1,
+                                boxShadow: '0 8px 28px rgba(34,211,160,0.35)', opacity: cannotCharge ? 0.45 : 1,
                                 transition: 'all 0.15s',
                             }}
                         >
@@ -713,6 +945,93 @@ export default function POSPage() {
                                 : <><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>Confirmar venta</>
                             }
                         </button>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Variant picker ── */}
+            {variantPickerProduct && (
+                <div className="modal-overlay" onClick={() => setVariantPickerProduct(null)}>
+                    <div className="glass-modal scale-in" style={{ width: '100%', maxWidth: 420, padding: 24 }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                            <h2 style={{ fontSize: 18, fontWeight: 900, color: T.t1 }}>{variantPickerProduct.name}</h2>
+                            <button onClick={() => setVariantPickerProduct(null)} style={{ width: 32, height: 32, borderRadius: 10, background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)', display: 'grid', placeItems: 'center', color: T.t2, cursor: 'pointer' }}>
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </button>
+                        </div>
+                        <p style={{ fontSize: 12, color: T.t3, marginBottom: 16 }}>Elige talla / color</p>
+                        {variantOptions.length === 0 ? (
+                            <p style={{ textAlign: 'center', padding: '24px 0', fontSize: 13, color: T.t3 }}>Cargando variantes…</p>
+                        ) : (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+                                {variantOptions.map(v => {
+                                    const label = variantLabel({ id: v.id, size: v.size, color: v.color, stock: v.stock });
+                                    const out = v.stock <= 0;
+                                    return (
+                                        <button key={v.id} disabled={out} onClick={() => addVariantToCart(variantPickerProduct, v)}
+                                            style={{
+                                                display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, padding: '12px 14px', borderRadius: 12, cursor: out ? 'not-allowed' : 'pointer',
+                                                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.10)', fontFamily: 'inherit', opacity: out ? 0.5 : 1,
+                                            }}>
+                                            <span style={{ fontSize: 14, fontWeight: 800, color: T.t1 }}>{label}</span>
+                                            <span style={{ fontSize: 11, fontWeight: 700, color: v.stock <= 3 ? T.danger : T.t3 }}>{out ? 'Agotado' : `${v.stock} disp.`}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
+                        <button onClick={() => setVariantPickerProduct(null)} style={{ width: '100%', marginTop: 16, padding: '11px', borderRadius: 12, fontSize: 13, fontWeight: 700, color: T.t1, background: 'rgba(139,120,245,0.15)', border: '1px solid rgba(139,120,245,0.3)', cursor: 'pointer', fontFamily: 'inherit' }}>
+                            Listo
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Layaway (apartado) modal ── */}
+            {showLayaway && (
+                <div className="modal-overlay">
+                    <div className="glass-modal scale-in" style={{ width: '100%', maxWidth: 420, padding: 28 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                            <h2 style={{ fontSize: 20, fontWeight: 900, color: T.t1 }}>Nuevo apartado</h2>
+                            <button onClick={() => setShowLayaway(false)} style={{ width: 34, height: 34, borderRadius: 10, background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)', display: 'grid', placeItems: 'center', color: T.t2, cursor: 'pointer' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </button>
+                        </div>
+
+                        <div style={{ padding: '16px 0', textAlign: 'center', marginBottom: 18, borderTop: '1px solid rgba(255,255,255,0.07)', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+                            <p style={{ fontSize: 12, fontWeight: 600, color: T.t3, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Total del apartado</p>
+                            <p style={{ fontSize: 34, fontWeight: 900, color: T.t1, fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(layawayTotal)}</p>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                            <div>
+                                <label className="form-label">Anticipo</label>
+                                <input type="number" step="0.01" value={layawayInitial} onChange={e => setLayawayInitial(e.target.value)} placeholder="0.00"
+                                    style={{ width: '100%', padding: '12px 14px', borderRadius: 12, fontSize: 16, fontWeight: 700, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: T.t1, fontFamily: 'inherit', outline: 'none', fontVariantNumeric: 'tabular-nums' }} autoFocus />
+                            </div>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <div style={{ flex: 1 }}>
+                                    <label className="form-label">Método</label>
+                                    <select value={layawayMethod} onChange={e => setLayawayMethod(e.target.value)} className="input">
+                                        <option value="cash">Efectivo</option>
+                                        <option value="card">Tarjeta</option>
+                                        <option value="transfer">Transferencia</option>
+                                    </select>
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                    <label className="form-label">Fecha límite</label>
+                                    <input type="date" value={layawayDue} onChange={e => setLayawayDue(e.target.value)} className="input" />
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 11, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.2)' }}>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: T.warning }}>Saldo pendiente</span>
+                                <span style={{ fontSize: 15, fontWeight: 900, color: T.warning, fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(Math.max(0, layawayTotal - (parseFloat(layawayInitial) || 0)))}</span>
+                            </div>
+                            <button onClick={handleCreateLayaway} disabled={processing}
+                                style={{ width: '100%', padding: '14px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg, #8B78F5, #6B56E0)', color: '#fff', fontSize: 15, fontWeight: 800, cursor: processing ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, opacity: processing ? 0.6 : 1 }}>
+                                {processing ? 'Procesando...' : 'Confirmar apartado'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

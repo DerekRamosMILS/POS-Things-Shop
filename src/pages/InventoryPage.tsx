@@ -63,14 +63,14 @@ export default function InventoryPage() {
                 api.getProducts({ is_active: true }),
             ]);
             setMovements(m); setLowStock(ls); setProducts(prods);
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+        } catch (err) { showToast(String(err), 'error'); } finally { setLoading(false); }
     };
 
     const handleAdjust = async () => {
         if (!user || !adjustForm.product_id || adjustForm.quantity === 0 || !adjustForm.reason) return;
         setProcessing(true);
         try {
-            await api.adjustStock(user.id, adjustForm);
+            await api.adjustStock(adjustForm);
             setShowAdjust(false); loadData();
             showToast('Ajuste aplicado correctamente', 'success');
         } catch (err) { showToast(String(err), 'error'); } finally { setProcessing(false); }
@@ -80,7 +80,7 @@ export default function InventoryPage() {
         if (!user || !purchaseForm.product_id || purchaseForm.quantity <= 0) return;
         setProcessing(true);
         try {
-            await api.registerPurchase(user.id, {
+            await api.registerPurchase({
                 product_id: purchaseForm.product_id,
                 quantity: purchaseForm.quantity,
                 purchase_price: purchaseForm.purchase_price ? parseFloat(purchaseForm.purchase_price) : undefined,

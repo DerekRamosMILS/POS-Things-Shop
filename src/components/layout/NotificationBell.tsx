@@ -43,7 +43,7 @@ export default function NotificationBell() {
 
     const handleViewProduct = (productId: number | null) => {
         setIsOpen(false);
-        if (productId) navigate(`/products?search=${productId}`);
+        if (productId) navigate('/products');
     };
 
     const unreadCount = notifications.length;

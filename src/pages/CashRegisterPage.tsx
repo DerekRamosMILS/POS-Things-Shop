@@ -33,14 +33,14 @@ export default function CashRegisterPage() {
             const [reg, hist] = await Promise.all([api.getOpenRegister(), api.getRegisterHistory()]);
             setRegister(reg); setHistory(hist);
             if (reg) { setCashRegisterId(reg.id); const exp = await api.getExpenses(reg.id); setExpenses(exp); }
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+        } catch (err) { showToast(String(err), 'error'); } finally { setLoading(false); }
     };
 
     const handleOpen = async () => {
         if (!user) return;
         setProcessing(true);
         try {
-            const reg = await api.openRegister(user.id, { opening_amount: parseFloat(openAmount) || 0 });
+            const reg = await api.openRegister({ opening_amount: parseFloat(openAmount) || 0 });
             setRegister(reg); setCashRegisterId(reg.id); setShowOpen(false); setOpenAmount(''); loadData();
         } catch (err) { showToast(String(err), 'error'); } finally { setProcessing(false); }
     };
@@ -57,7 +57,7 @@ export default function CashRegisterPage() {
         if (!user || !register) return;
         setProcessing(true);
         try {
-            await api.createExpense(user.id, register.id, {
+            await api.createExpense(register.id, {
                 category: expenseForm.category,
                 description: expenseForm.description,
                 amount: parseFloat(expenseForm.amount) || 0,

@@ -3,13 +3,14 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::product::{CreateProductDto, Product, ProductFilters, UpdateProductDto};
+use crate::session::{require_admin, require_auth, SessionState};
 
 // ─── Shared SELECT fragment ────────────────────────────────────────────────────
 const SEL: &str = "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
                           p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
                           p.low_stock_ignored, p.created_at, p.updated_at,
                           c.name as category_name, s.name as supplier_name,
-                          p.image_url
+                          p.image_url, p.has_variants
                    FROM products p
                    LEFT JOIN categories c ON p.category_id = c.id
                    LEFT JOIN suppliers s ON p.supplier_id = s.id";
@@ -34,14 +35,18 @@ fn row_to_product(row: &rusqlite::Row) -> rusqlite::Result<Product> {
         category_name:   row.get(15)?,
         supplier_name:   row.get(16)?,
         image_url:       row.get(17)?,
+        has_variants:    row.get::<_, i32>(18)? == 1,
     })
 }
 
 #[tauri::command]
 pub fn get_products(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
     filters: Option<ProductFilters>,
 ) -> Result<Vec<Product>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let filters = filters.unwrap_or_default();
 
@@ -83,8 +88,11 @@ pub fn get_products(
 #[tauri::command]
 pub fn get_product_by_barcode(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
     barcode: String,
 ) -> Result<Option<Product>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let sql = format!("{} WHERE p.barcode = ?1 AND p.is_active = 1", SEL);
@@ -98,7 +106,8 @@ pub fn get_product_by_barcode(
 }
 
 #[tauri::command]
-pub fn create_product(state: State<DbState>, data: CreateProductDto) -> Result<Product, String> {
+pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -130,7 +139,8 @@ pub fn create_product(state: State<DbState>, data: CreateProductDto) -> Result<P
 }
 
 #[tauri::command]
-pub fn update_product(state: State<DbState>, data: UpdateProductDto) -> Result<Product, String> {
+pub fn update_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateProductDto) -> Result<Product, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let old_price: f64 = db
@@ -162,9 +172,12 @@ pub fn update_product(state: State<DbState>, data: UpdateProductDto) -> Result<P
 #[tauri::command]
 pub fn set_product_image(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
     product_id: i64,
     image_url: Option<String>,
 ) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(
         "UPDATE products SET image_url=?1, updated_at=datetime('now','localtime') WHERE id=?2",
@@ -174,7 +187,8 @@ pub fn set_product_image(
 }
 
 #[tauri::command]
-pub fn delete_product(state: State<DbState>, id: i64) -> Result<(), String> {
+pub fn delete_product(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute(
         "UPDATE products SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1",
@@ -187,4 +201,40 @@ fn get_product_by_id(db: &rusqlite::Connection, id: i64) -> Result<Product, Stri
     let sql = format!("{} WHERE p.id = ?1", SEL);
     db.query_row(&sql, params![id], row_to_product)
         .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct PriceHistoryEntry {
+    pub id: i64,
+    pub old_price: f64,
+    pub new_price: f64,
+    pub user_name: Option<String>,
+    pub created_at: String,
+}
+
+#[tauri::command]
+pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64) -> Result<Vec<PriceHistoryEntry>, String> {
+    require_auth(&sessions, &token)?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = db.prepare(
+        "SELECT ph.id, ph.old_price, ph.new_price, u.full_name, ph.created_at
+         FROM price_history ph
+         LEFT JOIN users u ON ph.changed_by = u.id
+         WHERE ph.product_id = ?1
+         ORDER BY ph.created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let out = stmt
+        .query_map(params![product_id], |row| {
+            Ok(PriceHistoryEntry {
+                id: row.get(0)?,
+                old_price: row.get(1)?,
+                new_price: row.get(2)?,
+                user_name: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(out)
 }

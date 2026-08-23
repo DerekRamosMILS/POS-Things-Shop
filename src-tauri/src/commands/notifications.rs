@@ -1,10 +1,12 @@
 use crate::db::connection::DbState;
+use crate::session::{require_auth, SessionState};
 use crate::models::notification::{CreateReminderDto, Notification};
 use rusqlite::params;
 use tauri::State;
 
 #[tauri::command]
-pub fn get_notifications(state: State<DbState>) -> Result<Vec<Notification>, String> {
+pub fn get_notifications(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Notification>, String> {
+    require_auth(&sessions, &token)?;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // Low stock notifications
@@ -78,9 +80,12 @@ pub fn get_notifications(state: State<DbState>) -> Result<Vec<Notification>, Str
 #[tauri::command]
 pub fn mark_notification_read(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
     id: i64,
     notification_type: String,
 ) -> Result<(), String> {
+    require_auth(&sessions, &token)?;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     if notification_type == "low_stock" {
@@ -105,8 +110,11 @@ pub fn mark_notification_read(
 #[tauri::command]
 pub fn create_reminder(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
     data: CreateReminderDto,
 ) -> Result<Notification, String> {
+    require_auth(&sessions, &token)?;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     // Get product name

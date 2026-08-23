@@ -1,5 +1,9 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useSessionStore } from '../../stores/useSessionStore';
+import * as api from '../../api';
+import NotificationBell from './NotificationBell';
+import GlobalSearch from './GlobalSearch';
 const IcoLogOut = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>;
 const IcoAlertCircle = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>;
 
@@ -83,6 +87,16 @@ const IconStore = () => (
     <path d="M16 10a4 4 0 01-8 0"/>
   </svg>
 );
+const IconCustomer = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>
+  </svg>
+);
+const IconLayaway = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
+  </svg>
+);
 
 // ─── Topbar titles by route ──────────────────────────────────────────────────
 const PAGE_META: Record<string, { title: string; sub: string }> = {
@@ -92,6 +106,8 @@ const PAGE_META: Record<string, { title: string; sub: string }> = {
   '/sales':         { title: 'Ventas',            sub: 'Historial de transacciones' },
   '/products':      { title: 'Productos',         sub: 'Catálogo del negocio' },
   '/cash-register': { title: 'Caja',              sub: 'Apertura y cierre de turno' },
+  '/layaways':      { title: 'Apartados',         sub: 'Apartados y abonos' },
+  '/customers':     { title: 'Clientes',          sub: 'Directorio de clientes' },
   '/expenses':      { title: 'Gastos',            sub: 'Registro de egresos' },
   '/discounts':     { title: 'Promociones',       sub: 'Códigos y descuentos' },
   '/suppliers':     { title: 'Proveedores',       sub: 'Gestión de proveedores' },
@@ -105,7 +121,29 @@ export default function MainLayout() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const handleLogout = () => { logout(); navigate('/login'); };
+  // The nav is taller than the sidebar on short screens; the fade only shows
+  // while there is still something below the fold.
+  const navRef = useRef<HTMLElement>(null);
+  const [navOverflowing, setNavOverflowing] = useState(false);
+
+  const updateNavOverflow = useCallback(() => {
+    const el = navRef.current;
+    if (!el) return;
+    setNavOverflowing(el.scrollHeight - el.scrollTop - el.clientHeight > 4);
+  }, []);
+
+  useEffect(() => {
+    updateNavOverflow();
+    window.addEventListener('resize', updateNavOverflow);
+    return () => window.removeEventListener('resize', updateNavOverflow);
+  }, [updateNavOverflow, user?.role]);
+
+  const handleLogout = async () => {
+    // Revoke server-side first so the token cannot be replayed.
+    try { await api.logout(); } catch { /* logging out locally regardless */ }
+    logout();
+    navigate('/login');
+  };
 
   const isPOS = location.pathname === '/pos';
   const meta = PAGE_META[location.pathname] ?? { title: 'ThingsShop', sub: '' };
@@ -134,7 +172,8 @@ export default function MainLayout() {
         </div>
 
         {/* Nav */}
-        <nav className="sidebar-nav no-scrollbar">
+        <div className="sidebar-nav-wrap" data-overflowing={navOverflowing}>
+        <nav className="sidebar-nav" ref={navRef} onScroll={updateNavOverflow}>
           <NavLink to="/dashboard" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
             <span className="nav-icon"><IconDashboard /></span>Dashboard
           </NavLink>
@@ -158,6 +197,12 @@ export default function MainLayout() {
           )}
           <NavLink to="/cash-register" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
             <span className="nav-icon"><IconCash /></span>Caja
+          </NavLink>
+          <NavLink to="/layaways" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconLayaway /></span>Apartados
+          </NavLink>
+          <NavLink to="/customers" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <span className="nav-icon"><IconCustomer /></span>Clientes
           </NavLink>
           <NavLink to="/discounts" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
             <span className="nav-icon"><IconTag /></span>Promociones
@@ -186,6 +231,7 @@ export default function MainLayout() {
             </NavLink>
           )}
         </nav>
+        </div>
 
         {/* Footer */}
         <div className="sidebar-footer">
@@ -227,20 +273,8 @@ export default function MainLayout() {
               <h1 className="topbar-title">{meta.title}</h1>
             </div>
             <div className="topbar-actions">
-              <div className="topbar-search">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" strokeWidth="2.2" strokeLinecap="round">
-                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                </svg>
-                <span style={{ fontSize: 12, color: 'var(--t3)', fontWeight: 500 }}>Buscar...</span>
-                <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--t3)', fontWeight: 600, padding: '1px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.06)' }}>⌘K</span>
-              </div>
-              <button className="topbar-icon-btn" style={{ position: 'relative' }}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                  <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                  <path d="M13.73 21a2 2 0 01-3.46 0"/>
-                </svg>
-                <div style={{ position: 'absolute', top: 6, right: 6, width: 8, height: 8, borderRadius: '50%', background: 'var(--danger)', border: '2px solid var(--bg)' }} />
-              </button>
+              <GlobalSearch isAdmin={isAdmin} />
+              <NotificationBell />
             </div>
           </div>
         )}

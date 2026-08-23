@@ -3,9 +3,11 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::category::{Category, CreateCategoryDto, UpdateCategoryDto};
+use crate::session::{require_admin, require_auth, SessionState};
 
 #[tauri::command]
-pub fn get_categories(state: State<DbState>) -> Result<Vec<Category>, String> {
+pub fn get_categories(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Category>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = db.prepare(
@@ -33,7 +35,8 @@ pub fn get_categories(state: State<DbState>) -> Result<Vec<Category>, String> {
 }
 
 #[tauri::command]
-pub fn create_category(state: State<DbState>, data: CreateCategoryDto) -> Result<Category, String> {
+pub fn create_category(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateCategoryDto) -> Result<Category, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -66,7 +69,8 @@ pub fn create_category(state: State<DbState>, data: CreateCategoryDto) -> Result
 }
 
 #[tauri::command]
-pub fn update_category(state: State<DbState>, data: UpdateCategoryDto) -> Result<(), String> {
+pub fn update_category(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateCategoryDto) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -78,7 +82,8 @@ pub fn update_category(state: State<DbState>, data: UpdateCategoryDto) -> Result
 }
 
 #[tauri::command]
-pub fn delete_category(state: State<DbState>, id: i64) -> Result<(), String> {
+pub fn delete_category(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let product_count: i64 = db.query_row(

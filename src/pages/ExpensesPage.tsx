@@ -29,6 +29,7 @@ function IcoBtn({ onClick, children, hoverColor = 'var(--primary)', hoverBg = 'r
 
 export default function ExpensesPage() {
     const { user, cashRegisterId } = useSessionStore();
+    const isAdmin = user?.role === 'admin';
     const [expenses, setExpenses] = useState<Expense[]>([]);
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
@@ -45,7 +46,7 @@ export default function ExpensesPage() {
     useEffect(() => { load(); }, []);
 
     const load = async () => {
-        try { setExpenses(await api.getExpenses()); } catch (e) { console.error(e); } finally { setLoading(false); }
+        try { setExpenses(await api.getExpenses()); } catch (e) { showToast(String(e), 'error'); } finally { setLoading(false); }
     };
 
     const openCreate = () => {
@@ -62,7 +63,7 @@ export default function ExpensesPage() {
             if (editing) {
                 await api.updateExpense({ ...editing, category: form.category, description: form.description, amount: parseFloat(form.amount) || 0 });
             } else {
-                await api.createExpense(user.id, cashRegisterId, { category: form.category, description: form.description, amount: parseFloat(form.amount) || 0 });
+                await api.createExpense(cashRegisterId, { category: form.category, description: form.description, amount: parseFloat(form.amount) || 0 });
             }
             setShowForm(false); setForm({ category: 'Operativos', description: '', amount: '' }); load();
         } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
@@ -168,8 +169,14 @@ export default function ExpensesPage() {
                                     </td>
                                     <td>
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
-                                            <IcoBtn onClick={() => openEdit(e)}><IcoEdit /></IcoBtn>
-                                            <IcoBtn onClick={() => handleDelete(e.id)} hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)"><IcoTrash /></IcoBtn>
+                                            {isAdmin ? (
+                                                <>
+                                                    <IcoBtn onClick={() => openEdit(e)}><IcoEdit /></IcoBtn>
+                                                    <IcoBtn onClick={() => handleDelete(e.id)} hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)"><IcoTrash /></IcoBtn>
+                                                </>
+                                            ) : (
+                                                <span style={{ fontSize: 12, color: 'var(--t3)' }}>—</span>
+                                            )}
                                         </div>
                                     </td>
                                 </tr>

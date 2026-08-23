@@ -43,7 +43,7 @@ export default function DiscountsPage() {
         try {
             const [promos, cats, prods] = await Promise.all([api.getPromotions(), api.getCategories(), api.getProducts({ is_active: true })]);
             setPromotions(promos); setCategories(cats); setProducts(prods);
-        } catch (e) { console.error(e); } finally { setLoading(false); }
+        } catch (e) { showToast(String(e), 'error'); } finally { setLoading(false); }
     };
 
     const openCreate = () => {
@@ -90,8 +90,12 @@ export default function DiscountsPage() {
 
     const isActive = (promo: Promotion) => {
         if (!promo.is_active) return false;
-        const now = new Date();
-        return new Date(promo.start_date) <= now && now <= new Date(promo.end_date);
+        // Compare as local YYYY-MM-DD to avoid the UTC-midnight off-by-one that made
+        // promos expire a day early in local time.
+        const today = new Date().toLocaleDateString('en-CA');
+        const start = (promo.start_date || '').slice(0, 10);
+        const end = (promo.end_date || '').slice(0, 10);
+        return (!start || today >= start) && (!end || today <= end);
     };
 
     if (loading) return (

@@ -3,13 +3,17 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::inventory::{AdjustStockDto, InventoryMovement, RegisterPurchaseDto};
+use crate::session::{require_admin, require_auth, SessionState};
 
 #[tauri::command]
 pub fn get_inventory_movements(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
     product_id: Option<i64>,
     limit: Option<i32>,
 ) -> Result<Vec<InventoryMovement>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let limit = limit.unwrap_or(200);
@@ -72,18 +76,24 @@ pub fn get_inventory_movements(
 #[tauri::command]
 pub fn adjust_stock(
     state: State<DbState>,
-    user_id: i64,
+    sessions: State<SessionState>,
+    token: String,
     data: AdjustStockDto,
 ) -> Result<(), String> {
+    let user_id = require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
-    let current_stock: i32 = db
+    let (current_stock, has_variants): (i32, i32) = db
         .query_row(
-            "SELECT stock FROM products WHERE id = ?1",
+            "SELECT stock, has_variants FROM products WHERE id = ?1",
             params![data.product_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
+
+    if has_variants == 1 {
+        return Err("Este producto usa variantes; ajusta el stock por talla/color en Productos".to_string());
+    }
 
     let new_stock = current_stock + data.quantity;
     if new_stock < 0 {
@@ -112,26 +122,32 @@ pub fn adjust_stock(
 #[tauri::command]
 pub fn register_purchase(
     state: State<DbState>,
-    user_id: i64,
+    sessions: State<SessionState>,
+    token: String,
     data: RegisterPurchaseDto,
 ) -> Result<(), String> {
+    let user_id = require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
-    let current_stock: i32 = db
+    let (current_stock, has_variants): (i32, i32) = db
         .query_row(
-            "SELECT stock FROM products WHERE id = ?1",
+            "SELECT stock, has_variants FROM products WHERE id = ?1",
             params![data.product_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
+
+    if has_variants == 1 {
+        return Err("Este producto usa variantes; recibe la compra por talla/color en Productos".to_string());
+    }
 
     let new_stock = current_stock + data.quantity;
 
     db.execute(
-        "UPDATE products 
-         SET stock = ?1, 
+        "UPDATE products
+         SET stock = ?1,
              low_stock_ignored = 0,
-             updated_at = datetime('now','localtime') 
+             updated_at = datetime('now','localtime')
          WHERE id = ?2",
         params![new_stock, data.product_id],
     )
@@ -158,13 +174,17 @@ pub fn register_purchase(
 #[tauri::command]
 pub fn get_low_stock_products(
     state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
 ) -> Result<Vec<crate::models::product::Product>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = db.prepare(
-        "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id, 
-                p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active, 
-                p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name
+        "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
+                p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
+                p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name,
+                p.image_url, p.has_variants
          FROM products p
          LEFT JOIN categories c ON p.category_id = c.id
          LEFT JOIN suppliers s ON p.supplier_id = s.id
@@ -192,6 +212,8 @@ pub fn get_low_stock_products(
                 updated_at: row.get(14)?,
                 category_name: row.get(15)?,
                 supplier_name: row.get(16)?,
+                image_url: row.get(17)?,
+                has_variants: row.get::<_, i32>(18)? == 1,
             })
         })
         .map_err(|e| e.to_string())?

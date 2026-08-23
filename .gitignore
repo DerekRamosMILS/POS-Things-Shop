@@ -32,3 +32,20 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Lockfiles de otros gestores (este proyecto usa pnpm)
+package-lock.json
+yarn.lock
+
+# Artefactos de desarrollo
+dev-server.log
+dev-server.err
+src-tauri/build_errors.txt
+target
+
+# Clave privada de firma del actualizador — NUNCA versionarla
+*.key
+*.key.pub
+
+# Ajustes locales de Claude Code (por máquina)
+.claude/settings.local.json

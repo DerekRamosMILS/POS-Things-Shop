@@ -42,7 +42,7 @@ export default function SuppliersPage() {
     useEffect(() => { load(); }, []);
 
     const load = async () => {
-        try { setSuppliers(await api.getSuppliers()); } catch (e) { console.error(e); } finally { setLoading(false); }
+        try { setSuppliers(await api.getSuppliers()); } catch (e) { showToast(String(e), 'error'); } finally { setLoading(false); }
     };
 
     const openCreate = () => {

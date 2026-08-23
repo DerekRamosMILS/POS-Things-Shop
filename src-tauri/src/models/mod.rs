@@ -1,11 +1,14 @@
 pub mod cash_register;
 pub mod category;
 pub mod config;
+pub mod customer;
 pub mod expense;
 pub mod inventory;
+pub mod layaway;
 pub mod notification;
 pub mod product;
 pub mod promotion;
 pub mod sale;
 pub mod supplier;
 pub mod user;
+pub mod variant;

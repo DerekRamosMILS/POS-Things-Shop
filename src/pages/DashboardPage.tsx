@@ -145,7 +145,7 @@ export default function DashboardPage() {
             setStats(s); setTopProducts(tp); setLowStock(ls);
             setChartData([...daily].reverse().map(d => ({ ...d, label: d.date.slice(5).replace('-', '/') })));
             if (isRefresh) showToast('Panel sincronizado', 'success');
-        } catch (err) { console.error(err); }
+        } catch (err) { showToast(String(err), 'error'); }
         finally { setLoading(false); setRefreshing(false); }
     };
 
@@ -174,9 +174,9 @@ export default function DashboardPage() {
                 <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
                         <h1 className="page-title">Vista General</h1>
-                        <span className="badge badge-success">
-                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success)', display: 'inline-block', animation: 'pulse 2s infinite' }} />
-                            En línea
+                        <span className="badge badge-success" title="Todo se guarda en este equipo; no requiere internet">
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success)', display: 'inline-block' }} />
+                            Datos locales
                         </span>
                     </div>
                     <p className="page-subtitle" style={{ textTransform: 'capitalize' }}>{dateStr}</p>
@@ -189,7 +189,7 @@ export default function DashboardPage() {
                         <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
                         <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
                     </svg>
-                    Sincronizar
+                    Actualizar
                 </button>
             </div>
 

@@ -3,9 +3,12 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::cash_register::{CashRegister, CloseRegisterDto, OpenRegisterDto};
+use crate::session::{require_auth, SessionState};
 
 #[tauri::command]
-pub fn open_register(state: State<DbState>, user_id: i64, data: OpenRegisterDto) -> Result<CashRegister, String> {
+pub fn open_register(state: State<DbState>, sessions: State<SessionState>, token: String, data: OpenRegisterDto) -> Result<CashRegister, String> {
+    // The cashier on record is the authenticated user, never a client-sent id.
+    let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     // Check if there's already an open register
@@ -29,7 +32,8 @@ pub fn open_register(state: State<DbState>, user_id: i64, data: OpenRegisterDto)
 }
 
 #[tauri::command]
-pub fn close_register(state: State<DbState>, data: CloseRegisterDto) -> Result<CashRegister, String> {
+pub fn close_register(state: State<DbState>, sessions: State<SessionState>, token: String, data: CloseRegisterDto) -> Result<CashRegister, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let register = get_open_register_internal(&db)?;
@@ -42,11 +46,24 @@ pub fn close_register(state: State<DbState>, data: CloseRegisterDto) -> Result<C
         params![data.closing_amount, expected, difference, register.id],
     ).map_err(|e| e.to_string())?;
 
+    // Automatic backup on close, when enabled in config.
+    let auto_backup: bool = db.query_row(
+        "SELECT value FROM system_config WHERE key = 'auto_backup'",
+        [],
+        |row| row.get::<_, String>(0),
+    ).map(|v| v.trim() == "1").unwrap_or(false);
+    if auto_backup {
+        if let Err(e) = crate::commands::backup::perform_backup(&db) {
+            log::warn!("Auto-backup on close failed: {}", e);
+        }
+    }
+
     get_register_by_id(&db, register.id)
 }
 
 #[tauri::command]
-pub fn get_open_register(state: State<DbState>) -> Result<Option<CashRegister>, String> {
+pub fn get_open_register(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Option<CashRegister>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     match get_open_register_internal(&db) {
@@ -56,7 +73,8 @@ pub fn get_open_register(state: State<DbState>) -> Result<Option<CashRegister>, 
 }
 
 #[tauri::command]
-pub fn get_register_history(state: State<DbState>, limit: Option<i32>) -> Result<Vec<CashRegister>, String> {
+pub fn get_register_history(state: State<DbState>, sessions: State<SessionState>, token: String, limit: Option<i32>) -> Result<Vec<CashRegister>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(30);
 

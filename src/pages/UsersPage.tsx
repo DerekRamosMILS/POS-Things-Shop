@@ -43,7 +43,7 @@ export default function UsersPage() {
     useEffect(() => { loadUsers(); }, []);
 
     const loadUsers = async () => {
-        try { const u = await api.getUsers(); setUsers(u); } catch (err) { console.error(err); } finally { setLoading(false); }
+        try { const u = await api.getUsers(); setUsers(u); } catch (err) { showToast(String(err), 'error'); } finally { setLoading(false); }
     };
 
     const openCreate = () => {
@@ -55,6 +55,9 @@ export default function UsersPage() {
 
     const handleCreate = async () => {
         if (!form.username || !form.full_name || (!editingUser && !form.password)) return;
+        if (!editingUser && form.password.length < 6) {
+            showToast('La contraseña debe tener al menos 6 caracteres', 'error'); return;
+        }
         setProcessing(true);
         try {
             if (editingUser) {
@@ -68,6 +71,9 @@ export default function UsersPage() {
 
     const handleChangePassword = async () => {
         if (!passwordUser || !newPassword) return;
+        if (newPassword.length < 6) {
+            showToast('La contraseña debe tener al menos 6 caracteres', 'error'); return;
+        }
         setProcessing(true);
         try {
             await api.changePassword({ user_id: passwordUser.id, new_password: newPassword });

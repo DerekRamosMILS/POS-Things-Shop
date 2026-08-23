@@ -120,9 +120,6 @@ export default function LoginPage() {
                         </button>
                     </form>
 
-                    <div style={{ marginTop: 20, padding: '10px 14px', borderRadius: 11, background: 'rgba(139,120,245,0.07)', border: '1px solid rgba(139,120,245,0.15)', textAlign: 'center' }}>
-                        <p style={{ fontSize: 11, color: 'var(--t3)' }}>Demo: usa <strong style={{ color: 'var(--t2)' }}>admin / 1234</strong> ó <strong style={{ color: 'var(--t2)' }}>cajero / 1234</strong></p>
-                    </div>
                 </div>
             </div>
         </div>

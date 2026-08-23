@@ -1,8 +1,10 @@
 use rusqlite::params;
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::State;
 
 use crate::db::connection::DbState;
+use crate::session::{require_admin, SessionState};
 
 #[derive(Debug, Serialize)]
 pub struct DailySalesReport {
@@ -25,6 +27,15 @@ pub struct TopProduct {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CashierReport {
+    pub user_id: i64,
+    pub user_name: String,
+    pub sale_count: i64,
+    pub total_sales: f64,
+    pub gross_profit: f64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DashboardStats {
     pub today_sales: f64,
     pub today_count: i64,
@@ -35,8 +46,14 @@ pub struct DashboardStats {
     pub today_profit: f64,
 }
 
+// Uses the snapshotted cost when available (unit_cost > 0), otherwise the
+// product's current purchase price (legacy rows saved before the snapshot).
+const PROFIT_EXPR: &str =
+    "si.subtotal - COALESCE(NULLIF(si.unit_cost, 0), p.purchase_price) * si.quantity";
+
 #[tauri::command]
-pub fn get_dashboard_stats(state: State<DbState>) -> Result<DashboardStats, String> {
+pub fn get_dashboard_stats(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<DashboardStats, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let today_sales: f64 = db.query_row(
@@ -65,16 +82,19 @@ pub fn get_dashboard_stats(state: State<DbState>) -> Result<DashboardStats, Stri
     ).map_err(|e| e.to_string())?;
 
     let low_stock_count: i64 = db.query_row(
-        "SELECT COUNT(*) FROM products WHERE stock <= min_stock AND is_active = 1",
+        "SELECT COUNT(*) FROM products WHERE stock <= min_stock AND is_active = 1 AND low_stock_ignored = 0",
         [], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
 
     let today_profit: f64 = db.query_row(
-        "SELECT COALESCE(SUM(si.subtotal - (p.purchase_price * si.quantity)), 0)
-         FROM sale_items si
-         JOIN sales s ON si.sale_id = s.id
-         JOIN products p ON si.product_id = p.id
-         WHERE date(s.created_at) = date('now','localtime') AND s.status = 'completed'",
+        &format!(
+            "SELECT COALESCE(SUM({}), 0)
+             FROM sale_items si
+             JOIN sales s ON si.sale_id = s.id
+             JOIN products p ON si.product_id = p.id
+             WHERE date(s.created_at) = date('now','localtime') AND s.status = 'completed'",
+            PROFIT_EXPR
+        ),
         [], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
 
@@ -90,27 +110,30 @@ pub fn get_dashboard_stats(state: State<DbState>) -> Result<DashboardStats, Stri
 }
 
 #[tauri::command]
-pub fn get_daily_sales_report(state: State<DbState>, days: Option<i32>) -> Result<Vec<DailySalesReport>, String> {
+pub fn get_daily_sales_report(state: State<DbState>, sessions: State<SessionState>, token: String, days: Option<i32>) -> Result<Vec<DailySalesReport>, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let days = days.unwrap_or(30);
+    let since = format!("-{}", days);
 
+    // 1) Sales aggregates per day
     let mut stmt = db.prepare(
         "SELECT
-            date(s.created_at) as sale_date,
-            COALESCE(SUM(s.total), 0) as total_sales,
+            date(created_at) as sale_date,
+            COALESCE(SUM(total), 0) as total_sales,
             COUNT(*) as sale_count,
-            COALESCE(SUM(CASE WHEN s.payment_method = 'cash' THEN s.total ELSE 0 END), 0) as total_cash,
-            COALESCE(SUM(CASE WHEN s.payment_method = 'card' THEN s.total ELSE 0 END), 0) as total_card,
-            COALESCE(SUM(CASE WHEN s.payment_method = 'transfer' THEN s.total ELSE 0 END), 0) as total_transfer
-         FROM sales s
-         WHERE s.status = 'completed'
-           AND s.created_at >= datetime('now', ?1 || ' days', 'localtime')
-         GROUP BY date(s.created_at)
+            COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total ELSE 0 END), 0) as total_cash,
+            COALESCE(SUM(CASE WHEN payment_method = 'card' THEN total ELSE 0 END), 0) as total_card,
+            COALESCE(SUM(CASE WHEN payment_method = 'transfer' THEN total ELSE 0 END), 0) as total_transfer
+         FROM sales
+         WHERE status = 'completed'
+           AND created_at >= datetime('now', ?1 || ' days', 'localtime')
+         GROUP BY date(created_at)
          ORDER BY sale_date DESC"
     ).map_err(|e| e.to_string())?;
 
-    let reports = stmt
-        .query_map(params![format!("-{}", days)], |row| {
+    let mut reports: Vec<DailySalesReport> = stmt
+        .query_map(params![since], |row| {
             Ok(DailySalesReport {
                 date: row.get(0)?,
                 total_sales: row.get(1)?,
@@ -126,11 +149,59 @@ pub fn get_daily_sales_report(state: State<DbState>, days: Option<i32>) -> Resul
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
+    let mut idx: HashMap<String, usize> = HashMap::new();
+    for (i, r) in reports.iter().enumerate() {
+        idx.insert(r.date.clone(), i);
+    }
+
+    // 2) Gross profit per day
+    let mut pstmt = db.prepare(
+        &format!(
+            "SELECT date(s.created_at) as d, COALESCE(SUM({}), 0)
+             FROM sale_items si
+             JOIN sales s ON si.sale_id = s.id
+             JOIN products p ON si.product_id = p.id
+             WHERE s.status = 'completed'
+               AND s.created_at >= datetime('now', ?1 || ' days', 'localtime')
+             GROUP BY date(s.created_at)",
+            PROFIT_EXPR
+        )
+    ).map_err(|e| e.to_string())?;
+    let profit_rows: Vec<(String, f64)> = pstmt
+        .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (d, p) in profit_rows {
+        if let Some(&i) = idx.get(&d) {
+            reports[i].gross_profit = p;
+        }
+    }
+
+    // 3) Expenses per day
+    let mut estmt = db.prepare(
+        "SELECT date(created_at) as d, COALESCE(SUM(amount), 0)
+         FROM expenses
+         WHERE created_at >= datetime('now', ?1 || ' days', 'localtime')
+         GROUP BY date(created_at)"
+    ).map_err(|e| e.to_string())?;
+    let expense_rows: Vec<(String, f64)> = estmt
+        .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (d, x) in expense_rows {
+        if let Some(&i) = idx.get(&d) {
+            reports[i].total_expenses = x;
+        }
+    }
+
     Ok(reports)
 }
 
 #[tauri::command]
-pub fn get_top_products(state: State<DbState>, days: Option<i32>, limit: Option<i32>) -> Result<Vec<TopProduct>, String> {
+pub fn get_top_products(state: State<DbState>, sessions: State<SessionState>, token: String, days: Option<i32>, limit: Option<i32>) -> Result<Vec<TopProduct>, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let days = days.unwrap_or(30);
     let limit = limit.unwrap_or(10);
@@ -162,4 +233,66 @@ pub fn get_top_products(state: State<DbState>, days: Option<i32>, limit: Option<
         .map_err(|e| e.to_string())?;
 
     Ok(products)
+}
+
+#[tauri::command]
+pub fn get_cashier_report(state: State<DbState>, sessions: State<SessionState>, token: String, days: Option<i32>) -> Result<Vec<CashierReport>, String> {
+    require_admin(&sessions, &token)?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let days = days.unwrap_or(30);
+    let since = format!("-{}", days);
+
+    let mut stmt = db.prepare(
+        "SELECT s.user_id, u.full_name, COUNT(*) as cnt, COALESCE(SUM(s.total), 0) as total
+         FROM sales s
+         JOIN users u ON s.user_id = u.id
+         WHERE s.status = 'completed'
+           AND s.created_at >= datetime('now', ?1 || ' days', 'localtime')
+         GROUP BY s.user_id
+         ORDER BY total DESC"
+    ).map_err(|e| e.to_string())?;
+
+    let mut reports: Vec<CashierReport> = stmt
+        .query_map(params![since], |row| {
+            Ok(CashierReport {
+                user_id: row.get(0)?,
+                user_name: row.get(1)?,
+                sale_count: row.get(2)?,
+                total_sales: row.get(3)?,
+                gross_profit: 0.0,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut idx: HashMap<i64, usize> = HashMap::new();
+    for (i, r) in reports.iter().enumerate() {
+        idx.insert(r.user_id, i);
+    }
+
+    let mut pstmt = db.prepare(
+        &format!(
+            "SELECT s.user_id, COALESCE(SUM({}), 0)
+             FROM sale_items si
+             JOIN sales s ON si.sale_id = s.id
+             JOIN products p ON si.product_id = p.id
+             WHERE s.status = 'completed'
+               AND s.created_at >= datetime('now', ?1 || ' days', 'localtime')
+             GROUP BY s.user_id",
+            PROFIT_EXPR
+        )
+    ).map_err(|e| e.to_string())?;
+    let profit_rows: Vec<(i64, f64)> = pstmt
+        .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for (uid, p) in profit_rows {
+        if let Some(&i) = idx.get(&uid) {
+            reports[i].gross_profit = p;
+        }
+    }
+
+    Ok(reports)
 }

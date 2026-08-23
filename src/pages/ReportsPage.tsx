@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { formatCurrency } from '../utils';
 import * as api from '../api';
-import type { DailySalesReport, TopProduct } from '../types';
+import type { DailySalesReport, TopProduct, CashierReport } from '../types';
 import { useToast } from '../contexts/ToastContext';
 
 // ─── Inline SVGs ─────────────────────────────────────────────────────────────
@@ -10,6 +10,7 @@ const IcoDownload = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="
 export default function ReportsPage() {
     const [dailyReport, setDailyReport] = useState<DailySalesReport[]>([]);
     const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
+    const [cashierReport, setCashierReport] = useState<CashierReport[]>([]);
     const [days, setDays] = useState(30);
     const [loading, setLoading] = useState(true);
     const { showToast } = useToast();
@@ -33,9 +34,9 @@ export default function ReportsPage() {
     const loadData = async () => {
         setLoading(true);
         try {
-            const [dr, tp] = await Promise.all([api.getDailySalesReport(days), api.getTopProducts(days, 10)]);
-            setDailyReport(dr); setTopProducts(tp);
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+            const [dr, tp, cr] = await Promise.all([api.getDailySalesReport(days), api.getTopProducts(days, 10), api.getCashierReport(days)]);
+            setDailyReport(dr); setTopProducts(tp); setCashierReport(cr);
+        } catch (err) { showToast(String(err), 'error'); } finally { setLoading(false); }
     };
 
     const totalSales = dailyReport.reduce((s, d) => s + d.total_sales, 0);
@@ -162,6 +163,39 @@ export default function ReportsPage() {
                         )}
                     </div>
                 </div>
+            </div>
+
+            {/* Ventas por cajero */}
+            <div className="card" style={{ padding: '20px 0 0 0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', padding: '0 20px 14px' }}>Ventas por Cajero</p>
+                {cashierReport.length === 0 ? (
+                    <p style={{ textAlign: 'center', padding: '32px 0', fontSize: 13, color: 'var(--t3)' }}>Sin datos en el periodo</p>
+                ) : (
+                    <div style={{ overflowX: 'auto' }}>
+                        <table className="table-base">
+                            <thead>
+                                <tr>
+                                    <th>Cajero</th>
+                                    <th style={{ textAlign: 'right' }}>Tickets</th>
+                                    <th style={{ textAlign: 'right' }}>Ventas</th>
+                                    <th style={{ textAlign: 'right' }}>Ticket prom.</th>
+                                    <th style={{ textAlign: 'right' }}>Utilidad bruta</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {cashierReport.map(c => (
+                                    <tr key={c.user_id}>
+                                        <td style={{ fontWeight: 600, color: 'var(--t1)', fontSize: 13 }}>{c.user_name}</td>
+                                        <td style={{ textAlign: 'right', fontSize: 13, color: 'var(--t2)', fontVariantNumeric: 'tabular-nums' }}>{c.sale_count}</td>
+                                        <td style={{ textAlign: 'right', fontSize: 13, fontWeight: 700, color: 'var(--success)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(c.total_sales)}</td>
+                                        <td style={{ textAlign: 'right', fontSize: 13, color: 'var(--t2)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(c.sale_count > 0 ? c.total_sales / c.sale_count : 0)}</td>
+                                        <td style={{ textAlign: 'right', fontSize: 13, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(c.gross_profit)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
             </div>
         </div>
     );

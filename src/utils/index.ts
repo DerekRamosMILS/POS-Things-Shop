@@ -1,9 +1,17 @@
+// Currency symbol is configurable from Settings (system_config.currency_symbol).
+// Loaded once at startup via setCurrencySymbol.
+let CURRENCY_SYMBOL = '$';
+
+export function setCurrencySymbol(symbol: string) {
+    if (symbol && symbol.trim()) CURRENCY_SYMBOL = symbol.trim();
+}
+
 export function formatCurrency(amount: number): string {
-    return new Intl.NumberFormat('es-MX', {
-        style: 'currency',
-        currency: 'MXN',
+    const n = new Intl.NumberFormat('es-MX', {
         minimumFractionDigits: 2,
-    }).format(amount);
+        maximumFractionDigits: 2,
+    }).format(Number.isFinite(amount) ? amount : 0);
+    return `${CURRENCY_SYMBOL}${n}`;
 }
 
 export function formatDate(date: string): string {
@@ -47,6 +55,7 @@ export const PAYMENT_METHOD_LABELS: Record<string, string> = {
     cash: 'Efectivo',
     card: 'Tarjeta',
     transfer: 'Transferencia',
+    mixed: 'Pago mixto',
 };
 
 export const STATUS_LABELS: Record<string, string> = {

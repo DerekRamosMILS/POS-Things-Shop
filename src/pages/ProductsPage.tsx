@@ -1,9 +1,39 @@
 import { useEffect, useRef, useState } from 'react';
-import { formatCurrency } from '../utils';
+import { useSearchParams } from 'react-router-dom';
+import { formatCurrency, formatDateTime } from '../utils';
+import { code128SVG } from '../utils/barcode';
 import * as api from '../api';
-import type { Product, Category, CreateProductDto, UpdateProductDto, Notification, Supplier } from '../types';
+import type { Product, Category, CreateProductDto, UpdateProductDto, Notification, Supplier, PriceHistoryEntry, SaveVariantDto } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+
+// ─── Image compression ───────────────────────────────────────────────────────
+// Product photos are stored inline (data URL) in the DB, so downscale + compress
+// before saving to keep them small and the catalog fast.
+async function compressImage(file: File, maxDim = 512, quality = 0.72): Promise<string> {
+    const dataUrl: string = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result as string);
+        r.onerror = reject;
+        r.readAsDataURL(file);
+    });
+    const img: HTMLImageElement = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = reject;
+        im.src = dataUrl;
+    });
+    let width = img.width;
+    let height = img.height;
+    if (width >= height && width > maxDim) { height = Math.round(height * maxDim / width); width = maxDim; }
+    else if (height > width && height > maxDim) { width = Math.round(width * maxDim / height); height = maxDim; }
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, width, height);
+    return canvas.toDataURL('image/jpeg', quality);
+}
 
 // ─── Gradient avatar helper ──────────────────────────────────────────────────
 const GRAD_PAIRS: [string, string][] = [
@@ -61,6 +91,9 @@ const IcoFilter = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="no
 const IcoCamera = () => <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>;
 const IcoLoader = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>;
 const IcoCalendar = () => <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>;
+const IcoBarcode = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 5v14M7 5v14M11 5v14M15 5v10M19 5v14M21 5v14"/></svg>;
+
+const escLabel = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] || c));
 const IcoPackage = () => <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="opacity-40"><path d="M16.5 9.4l-9-5.19"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>;
 
 // ─── Icon button ─────────────────────────────────────────────────────────────
@@ -87,7 +120,8 @@ export default function ProductsPage() {
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [loading, setLoading] = useState(true);
-    const [search, setSearch] = useState('');
+    const [searchParams] = useSearchParams();
+    const [search, setSearch] = useState(searchParams.get('search') || '');
     const [filterCategory, setFilterCategory] = useState<number | ''>('');
     const [filterSupplier, setFilterSupplier] = useState<number | ''>('');
     const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'inactive'>('all');
@@ -108,6 +142,13 @@ export default function ProductsPage() {
     const [photoChanged, setPhotoChanged] = useState(false);               // whether user changed photo
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    const [defaultMinStock, setDefaultMinStock] = useState(5);
+    const [priceHistory, setPriceHistory] = useState<PriceHistoryEntry[]>([]);
+    const [hasVariants, setHasVariants] = useState(false);
+    const [variants, setVariants] = useState<SaveVariantDto[]>([]);
+    const [labelProduct, setLabelProduct] = useState<Product | null>(null);
+    const [labelQty, setLabelQty] = useState('12');
+
     const [showReminder, setShowReminder] = useState(false);
     const [reminderDate, setReminderDate] = useState('');
     const [reminderProduct, setReminderProduct] = useState<Product | null>(null);
@@ -116,12 +157,18 @@ export default function ProductsPage() {
     const { confirm } = useConfirm();
 
     useEffect(() => { loadData(); }, []);
+    useEffect(() => { const s = searchParams.get('search'); if (s) setSearch(s); }, [searchParams]);
 
     const loadData = async () => {
         try {
-            const [p, c, s, n] = await Promise.all([api.getProducts(), api.getCategories(), api.getSuppliers(), api.getNotifications()]);
+            const [p, c, s, n, threshold] = await Promise.all([
+                api.getProducts(), api.getCategories(), api.getSuppliers(), api.getNotifications(),
+                api.getConfig('low_stock_threshold').catch(() => ''),
+            ]);
             setProducts(p); setCategories(c); setSuppliers(s); setNotifications(n);
-        } catch (err) { console.error(err); } finally { setLoading(false); }
+            const parsed = parseInt(threshold, 10);
+            if (Number.isFinite(parsed) && parsed >= 0) setDefaultMinStock(parsed);
+        } catch (err) { showToast(String(err), 'error'); } finally { setLoading(false); }
     };
 
     const filtered = products.filter((p) => {
@@ -141,9 +188,11 @@ export default function ProductsPage() {
 
     const openCreateForm = () => {
         setEditingProduct(null);
-        setForm({ sku: '', barcode: null, name: '', description: null, category_id: null, supplier_id: null, purchase_price: 0, sale_price: 0, stock: 0, min_stock: 5 });
+        setForm({ sku: '', barcode: null, name: '', description: null, category_id: null, supplier_id: null, purchase_price: 0, sale_price: 0, stock: 0, min_stock: defaultMinStock });
         setPhotoPreview(null);
         setPhotoChanged(false);
+        setPriceHistory([]);
+        setHasVariants(false); setVariants([]);
         setShowForm(true); setError('');
     };
 
@@ -152,18 +201,40 @@ export default function ProductsPage() {
         setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active });
         setPhotoPreview(product.image_url ?? null);
         setPhotoChanged(false);
+        setPriceHistory([]);
+        api.getPriceHistory(product.id).then(setPriceHistory).catch(() => setPriceHistory([]));
+        setHasVariants(product.has_variants);
+        setVariants([]);
+        if (product.has_variants) {
+            api.getVariants(product.id)
+                .then(vs => setVariants(vs.map(v => ({ id: v.id, size: v.size, color: v.color, sku: v.sku, barcode: v.barcode, stock: v.stock }))))
+                .catch(() => setVariants([]));
+        }
         setShowForm(true); setError('');
     };
 
-    const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const addVariantRow = () => setVariants(v => [...v, { id: null, size: '', color: '', sku: '', barcode: '', stock: 0 }]);
+    const updateVariantRow = (i: number, patch: Partial<SaveVariantDto>) => setVariants(v => v.map((row, idx) => idx === i ? { ...row, ...patch } : row));
+    const removeVariantRow = (i: number) => setVariants(v => v.filter((_, idx) => idx !== i));
+
+    const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-            setPhotoPreview(reader.result as string);
+        if (!file.type.startsWith('image/')) {
+            showToast('El archivo debe ser una imagen', 'error');
+            e.target.value = ''; return;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+            showToast('La imagen supera el límite de 5 MB', 'error');
+            e.target.value = ''; return;
+        }
+        try {
+            const compressed = await compressImage(file);
+            setPhotoPreview(compressed);
             setPhotoChanged(true);
-        };
-        reader.readAsDataURL(file);
+        } catch {
+            showToast('No se pudo procesar la imagen', 'error');
+        }
         // Reset input so same file can be re-selected
         e.target.value = '';
     };
@@ -173,9 +244,15 @@ export default function ProductsPage() {
         setPhotoChanged(true);
     };
 
+    const validVariants = () => variants.filter(v => (v.size && v.size.trim()) || (v.color && v.color.trim()));
+
     const handleSave = async () => {
         if (!form.name || !form.sku || form.sale_price <= 0) {
             setError('Nombre, SKU y precio de venta son requeridos');
+            return;
+        }
+        if (hasVariants && validVariants().length === 0) {
+            setError('Agrega al menos una variante con talla o color');
             return;
         }
         setSaving(true); setError('');
@@ -191,6 +268,12 @@ export default function ProductsPage() {
             // Save photo if changed
             if (photoChanged) {
                 await api.setProductImage(productId, photoPreview);
+            }
+            // Save variants (or clear them if variants were turned off)
+            if (hasVariants) {
+                await api.saveVariants(productId, validVariants());
+            } else if (editingProduct?.has_variants) {
+                await api.saveVariants(productId, []);
             }
             showToast(editingProduct ? 'Producto actualizado' : 'Producto creado', 'success');
             setShowForm(false);
@@ -218,6 +301,37 @@ export default function ProductsPage() {
         const ok = await confirm({ title: 'Desactivar producto', message: '¿Desactivar este producto? Podrás reactivarlo más tarde.', variant: 'warning', confirmLabel: 'Desactivar' });
         if (!ok) return;
         try { await api.deleteProduct(id); loadData(); } catch (err) { showToast(String(err), 'error'); }
+    };
+
+    const handlePrintLabels = () => {
+        if (!labelProduct) return;
+        const code = labelProduct.barcode || labelProduct.sku;
+        const qty = Math.max(1, Math.min(120, parseInt(labelQty) || 1));
+        const svg = code128SVG(code, { module: 2, height: 42 });
+        const one = `<div class="lbl"><div class="nm">${escLabel(labelProduct.name)}</div><div class="pr">${escLabel(formatCurrency(labelProduct.sale_price))}</div><div class="bc">${svg}</div><div class="cd">${escLabel(code)}</div></div>`;
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Etiquetas</title><style>
+            *{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif}
+            .sheet{display:flex;flex-wrap:wrap;gap:3mm;padding:5mm}
+            .lbl{width:46mm;border:1px solid #e2e2e2;border-radius:2mm;padding:2mm;text-align:center;page-break-inside:avoid}
+            .nm{font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .pr{font-size:14px;font-weight:900;margin:1mm 0}
+            .bc svg{max-width:100%;height:auto}
+            .cd{font-size:9px;font-family:monospace;letter-spacing:1.5px;margin-top:1mm}
+            @media print{.lbl{border:none}}
+        </style></head><body><div class="sheet">${Array(qty).fill(one).join('')}</div></body></html>`;
+
+        const iframe = document.createElement('iframe');
+        iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+        document.body.appendChild(iframe);
+        const doc = iframe.contentWindow?.document;
+        if (!doc) { document.body.removeChild(iframe); return; }
+        doc.open(); doc.write(html); doc.close();
+        setTimeout(() => {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+            setTimeout(() => { if (iframe.parentNode) document.body.removeChild(iframe); }, 1000);
+        }, 250);
+        setLabelProduct(null);
     };
 
     if (loading) return (
@@ -362,6 +476,9 @@ export default function ProductsPage() {
                                             </IcoBtn>
                                             <IcoBtn onClick={() => openReminderForm(p)} title="Recordatorio" hoverColor="var(--accent)" hoverBg="rgba(240,197,71,0.10)">
                                                 <IcoBell />
+                                            </IcoBtn>
+                                            <IcoBtn onClick={() => { setLabelProduct(p); setLabelQty('12'); }} title="Imprimir etiqueta" hoverColor="var(--success)" hoverBg="rgba(34,211,160,0.10)">
+                                                <IcoBarcode />
                                             </IcoBtn>
                                             <IcoBtn onClick={() => handleDelete(p.id)} title="Desactivar" hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)">
                                                 <IcoTrash />
@@ -525,13 +642,50 @@ export default function ProductsPage() {
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                                 <div>
                                     <label className="form-label">Stock Inicial</label>
-                                    <input type="number" min="0" value={form.stock} onChange={e => setForm({ ...form, stock: parseInt(e.target.value) || 0 })} className="input" disabled={!!editingProduct} />
-                                    {editingProduct && <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 4 }}>Usa ajuste de inventario para cambiar stock</p>}
+                                    <input type="number" min="0" value={hasVariants ? 0 : form.stock} onChange={e => setForm({ ...form, stock: parseInt(e.target.value) || 0 })} className="input" disabled={!!editingProduct || hasVariants} />
+                                    {hasVariants ? <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 4 }}>El stock se maneja por variante</p>
+                                        : editingProduct && <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 4 }}>Usa ajuste de inventario para cambiar stock</p>}
                                 </div>
                                 <div>
                                     <label className="form-label">Stock Mínimo</label>
                                     <input type="number" min="0" value={form.min_stock} onChange={e => setForm({ ...form, min_stock: parseInt(e.target.value) || 0 })} className="input" />
                                 </div>
+                            </div>
+
+                            {/* Variants (tallas / colores) */}
+                            <div style={{ borderRadius: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', padding: '12px 14px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <div>
+                                        <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--t1)' }}>Variantes (talla / color)</p>
+                                        <p style={{ fontSize: 11, color: 'var(--t3)' }}>Controla el stock por talla y color</p>
+                                    </div>
+                                    <button type="button" onClick={() => { const next = !hasVariants; setHasVariants(next); if (next && variants.length === 0) addVariantRow(); }}
+                                        style={{ width: 48, height: 26, borderRadius: 100, cursor: 'pointer', transition: 'background 0.2s', background: hasVariants ? 'var(--success)' : 'rgba(255,255,255,0.12)', position: 'relative', flexShrink: 0, border: 'none' }}>
+                                        <span style={{ position: 'absolute', top: 3, left: hasVariants ? 24 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', display: 'block' }} />
+                                    </button>
+                                </div>
+
+                                {hasVariants && (
+                                    <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 70px 28px', gap: 8, fontSize: 10, fontWeight: 700, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.04em', padding: '0 2px' }}>
+                                            <span>Talla</span><span>Color</span><span style={{ textAlign: 'center' }}>Stock</span><span></span>
+                                        </div>
+                                        {variants.map((v, i) => (
+                                            <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 70px 28px', gap: 8, alignItems: 'center' }}>
+                                                <input value={v.size || ''} onChange={e => updateVariantRow(i, { size: e.target.value })} className="input" placeholder="M" style={{ padding: '7px 10px' }} />
+                                                <input value={v.color || ''} onChange={e => updateVariantRow(i, { color: e.target.value })} className="input" placeholder="Negro" style={{ padding: '7px 10px' }} />
+                                                <input type="number" min="0" value={v.stock} onChange={e => updateVariantRow(i, { stock: parseInt(e.target.value) || 0 })} className="input" style={{ padding: '7px 6px', textAlign: 'center' }} />
+                                                <button type="button" onClick={() => removeVariantRow(i)} title="Quitar" style={{ color: 'var(--t3)', display: 'grid', placeItems: 'center' }}>
+                                                    <IcoTrash />
+                                                </button>
+                                            </div>
+                                        ))}
+                                        <button type="button" onClick={addVariantRow} className="btn btn-ghost btn-sm" style={{ justifyContent: 'center', gap: 6, marginTop: 2 }}>
+                                            <IcoPlus /> Agregar variante
+                                        </button>
+                                        <p style={{ fontSize: 11, color: 'var(--t3)' }}>Stock total: {variants.reduce((s, v) => s + (v.stock || 0), 0)} unidades</p>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Active toggle (edit only) */}
@@ -556,6 +710,21 @@ export default function ProductsPage() {
                                             transition: 'left 0.2s', display: 'block',
                                         }} />
                                     </button>
+                                </div>
+                            )}
+
+                            {/* Price history */}
+                            {editingProduct && priceHistory.length > 0 && (
+                                <div style={{ borderRadius: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', padding: '12px 14px' }}>
+                                    <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--t2)', marginBottom: 8 }}>Historial de precios</p>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 120, overflowY: 'auto' }}>
+                                        {priceHistory.map(h => (
+                                            <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--t3)' }}>
+                                                <span>{formatDateTime(h.created_at)}{h.user_name ? ` · ${h.user_name}` : ''}</span>
+                                                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(h.old_price)} → <strong style={{ color: 'var(--t1)' }}>{formatCurrency(h.new_price)}</strong></span>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             )}
 
@@ -615,6 +784,34 @@ export default function ProductsPage() {
                                 <button onClick={handleSaveReminder} disabled={saving} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>
                                     {saving && <IcoLoader />} Guardar
                                 </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Label print modal ── */}
+            {labelProduct && (
+                <div className="modal-overlay" style={{ zIndex: 120 }} onClick={() => setLabelProduct(null)}>
+                    <div className="glass-modal animate-scale-in" style={{ width: '100%', maxWidth: 400, padding: 24 }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+                            <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)' }}>Imprimir etiquetas</h3>
+                            <button onClick={() => setLabelProduct(null)} style={{ padding: 6, borderRadius: 9, color: 'var(--t3)' }}><IcoX /></button>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                            <div style={{ padding: '14px', borderRadius: 12, background: '#fff', textAlign: 'center' }}>
+                                <p style={{ fontSize: 11, fontWeight: 700, color: '#111', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{labelProduct.name}</p>
+                                <p style={{ fontSize: 15, fontWeight: 900, color: '#111', margin: '4px 0' }}>{formatCurrency(labelProduct.sale_price)}</p>
+                                <div dangerouslySetInnerHTML={{ __html: code128SVG(labelProduct.barcode || labelProduct.sku, { module: 2, height: 42 }) }} style={{ display: 'flex', justifyContent: 'center' }} />
+                                <p style={{ fontSize: 10, fontFamily: 'monospace', color: '#111', letterSpacing: 1 }}>{labelProduct.barcode || labelProduct.sku}</p>
+                            </div>
+                            <div>
+                                <label className="form-label">Cantidad de etiquetas</label>
+                                <input type="number" min={1} max={120} value={labelQty} onChange={e => setLabelQty(e.target.value)} className="input" />
+                            </div>
+                            <div style={{ display: 'flex', gap: 10 }}>
+                                <button onClick={() => setLabelProduct(null)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Cancelar</button>
+                                <button onClick={handlePrintLabels} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>Imprimir</button>
                             </div>
                         </div>
                     </div>

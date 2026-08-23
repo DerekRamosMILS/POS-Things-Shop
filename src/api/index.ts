@@ -1,6 +1,8 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { useSessionStore } from '../stores/useSessionStore';
 import type {
     Product, CreateProductDto, UpdateProductDto, ProductFilters,
+    ProductVariant, SaveVariantDto,
     Category, CreateCategoryDto,
     Supplier, CreateSupplierDto,
     Sale, CreateSaleDto, SaleFilters,
@@ -8,10 +10,13 @@ import type {
     CashRegister,
     Expense, CreateExpenseDto,
     InventoryMovement,
-    DashboardStats, DailySalesReport, TopProduct,
+    DashboardStats, DailySalesReport, TopProduct, CashierReport,
     SystemConfig,
     Promotion, CreatePromotionDto,
     Notification, CreateReminderDto,
+    Customer, CreateCustomerDto, UpdateCustomerDto,
+    PriceHistoryEntry, CreateReturnDto,
+    Layaway, CreateLayawayDto,
 } from '../types';
 
 type InvokeArgs = Record<string, unknown> | undefined;
@@ -30,6 +35,7 @@ const webUsers: User[] = [
         full_name: 'Administrador',
         role: 'admin',
         is_active: true,
+        must_change_password: false,
         created_at: nowIso(),
         updated_at: nowIso(),
     },
@@ -39,6 +45,7 @@ const webUsers: User[] = [
         full_name: 'Cajero Demo',
         role: 'cashier',
         is_active: true,
+        must_change_password: false,
         created_at: nowIso(),
         updated_at: nowIso(),
     },
@@ -55,25 +62,25 @@ const webProducts: Product[] = [
         id: 1, sku: 'CAM-001', barcode: '750000000001', name: 'Camisa Negra', description: null,
         category_id: 1, category_name: 'Ropa', supplier_id: null, supplier_name: null,
         purchase_price: 120, sale_price: 249, stock: 18, min_stock: 5, is_active: true,
-        image_url: null, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
     {
         id: 2, sku: 'PAN-002', barcode: '750000000002', name: 'Pantalón Slim', description: null,
         category_id: 1, category_name: 'Ropa', supplier_id: null, supplier_name: null,
         purchase_price: 180, sale_price: 369, stock: 10, min_stock: 4, is_active: true,
-        image_url: null, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
     {
         id: 3, sku: 'TEN-003', barcode: '750000000003', name: 'Tenis Urban', description: null,
         category_id: 2, category_name: 'Calzado', supplier_id: null, supplier_name: null,
         purchase_price: 420, sale_price: 799, stock: 7, min_stock: 3, is_active: true,
-        image_url: null, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
     {
         id: 4, sku: 'GOR-004', barcode: '750000000004', name: 'Gorra Logo', description: null,
         category_id: 3, category_name: 'Accesorios', supplier_id: null, supplier_name: null,
         purchase_price: 70, sale_price: 159, stock: 24, min_stock: 6, is_active: true,
-        image_url: null, created_at: nowIso(), updated_at: nowIso(),
+        image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
     },
 ];
 
@@ -154,6 +161,8 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
                 change_amount: Math.max(0, data.amount_paid - total),
                 status: 'completed',
                 notes: data.notes ?? null,
+                customer_id: data.customer_id ?? null,
+                customer_name: null,
                 items: data.items.map((it, idx) => ({
                     id: idx + 1,
                     sale_id: saleId,
@@ -164,6 +173,9 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
                     unit_price: it.unit_price,
                     discount: it.discount,
                     subtotal: Math.max(0, it.unit_price * it.quantity - it.discount),
+                    returned_quantity: 0,
+                    variant_id: it.variant_id ?? null,
+                    variant_label: null,
                 })),
                 created_at: nowIso(),
             };
@@ -194,7 +206,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
                 supplier_id: data.supplier_id ?? null, supplier_name: null,
                 purchase_price: data.purchase_price, sale_price: data.sale_price,
                 stock: data.stock, min_stock: data.min_stock, is_active: true,
-                image_url: null, created_at: nowIso(), updated_at: nowIso(),
+                image_url: null, has_variants: false, created_at: nowIso(), updated_at: nowIso(),
             };
             webProducts.push(newP);
             return newP as unknown as T;
@@ -309,23 +321,77 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_top_products':
             return [] as unknown as T;
 
+        case 'get_cashier_report':
+            return [] as unknown as T;
+
         case 'create_backup':
             return `backup-web-${Date.now()}.db` as unknown as T;
 
         case 'get_backup_list':
             return [] as unknown as T;
 
+        case 'get_log_path':
+            return '(no disponible en modo web)' as unknown as T;
+
+        case 'logout':
+            return undefined as unknown as T;
+
+        case 'validate_session':
+            return true as unknown as T;
+
+        case 'change_own_password':
+            return undefined as unknown as T;
+
+        case 'restore_backup':
+            return 'Restauración no disponible en modo web' as unknown as T;
+
+        case 'seed_demo_data':
+            return 'Datos de prueba no disponibles en modo web' as unknown as T;
+
+        case 'get_variants':
+            return [] as unknown as T;
+        case 'get_variant_by_barcode':
+            return null as unknown as T;
+        case 'save_variants':
+            return [] as unknown as T;
+
         case 'get_all_config':
             return [
                 { key: 'store_name', value: 'Things Shop (Web Demo)', description: null },
+                { key: 'store_address', value: '', description: null },
+                { key: 'store_phone', value: '', description: null },
+                { key: 'store_email', value: '', description: null },
+                { key: 'ticket_footer', value: '¡Gracias por su compra!', description: null },
                 { key: 'tax_rate', value: '0', description: null },
                 { key: 'currency_symbol', value: '$', description: null },
                 { key: 'low_stock_threshold', value: '5', description: null },
-                { key: 'max_backups', value: '90', description: null },
+                { key: 'auto_backup', value: '1', description: null },
+                { key: 'max_backups', value: '30', description: null },
+                { key: 'session_hours', value: '12', description: null },
+                { key: 'log_retention_days', value: '90', description: null },
             ] as unknown as T;
 
         case 'get_config':
             return '' as unknown as T;
+
+        case 'get_customers':
+            return [] as unknown as T;
+        case 'get_price_history':
+            return [] as unknown as T;
+        case 'get_layaways':
+            return [] as unknown as T;
+        case 'create_return':
+            return 0 as unknown as T;
+        case 'update_customer':
+        case 'delete_customer':
+        case 'cancel_layaway':
+            return undefined as unknown as T;
+        case 'create_customer':
+        case 'create_layaway':
+        case 'get_layaway_detail':
+        case 'add_layaway_payment':
+        case 'complete_layaway':
+            throw new Error('Función no disponible en modo web');
 
         default:
             throw new Error(`Comando no soportado en modo web: ${command}`);
@@ -333,10 +399,14 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
 };
 
 const invoke = <T>(command: string, args?: InvokeArgs): Promise<T> => {
+    // Attach the session token so backend commands can verify role. Reads that
+    // don't declare a `token` param simply ignore it.
+    const token = useSessionStore.getState().token;
+    const merged = token ? { ...(args ?? {}), token } : args;
     if (isTauriRuntime()) {
-        return tauriInvoke<T>(command, args);
+        return tauriInvoke<T>(command, merged);
     }
-    return webInvoke<T>(command, args);
+    return webInvoke<T>(command, merged);
 };
 
 // Products
@@ -347,6 +417,12 @@ export const updateProduct = (data: UpdateProductDto) => invoke<Product>('update
 export const deleteProduct = (id: number) => invoke<void>('delete_product', { id });
 export const setProductImage = (productId: number, imageUrl: string | null) =>
     invoke<void>('set_product_image', { productId, imageUrl });
+
+// Variants
+export const getVariants = (productId: number) => invoke<ProductVariant[]>('get_variants', { productId });
+export const getVariantByBarcode = (barcode: string) => invoke<ProductVariant | null>('get_variant_by_barcode', { barcode });
+export const saveVariants = (productId: number, variants: SaveVariantDto[]) =>
+    invoke<ProductVariant[]>('save_variants', { productId, variants });
 
 // Categories
 export const getCategories = () => invoke<Category[]>('get_categories');
@@ -361,19 +437,19 @@ export const updateSupplier = (data: Supplier) => invoke<void>('update_supplier'
 export const deleteSupplier = (id: number) => invoke<void>('delete_supplier', { id });
 
 // Sales
-export const createSale = (userId: number, cashRegisterId: number | null, data: CreateSaleDto) =>
-    invoke<Sale>('create_sale', { userId, cashRegisterId, data });
-export const cancelSale = (saleId: number, userId: number) => invoke<void>('cancel_sale', { saleId, userId });
+export const createSale = (cashRegisterId: number | null, data: CreateSaleDto) =>
+    invoke<Sale>('create_sale', { cashRegisterId, data });
+export const cancelSale = (saleId: number) => invoke<void>('cancel_sale', { saleId });
 export const getSales = (filters?: SaleFilters) => invoke<Sale[]>('get_sales', { filters });
 export const getSaleDetail = (saleId: number) => invoke<Sale>('get_sale_detail', { saleId });
 
 // Inventory
 export const getInventoryMovements = (productId?: number, limit?: number) =>
     invoke<InventoryMovement[]>('get_inventory_movements', { productId, limit });
-export const adjustStock = (userId: number, data: { product_id: number; quantity: number; reason: string }) =>
-    invoke<void>('adjust_stock', { userId, data });
-export const registerPurchase = (userId: number, data: { product_id: number; quantity: number; purchase_price?: number }) =>
-    invoke<void>('register_purchase', { userId, data });
+export const adjustStock = (data: { product_id: number; quantity: number; reason: string }) =>
+    invoke<void>('adjust_stock', { data });
+export const registerPurchase = (data: { product_id: number; quantity: number; purchase_price?: number }) =>
+    invoke<void>('register_purchase', { data });
 export const getLowStockProducts = () => invoke<Product[]>('get_low_stock_products');
 
 // Users
@@ -385,17 +461,21 @@ export const updateUser = (data: { id: number; username: string; full_name: stri
     invoke<void>('update_user', { data });
 export const changePassword = (data: { user_id: number; new_password: string }) =>
     invoke<void>('change_password', { data });
+export const changeOwnPassword = (data: { current_password: string; new_password: string }) =>
+    invoke<void>('change_own_password', { data });
+export const logout = () => invoke<void>('logout');
+export const validateSession = () => invoke<boolean>('validate_session');
 
 // Cash Register
-export const openRegister = (userId: number, data: { opening_amount: number }) =>
-    invoke<CashRegister>('open_register', { userId, data });
+export const openRegister = (data: { opening_amount: number }) =>
+    invoke<CashRegister>('open_register', { data });
 export const closeRegister = (data: { closing_amount: number }) => invoke<CashRegister>('close_register', { data });
 export const getOpenRegister = () => invoke<CashRegister | null>('get_open_register');
 export const getRegisterHistory = (limit?: number) => invoke<CashRegister[]>('get_register_history', { limit });
 
 // Expenses
-export const createExpense = (userId: number, cashRegisterId: number | null, data: CreateExpenseDto) =>
-    invoke<Expense>('create_expense', { userId, cashRegisterId, data });
+export const createExpense = (cashRegisterId: number | null, data: CreateExpenseDto) =>
+    invoke<Expense>('create_expense', { cashRegisterId, data });
 export const getExpenses = (cashRegisterId?: number) => invoke<Expense[]>('get_expenses', { cashRegisterId });
 export const updateExpense = (data: Expense) => invoke<void>('update_expense', { data });
 export const deleteExpense = (id: number) => invoke<void>('delete_expense', { id });
@@ -410,11 +490,17 @@ export const deletePromotion = (id: number) => invoke<void>('delete_promotion', 
 export const getDashboardStats = () => invoke<DashboardStats>('get_dashboard_stats');
 export const getDailySalesReport = (days?: number) => invoke<DailySalesReport[]>('get_daily_sales_report', { days });
 export const getTopProducts = (days?: number, limit?: number) => invoke<TopProduct[]>('get_top_products', { days, limit });
+export const getCashierReport = (days?: number) => invoke<CashierReport[]>('get_cashier_report', { days });
 
 // Backup
 export const createBackup = () => invoke<string>('create_backup');
 export const exportDatabase = (path: string) => invoke<void>('export_database', { path });
 export const getBackupList = () => invoke<string[]>('get_backup_list');
+export const getLogPath = () => invoke<string>('get_log_path');
+export const restoreBackup = (filename: string) => invoke<string>('restore_backup', { filename });
+
+// Demo data
+export const seedDemoData = () => invoke<string>('seed_demo_data');
 
 // Config
 export const getAllConfig = () => invoke<SystemConfig[]>('get_all_config');
@@ -425,4 +511,25 @@ export const setConfig = (key: string, value: string) => invoke<void>('set_confi
 export const getNotifications = () => invoke<Notification[]>('get_notifications');
 export const markNotificationRead = (id: number, notificationType: string) => invoke<void>('mark_notification_read', { id, notificationType });
 export const createReminder = (data: CreateReminderDto) => invoke<Notification>('create_reminder', { data });
+
+// Customers
+export const getCustomers = () => invoke<Customer[]>('get_customers');
+export const createCustomer = (data: CreateCustomerDto) => invoke<Customer>('create_customer', { data });
+export const updateCustomer = (data: UpdateCustomerDto) => invoke<void>('update_customer', { data });
+export const deleteCustomer = (id: number) => invoke<void>('delete_customer', { id });
+
+// Price history
+export const getPriceHistory = (productId: number) => invoke<PriceHistoryEntry[]>('get_price_history', { productId });
+
+// Returns
+export const createReturn = (data: CreateReturnDto) => invoke<number>('create_return', { data });
+
+// Layaways (apartados)
+export const createLayaway = (data: CreateLayawayDto) => invoke<Layaway>('create_layaway', { data });
+export const getLayaways = (status?: string) => invoke<Layaway[]>('get_layaways', { status });
+export const getLayawayDetail = (layawayId: number) => invoke<Layaway>('get_layaway_detail', { layawayId });
+export const addLayawayPayment = (layawayId: number, amount: number, paymentMethod: string) =>
+    invoke<Layaway>('add_layaway_payment', { layawayId, amount, paymentMethod });
+export const completeLayaway = (layawayId: number) => invoke<Layaway>('complete_layaway', { layawayId });
+export const cancelLayaway = (layawayId: number) => invoke<void>('cancel_layaway', { layawayId });
 

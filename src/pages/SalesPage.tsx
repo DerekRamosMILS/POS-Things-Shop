@@ -39,16 +39,49 @@ export default function SalesPage() {
     const { showToast } = useToast();
     const { confirm } = useConfirm();
 
-    useEffect(() => { loadSales(); }, []);
+    const [returnMode, setReturnMode] = useState(false);
+    const [returnQtys, setReturnQtys] = useState<Record<number, number>>({});
+    const [returnReason, setReturnReason] = useState('');
+    const [processing, setProcessing] = useState(false);
+
+    const handleReturn = async () => {
+        if (!detail || !user) return;
+        const items = Object.entries(returnQtys)
+            .map(([id, qty]) => ({ sale_item_id: Number(id), quantity: qty }))
+            .filter(it => it.quantity > 0);
+        if (items.length === 0) { showToast('Selecciona cantidades a devolver', 'error'); return; }
+        setProcessing(true);
+        try {
+            await api.createReturn({ sale_id: detail.id, reason: returnReason || null, items });
+            showToast('Devolución registrada', 'success');
+            const fresh = await api.getSaleDetail(detail.id);
+            setDetail(fresh); setReturnMode(false); setReturnQtys({}); setReturnReason('');
+            loadSales();
+        } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
+    };
+
+    useEffect(() => { loadSales(); }, [statusFilter, paymentFilter, dateFrom, dateTo]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const loadSales = async () => {
-        try { const s = await api.getSales(); setSales(s); }
-        catch (err) { console.error(err); }
+        setLoading(true);
+        try {
+            const s = await api.getSales({
+                status: statusFilter || undefined,
+                payment_method: paymentFilter || undefined,
+                date_from: dateFrom || undefined,
+                date_to: dateTo || undefined,
+            });
+            setSales(s);
+        }
+        catch (err) { showToast(String(err), 'error'); }
         finally { setLoading(false); }
     };
 
     const handleViewDetail = async (saleId: number) => {
-        try { const d = await api.getSaleDetail(saleId); setDetail(d); }
+        try {
+            const d = await api.getSaleDetail(saleId);
+            setDetail(d); setReturnMode(false); setReturnQtys({}); setReturnReason('');
+        }
         catch (err) { showToast(String(err), 'error'); }
     };
 
@@ -56,7 +89,7 @@ export default function SalesPage() {
         if (!user) return;
         const ok = await confirm({ title: 'Cancelar venta', message: '¿Cancelar esta venta? Se restaurará el inventario.', variant: 'danger', confirmLabel: 'Cancelar venta' });
         if (!ok) return;
-        try { await api.cancelSale(saleId, user.id); loadSales(); setDetail(null); }
+        try { await api.cancelSale(saleId); loadSales(); setDetail(null); }
         catch (err) { showToast(String(err), 'error'); }
     };
 
@@ -216,21 +249,40 @@ export default function SalesPage() {
 
                             {/* Items */}
                             <div style={{ borderRadius: 14, overflow: 'hidden', border: '1px solid var(--border)' }}>
-                                {detail.items?.map((item, i) => (
-                                    <div key={item.id} style={{
-                                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                        padding: '11px 16px',
-                                        borderTop: i > 0 ? '1px solid var(--border)' : 'none',
-                                    }}>
-                                        <div>
-                                            <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 500 }}>{item.product_name}</span>
-                                            <span style={{ fontSize: 11, color: 'var(--t3)', marginLeft: 8 }}>×{item.quantity}</span>
-                                            {item.discount > 0 && <span className="badge badge-accent" style={{ marginLeft: 6 }}>-{formatCurrency(item.discount)}</span>}
+                                {detail.items?.map((item, i) => {
+                                    const available = item.quantity - item.returned_quantity;
+                                    return (
+                                        <div key={item.id} style={{
+                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                            padding: '11px 16px',
+                                            borderTop: i > 0 ? '1px solid var(--border)' : 'none',
+                                        }}>
+                                            <div>
+                                                <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 500 }}>{item.product_name}</span>
+                                                {item.variant_label && <span className="badge badge-primary" style={{ marginLeft: 6 }}>{item.variant_label}</span>}
+                                                <span style={{ fontSize: 11, color: 'var(--t3)', marginLeft: 8 }}>×{item.quantity}</span>
+                                                {item.discount > 0 && <span className="badge badge-accent" style={{ marginLeft: 6 }}>-{formatCurrency(item.discount)}</span>}
+                                                {item.returned_quantity > 0 && <span className="badge badge-danger" style={{ marginLeft: 6 }}>Devuelto ×{item.returned_quantity}</span>}
+                                            </div>
+                                            {returnMode ? (
+                                                <input type="number" min={0} max={available} value={returnQtys[item.id] ?? 0}
+                                                    onChange={e => setReturnQtys({ ...returnQtys, [item.id]: Math.max(0, Math.min(available, parseInt(e.target.value) || 0)) })}
+                                                    disabled={available <= 0}
+                                                    className="input" style={{ width: 70, textAlign: 'center' }} />
+                                            ) : (
+                                                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(item.subtotal)}</span>
+                                            )}
                                         </div>
-                                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(item.subtotal)}</span>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
+
+                            {returnMode && (
+                                <div>
+                                    <label className="form-label">Motivo (opcional)</label>
+                                    <input value={returnReason} onChange={e => setReturnReason(e.target.value)} className="input" placeholder="Ej. Talla equivocada" />
+                                </div>
+                            )}
 
                             {/* Totals */}
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -253,9 +305,19 @@ export default function SalesPage() {
                             </div>
 
                             {detail.status === 'completed' && (
-                                <button onClick={() => handleCancel(detail.id)} className="btn btn-danger btn-full" style={{ justifyContent: 'center' }}>
-                                    <IcoBan /> Cancelar Venta
-                                </button>
+                                returnMode ? (
+                                    <div style={{ display: 'flex', gap: 10 }}>
+                                        <button onClick={() => { setReturnMode(false); setReturnQtys({}); setReturnReason(''); }} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Cancelar</button>
+                                        <button onClick={handleReturn} disabled={processing} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>Confirmar devolución</button>
+                                    </div>
+                                ) : (
+                                    <div style={{ display: 'flex', gap: 10 }}>
+                                        <button onClick={() => setReturnMode(true)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Devolver artículos</button>
+                                        <button onClick={() => handleCancel(detail.id)} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>
+                                            <IcoBan /> Cancelar Venta
+                                        </button>
+                                    </div>
+                                )
                             )}
                         </div>
                     </div>

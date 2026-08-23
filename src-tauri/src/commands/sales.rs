@@ -3,122 +3,304 @@ use tauri::State;
 use chrono::Local;
 
 use crate::db::connection::DbState;
-use crate::models::sale::{CreateSaleDto, Sale, SaleFilters, SaleItem};
+use crate::models::sale::{CreateSaleDto, PaymentSplitDto, Sale, SaleFilters, SaleItem};
+use crate::session::{require_admin, require_auth, SessionState};
+
+/// Read a numeric system_config value, falling back to `default` when missing/invalid.
+fn config_number(db: &rusqlite::Connection, key: &str, default: f64) -> f64 {
+    db.query_row(
+        "SELECT value FROM system_config WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|s| s.trim().parse::<f64>().ok())
+    .unwrap_or(default)
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// Cash register column that accumulates a given payment method.
+fn register_field(method: &str) -> &'static str {
+    match method {
+        "card" => "total_card_sales",
+        "transfer" => "total_transfer_sales",
+        _ => "total_cash_sales",
+    }
+}
+
+/// Turn the tender into the amount actually applied to the sale per method.
+///
+/// Only cash can be over-tendered (the surplus becomes change), so the non-cash
+/// legs must not exceed the total. Returns the applied splits plus the change.
+fn split_tender(payments: &[PaymentSplitDto], total: f64) -> Result<(Vec<PaymentSplitDto>, f64), String> {
+    let mut non_cash = 0.0;
+    let mut cash = 0.0;
+    for p in payments {
+        if p.amount <= 0.0 {
+            return Err("Cada forma de pago debe ser mayor a cero".to_string());
+        }
+        if p.method == "cash" {
+            cash += p.amount;
+        } else {
+            non_cash += p.amount;
+        }
+    }
+
+    if non_cash > total + 0.001 {
+        return Err("Los pagos que no son en efectivo superan el total de la venta".to_string());
+    }
+    if cash + non_cash + 0.001 < total {
+        return Err("El monto recibido es insuficiente".to_string());
+    }
+
+    let cash_applied = round2((total - non_cash).max(0.0));
+    let change = round2((cash - cash_applied).max(0.0));
+
+    let mut applied: Vec<PaymentSplitDto> = payments
+        .iter()
+        .filter(|p| p.method != "cash")
+        .map(|p| PaymentSplitDto { method: p.method.clone(), amount: round2(p.amount) })
+        .collect();
+    if cash_applied > 0.0 {
+        applied.push(PaymentSplitDto { method: "cash".to_string(), amount: cash_applied });
+    }
+
+    Ok((applied, change))
+}
+
+/// Human-readable label for a variant, e.g. "M / Negro".
+fn variant_label(size: &Option<String>, color: &Option<String>) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(s) = size.as_deref() { if !s.trim().is_empty() { parts.push(s); } }
+    if let Some(c) = color.as_deref() { if !c.trim().is_empty() { parts.push(c); } }
+    if parts.is_empty() { "Único".to_string() } else { parts.join(" / ") }
+}
 
 #[tauri::command]
 pub fn create_sale(
     state: State<DbState>,
-    user_id: i64,
+    sessions: State<SessionState>,
+    token: String,
     cash_register_id: Option<i64>,
     data: CreateSaleDto,
 ) -> Result<Sale, String> {
+    // The seller on record is the authenticated user, never a client-sent id.
+    let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    if data.items.is_empty() {
+        return Err("La venta no tiene productos".to_string());
+    }
 
     // Begin atomic transaction
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let result = (|| -> Result<Sale, String> {
+        // A sale requires an OPEN cash register. Derive it from the DB instead of
+        // trusting the (possibly stale) id persisted in the client.
+        let register_id: i64 = match db.query_row(
+            "SELECT id FROM cash_registers WHERE status = 'open' ORDER BY opened_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err("La caja no está abierta. Ábrela antes de cobrar.".to_string())
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        if let Some(cr) = cash_register_id {
+            if cr != register_id {
+                return Err("La caja indicada no coincide con la caja abierta.".to_string());
+            }
+        }
+
         // Generate folio
         let today = Local::now().format("%Y%m%d").to_string();
         let count: i64 = db.query_row(
             "SELECT COUNT(*) FROM sales WHERE folio LIKE ?1",
-            params![format!("V-{}-%%", today)],
+            params![format!("V-{}-%", today)],
             |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         let folio = format!("V-{}-{:03}", today, count + 1);
 
-        // Calculate totals
-        let mut subtotal = 0.0;
-        for item in &data.items {
-            let item_subtotal = (item.unit_price * item.quantity as f64) - item.discount;
-            subtotal += item_subtotal;
+        // Resolve every line from the DB (authoritative price + cost snapshot).
+        struct Line {
+            product_id: i64,
+            name: String,
+            sku: String,
+            quantity: i32,
+            unit_price: f64,
+            unit_cost: f64,
+            discount: f64,
+            line_subtotal: f64,
+            prev_stock: i32,
+            variant_id: Option<i64>,
+            variant_label: Option<String>,
         }
-        let total = subtotal - data.discount_total;
+        let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
+        let mut subtotal = 0.0; // gross, before any discount
 
-        let change_amount = if data.payment_method == "cash" {
-            data.amount_paid - total
+        for item in &data.items {
+            if item.quantity <= 0 {
+                return Err("La cantidad de un producto es inválida".to_string());
+            }
+            let (name, sku, product_stock, price, cost): (String, String, i32, f64, f64) = db
+                .query_row(
+                    "SELECT name, sku, stock, sale_price, purchase_price FROM products WHERE id = ?1",
+                    params![item.product_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .map_err(|e| e.to_string())?;
+
+            // If a variant is specified, availability is checked against the variant.
+            let (variant_id, variant_label, available) = if let Some(vid) = item.variant_id {
+                let (size, color, vstock): (Option<String>, Option<String>, i32) = db
+                    .query_row(
+                        "SELECT size, color, stock FROM product_variants WHERE id = ?1 AND product_id = ?2 AND is_active = 1",
+                        params![vid, item.product_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(|_| "La variante seleccionada no existe".to_string())?;
+                (Some(vid), Some(variant_label(&size, &color)), vstock)
+            } else {
+                (None, None, product_stock)
+            };
+
+            if available < item.quantity {
+                let label = variant_label.clone().map(|l| format!(" ({})", l)).unwrap_or_default();
+                return Err(format!(
+                    "Stock insuficiente para '{}{}'. Disponible: {}, Solicitado: {}",
+                    name, label, available, item.quantity
+                ));
+            }
+
+            let discount = if item.discount < 0.0 { 0.0 } else { item.discount };
+            let gross = price * item.quantity as f64;
+            let line_subtotal = (gross - discount).max(0.0);
+            subtotal += gross;
+
+            lines.push(Line {
+                product_id: item.product_id,
+                name,
+                sku,
+                quantity: item.quantity,
+                unit_price: price,
+                unit_cost: cost,
+                discount,
+                line_subtotal,
+                prev_stock: product_stock,
+                variant_id,
+                variant_label,
+            });
+        }
+
+        subtotal = round2(subtotal);
+        let discount_total = round2(data.discount_total.max(0.0));
+        let taxable = (subtotal - discount_total).max(0.0);
+        let tax_rate = config_number(&db, "tax_rate", 0.0);
+        let tax = round2(taxable * tax_rate / 100.0);
+        let total = round2(taxable + tax);
+
+        // Normalise the tender. A single-method sale is just a one-leg split.
+        let tender: Vec<PaymentSplitDto> = if data.payments.is_empty() {
+            vec![PaymentSplitDto {
+                method: data.payment_method.clone(),
+                amount: if data.payment_method == "cash" { data.amount_paid } else { total },
+            }]
         } else {
-            0.0
+            data.payments.clone()
         };
+        let (applied, change_amount) = split_tender(&tender, total)?;
+
+        // "mixed" keeps reports honest when more than one method was used.
+        let payment_method = if applied.len() > 1 {
+            "mixed".to_string()
+        } else {
+            applied[0].method.clone()
+        };
+        let amount_paid = round2(applied.iter().map(|p| p.amount).sum::<f64>() + change_amount);
 
         // Insert sale
         db.execute(
-            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total, payment_method, amount_paid, change_amount, notes, customer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                folio, user_id, cash_register_id, subtotal,
-                data.discount_total, total, data.payment_method,
-                data.amount_paid, change_amount, data.notes
+                folio, user_id, register_id, subtotal,
+                discount_total, tax, total, payment_method,
+                amount_paid, change_amount, data.notes, data.customer_id
             ],
         ).map_err(|e| e.to_string())?;
 
         let sale_id = db.last_insert_rowid();
 
-        // Insert sale items and decrease stock
-        for item in &data.items {
-            let item_subtotal = (item.unit_price * item.quantity as f64) - item.discount;
-
-            // Get product info for snapshot
-            let (product_name, product_sku, current_stock): (String, String, i32) = db.query_row(
-                "SELECT name, sku, stock FROM products WHERE id = ?1",
-                params![item.product_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ).map_err(|e| e.to_string())?;
-
-            // Check stock
-            if current_stock < item.quantity {
-                return Err(format!(
-                    "Stock insuficiente para '{}'. Disponible: {}, Solicitado: {}",
-                    product_name, current_stock, item.quantity
-                ));
-            }
-
-            // Insert sale item
+        // Insert sale items, decrease stock, record movements
+        for line in &lines {
             db.execute(
-                "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku, quantity, unit_price, discount, subtotal)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku, quantity, unit_price, discount, subtotal, unit_cost, variant_id, variant_label)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
-                    sale_id, item.product_id, product_name, product_sku,
-                    item.quantity, item.unit_price, item.discount, item_subtotal
+                    sale_id, line.product_id, line.name, line.sku,
+                    line.quantity, line.unit_price, line.discount, line.line_subtotal, line.unit_cost,
+                    line.variant_id, line.variant_label
                 ],
             ).map_err(|e| e.to_string())?;
 
-            let new_stock = current_stock - item.quantity;
+            let new_stock = line.prev_stock - line.quantity;
 
-            // Decrease stock
+            // Product-level aggregate stock always decreases.
             db.execute(
                 "UPDATE products SET stock = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
-                params![new_stock, item.product_id],
+                params![new_stock, line.product_id],
             ).map_err(|e| e.to_string())?;
 
-            // Record inventory movement
+            // Variant-level stock, when applicable.
+            if let Some(vid) = line.variant_id {
+                db.execute(
+                    "UPDATE product_variants SET stock = stock - ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+                    params![line.quantity, vid],
+                ).map_err(|e| e.to_string())?;
+            }
+
+            let reason = line.variant_label.as_ref().map(|l| format!("Venta ({})", l));
             db.execute(
-                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, user_id)
-                 VALUES (?1, 'sale', ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
+                 VALUES (?1, 'sale', ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    item.product_id, -item.quantity, current_stock,
-                    new_stock, sale_id, user_id
+                    line.product_id, -line.quantity, line.prev_stock,
+                    new_stock, sale_id, reason, user_id
                 ],
             ).map_err(|e| e.to_string())?;
         }
 
-        // Update cash register totals
-        if let Some(cr_id) = cash_register_id {
-            let payment_field = match data.payment_method.as_str() {
-                "cash" => "total_cash_sales",
-                "card" => "total_card_sales",
-                "transfer" => "total_transfer_sales",
-                _ => "total_cash_sales",
-            };
+        // Persist the breakdown and move each leg into its register column.
+        for p in &applied {
+            db.execute(
+                "INSERT INTO sale_payments (sale_id, method, amount) VALUES (?1, ?2, ?3)",
+                params![sale_id, p.method, p.amount],
+            ).map_err(|e| e.to_string())?;
 
             db.execute(
                 &format!(
-                    "UPDATE cash_registers SET total_sales = total_sales + ?1, {} = {} + ?1, sale_count = sale_count + 1 WHERE id = ?2",
-                    payment_field, payment_field
+                    "UPDATE cash_registers SET {} = {} + ?1 WHERE id = ?2",
+                    register_field(&p.method), register_field(&p.method)
                 ),
-                params![total, cr_id],
+                params![p.amount, register_id],
             ).map_err(|e| e.to_string())?;
         }
+        db.execute(
+            "UPDATE cash_registers SET total_sales = total_sales + ?1, sale_count = sale_count + 1 WHERE id = ?2",
+            params![total, register_id],
+        ).map_err(|e| e.to_string())?;
+
+        // Best-effort audit log
+        db.execute(
+            "INSERT INTO app_logs (level, module, message, user_id) VALUES ('info', 'sales', ?1, ?2)",
+            params![format!("Venta {} registrada por {}", folio, total), user_id],
+        ).ok();
 
         // Return the created sale
         get_sale_by_id(&db, sale_id)
@@ -137,7 +319,8 @@ pub fn create_sale(
 }
 
 #[tauri::command]
-pub fn cancel_sale(state: State<DbState>, sale_id: i64, user_id: i64) -> Result<(), String> {
+pub fn cancel_sale(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<(), String> {
+    let user_id = require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
@@ -156,17 +339,17 @@ pub fn cancel_sale(state: State<DbState>, sale_id: i64, user_id: i64) -> Result<
 
         // Get sale items to restore stock
         let mut stmt = db.prepare(
-            "SELECT product_id, quantity FROM sale_items WHERE sale_id = ?1"
+            "SELECT product_id, quantity, variant_id FROM sale_items WHERE sale_id = ?1"
         ).map_err(|e| e.to_string())?;
 
-        let items: Vec<(i64, i32)> = stmt.query_map(params![sale_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+        let items: Vec<(i64, i32, Option<i64>)> = stmt.query_map(params![sale_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         }).map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
         // Restore stock for each item
-        for (product_id, quantity) in items {
+        for (product_id, quantity, variant_id) in items {
             let current_stock: i32 = db.query_row(
                 "SELECT stock FROM products WHERE id = ?1",
                 params![product_id],
@@ -179,6 +362,13 @@ pub fn cancel_sale(state: State<DbState>, sale_id: i64, user_id: i64) -> Result<
                 "UPDATE products SET stock = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
                 params![new_stock, product_id],
             ).map_err(|e| e.to_string())?;
+
+            if let Some(vid) = variant_id {
+                db.execute(
+                    "UPDATE product_variants SET stock = stock + ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+                    params![quantity, vid],
+                ).map_err(|e| e.to_string())?;
+            }
 
             db.execute(
                 "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
@@ -193,29 +383,54 @@ pub fn cancel_sale(state: State<DbState>, sale_id: i64, user_id: i64) -> Result<
             params![sale_id],
         ).map_err(|e| e.to_string())?;
 
-        // Update cash register
-        let (total, payment_method, cr_id): (f64, String, Option<i64>) = db.query_row(
-            "SELECT total, payment_method, cash_register_id FROM sales WHERE id = ?1",
+        // Reverse cash register totals ONLY if that register is still open.
+        // Touching a closed shift would desync its already-computed cut.
+        let (total, cr_id): (f64, Option<i64>) = db.query_row(
+            "SELECT total, cash_register_id FROM sales WHERE id = ?1",
             params![sale_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(|e| e.to_string())?;
 
         if let Some(cr_id) = cr_id {
-            let payment_field = match payment_method.as_str() {
-                "cash" => "total_cash_sales",
-                "card" => "total_card_sales",
-                "transfer" => "total_transfer_sales",
-                _ => "total_cash_sales",
-            };
+            let is_open: bool = db.query_row(
+                "SELECT status = 'open' FROM cash_registers WHERE id = ?1",
+                params![cr_id],
+                |row| row.get(0),
+            ).unwrap_or(false);
 
-            db.execute(
-                &format!(
-                    "UPDATE cash_registers SET total_sales = total_sales - ?1, {} = {} - ?1, sale_count = sale_count - 1 WHERE id = ?2",
-                    payment_field, payment_field
-                ),
-                params![total, cr_id],
-            ).map_err(|e| e.to_string())?;
+            if is_open {
+                // Reverse each leg of the tender into the column it landed in.
+                let mut stmt = db.prepare(
+                    "SELECT method, amount FROM sale_payments WHERE sale_id = ?1"
+                ).map_err(|e| e.to_string())?;
+                let legs: Vec<(String, f64)> = stmt
+                    .query_map(params![sale_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                drop(stmt);
+
+                for (method, amount) in legs {
+                    db.execute(
+                        &format!(
+                            "UPDATE cash_registers SET {} = {} - ?1 WHERE id = ?2",
+                            register_field(&method), register_field(&method)
+                        ),
+                        params![amount, cr_id],
+                    ).map_err(|e| e.to_string())?;
+                }
+
+                db.execute(
+                    "UPDATE cash_registers SET total_sales = total_sales - ?1, sale_count = sale_count - 1 WHERE id = ?2",
+                    params![total, cr_id],
+                ).map_err(|e| e.to_string())?;
+            }
         }
+
+        db.execute(
+            "INSERT INTO app_logs (level, module, message, user_id) VALUES ('warn', 'sales', ?1, ?2)",
+            params![format!("Venta {} cancelada", sale_id), user_id],
+        ).ok();
 
         Ok(())
     })();
@@ -233,24 +448,30 @@ pub fn cancel_sale(state: State<DbState>, sale_id: i64, user_id: i64) -> Result<
 }
 
 #[tauri::command]
-pub fn get_sales(state: State<DbState>, filters: Option<SaleFilters>) -> Result<Vec<Sale>, String> {
+pub fn get_sales(state: State<DbState>, sessions: State<SessionState>, token: String, filters: Option<SaleFilters>) -> Result<Vec<Sale>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let filters = filters.unwrap_or_default();
 
     let mut sql = String::from(
-        "SELECT s.*, u.full_name as user_name FROM sales s
-         LEFT JOIN users u ON s.user_id = u.id WHERE 1=1"
+        "SELECT s.id, s.folio, s.user_id, s.cash_register_id, s.subtotal, s.discount_total, s.tax, s.total,
+                s.payment_method, s.amount_paid, s.change_amount, s.status, s.notes, s.created_at,
+                s.customer_id, u.full_name AS user_name, c.name AS customer_name
+         FROM sales s
+         LEFT JOIN users u ON s.user_id = u.id
+         LEFT JOIN customers c ON s.customer_id = c.id
+         WHERE 1=1"
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(ref from) = filters.date_from {
         let idx = param_values.len() + 1;
-        sql.push_str(&format!(" AND s.created_at >= ?{}", idx));
+        sql.push_str(&format!(" AND date(s.created_at) >= date(?{})", idx));
         param_values.push(Box::new(from.clone()));
     }
     if let Some(ref to) = filters.date_to {
         let idx = param_values.len() + 1;
-        sql.push_str(&format!(" AND s.created_at <= ?{}", idx));
+        sql.push_str(&format!(" AND date(s.created_at) <= date(?{})", idx));
         param_values.push(Box::new(to.clone()));
     }
     if let Some(ref status) = filters.status {
@@ -263,8 +484,13 @@ pub fn get_sales(state: State<DbState>, filters: Option<SaleFilters>) -> Result<
         sql.push_str(&format!(" AND s.payment_method = ?{}", idx));
         param_values.push(Box::new(pm.clone()));
     }
+    if let Some(uid) = filters.user_id {
+        let idx = param_values.len() + 1;
+        sql.push_str(&format!(" AND s.user_id = ?{}", idx));
+        param_values.push(Box::new(uid));
+    }
 
-    sql.push_str(" ORDER BY s.created_at DESC LIMIT 500");
+    sql.push_str(" ORDER BY s.created_at DESC LIMIT 1000");
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
@@ -286,7 +512,9 @@ pub fn get_sales(state: State<DbState>, filters: Option<SaleFilters>) -> Result<
                 status: row.get(11)?,
                 notes: row.get(12)?,
                 created_at: row.get(13)?,
-                user_name: row.get(14)?,
+                customer_id: row.get(14)?,
+                user_name: row.get(15)?,
+                customer_name: row.get(16)?,
                 items: None,
             })
         })
@@ -298,15 +526,20 @@ pub fn get_sales(state: State<DbState>, filters: Option<SaleFilters>) -> Result<
 }
 
 #[tauri::command]
-pub fn get_sale_detail(state: State<DbState>, sale_id: i64) -> Result<Sale, String> {
+pub fn get_sale_detail(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<Sale, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     get_sale_by_id(&db, sale_id)
 }
 
 fn get_sale_by_id(db: &rusqlite::Connection, sale_id: i64) -> Result<Sale, String> {
     let mut sale = db.query_row(
-        "SELECT s.*, u.full_name as user_name FROM sales s
+        "SELECT s.id, s.folio, s.user_id, s.cash_register_id, s.subtotal, s.discount_total, s.tax, s.total,
+                s.payment_method, s.amount_paid, s.change_amount, s.status, s.notes, s.created_at,
+                s.customer_id, u.full_name AS user_name, c.name AS customer_name
+         FROM sales s
          LEFT JOIN users u ON s.user_id = u.id
+         LEFT JOIN customers c ON s.customer_id = c.id
          WHERE s.id = ?1",
         params![sale_id],
         |row| {
@@ -325,7 +558,9 @@ fn get_sale_by_id(db: &rusqlite::Connection, sale_id: i64) -> Result<Sale, Strin
                 status: row.get(11)?,
                 notes: row.get(12)?,
                 created_at: row.get(13)?,
-                user_name: row.get(14)?,
+                customer_id: row.get(14)?,
+                user_name: row.get(15)?,
+                customer_name: row.get(16)?,
                 items: None,
             })
         },
@@ -333,7 +568,7 @@ fn get_sale_by_id(db: &rusqlite::Connection, sale_id: i64) -> Result<Sale, Strin
 
     // Get items
     let mut stmt = db.prepare(
-        "SELECT * FROM sale_items WHERE sale_id = ?1"
+        "SELECT id, sale_id, product_id, product_name, product_sku, quantity, unit_price, discount, subtotal, returned_quantity, variant_id, variant_label FROM sale_items WHERE sale_id = ?1"
     ).map_err(|e| e.to_string())?;
 
     let items = stmt.query_map(params![sale_id], |row| {
@@ -347,6 +582,9 @@ fn get_sale_by_id(db: &rusqlite::Connection, sale_id: i64) -> Result<Sale, Strin
             unit_price: row.get(6)?,
             discount: row.get(7)?,
             subtotal: row.get(8)?,
+            returned_quantity: row.get(9)?,
+            variant_id: row.get(10)?,
+            variant_label: row.get(11)?,
         })
     }).map_err(|e| e.to_string())?
     .collect::<Result<Vec<_>, _>>()
@@ -354,4 +592,96 @@ fn get_sale_by_id(db: &rusqlite::Connection, sale_id: i64) -> Result<Sale, Strin
 
     sale.items = Some(items);
     Ok(sale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round2_keeps_money_to_two_decimals() {
+        assert_eq!(round2(10.005), 10.01);
+        assert_eq!(round2(0.1 + 0.2), 0.3);
+        assert_eq!(round2(249.0), 249.0);
+    }
+
+    #[test]
+    fn variant_label_joins_present_attributes() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(variant_label(&s("M"), &s("Negro")), "M / Negro");
+        assert_eq!(variant_label(&s("M"), &None), "M");
+        assert_eq!(variant_label(&None, &s("Negro")), "Negro");
+        assert_eq!(variant_label(&None, &None), "Único");
+        assert_eq!(variant_label(&s("  "), &s("Rojo")), "Rojo");
+    }
+
+    fn split(method: &str, amount: f64) -> PaymentSplitDto {
+        PaymentSplitDto { method: method.to_string(), amount }
+    }
+
+    #[test]
+    fn cash_only_tender_returns_the_change() {
+        let (applied, change) = split_tender(&[split("cash", 500.0)], 249.0).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].amount, 249.0);
+        assert_eq!(change, 251.0);
+    }
+
+    #[test]
+    fn mixed_tender_applies_cash_to_the_remainder() {
+        let (applied, change) =
+            split_tender(&[split("card", 200.0), split("cash", 100.0)], 249.0).unwrap();
+
+        let card = applied.iter().find(|p| p.method == "card").unwrap().amount;
+        let cash = applied.iter().find(|p| p.method == "cash").unwrap().amount;
+        assert_eq!(card, 200.0);
+        assert_eq!(cash, 49.0);
+        assert_eq!(change, 51.0);
+        assert_eq!(card + cash, 249.0);
+    }
+
+    #[test]
+    fn insufficient_tender_is_rejected() {
+        assert!(split_tender(&[split("cash", 100.0)], 249.0).is_err());
+        assert!(split_tender(&[split("card", 100.0), split("cash", 40.0)], 249.0).is_err());
+    }
+
+    #[test]
+    fn non_cash_cannot_exceed_the_total() {
+        assert!(split_tender(&[split("card", 300.0)], 249.0).is_err());
+    }
+
+    #[test]
+    fn zero_or_negative_legs_are_rejected() {
+        assert!(split_tender(&[split("cash", 0.0)], 249.0).is_err());
+        assert!(split_tender(&[split("card", -50.0), split("cash", 300.0)], 249.0).is_err());
+    }
+
+    #[test]
+    fn card_only_tender_leaves_no_change() {
+        let (applied, change) = split_tender(&[split("card", 249.0)], 249.0).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(change, 0.0);
+    }
+
+    #[test]
+    fn register_field_maps_every_method() {
+        assert_eq!(register_field("cash"), "total_cash_sales");
+        assert_eq!(register_field("card"), "total_card_sales");
+        assert_eq!(register_field("transfer"), "total_transfer_sales");
+        assert_eq!(register_field("desconocido"), "total_cash_sales");
+    }
+
+    #[test]
+    fn config_number_falls_back_on_missing_or_invalid_values() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+
+        assert_eq!(config_number(&conn, "no_existe", 7.5), 7.5);
+        assert_eq!(config_number(&conn, "tax_rate", 99.0), 0.0);
+
+        conn.execute("UPDATE system_config SET value = 'x' WHERE key = 'tax_rate'", [])
+            .unwrap();
+        assert_eq!(config_number(&conn, "tax_rate", 16.0), 16.0);
+    }
 }
