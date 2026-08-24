@@ -103,8 +103,16 @@ pub fn open_register(state: State<DbState>, sessions: State<SessionState>, token
 pub fn close_register(state: State<DbState>, sessions: State<SessionState>, token: String, data: CloseRegisterDto) -> Result<CashRegister, String> {
     let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    cerrar_caja(&db, user_id, data)
+}
 
-    let register = get_open_register_internal(&db)?;
+/// Núcleo del corte, con la conexión explícita.
+pub fn cerrar_caja(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    data: CloseRegisterDto,
+) -> Result<CashRegister, String> {
+    let register = get_open_register_internal(db)?;
 
     let expected = expected_cash(&register);
     let difference =
@@ -127,7 +135,7 @@ pub fn close_register(state: State<DbState>, sessions: State<SessionState>, toke
         ],
     ).ok();
 
-    get_register_by_id(&db, register.id)
+    get_register_by_id(db, register.id)
 }
 
 #[tauri::command]
@@ -267,5 +275,220 @@ mod tests {
             ..register()
         };
         assert_eq!(expected_cash(&r), 0.0);
+    }
+}
+
+/// Un día completo de mostrador, comprobando que el corte cuadre contra el
+/// dinero que realmente quedaría en el cajón.
+///
+/// Cada tipo de movimiento se probó por separado; esto verifica que juntos, en
+/// el orden en que ocurren en una tienda, siguen dando el mismo número.
+#[cfg(test)]
+mod dia_completo {
+    use super::*;
+    use crate::commands::layaways::{abonar_apartado, registrar_apartado};
+    use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+    use crate::commands::sales::registrar_venta;
+    use crate::models::layaway::{CreateLayawayDto, CreateLayawayItemDto};
+    use crate::models::sale::{CreateSaleDto, CreateSaleItemDto, PaymentSplitDto};
+
+    struct Mostrador {
+        db: rusqlite::Connection,
+        /// Lo que un humano contaría en el cajón siguiendo cada movimiento.
+        efectivo_real: f64,
+    }
+
+    impl Mostrador {
+        fn abre_con(fondo: f64) -> Mostrador {
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            crate::db::migrations::run_migrations(&db).unwrap();
+            db.execute(
+                "INSERT INTO users (id, username, password_hash, full_name, role)
+                 VALUES (1, 'u', 'x', 'U', 'admin')", [],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+                 VALUES (1, 'CAM', 'Camisa', 50.0, 100.0, 500)", [],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, ?1)",
+                params![fondo],
+            ).unwrap();
+            Mostrador { db, efectivo_real: fondo }
+        }
+
+        fn venta_efectivo(&mut self, piezas: i32, recibe: f64) -> i64 {
+            let sale = registrar_venta(&self.db, 1, None, CreateSaleDto {
+                items: vec![CreateSaleItemDto {
+                    product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
+                }],
+                payment_method: "cash".to_string(), amount_paid: recibe,
+                payments: vec![], discount_total: 0.0, promotion_id: None,
+                requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+            }).unwrap();
+            // Entra lo que dio el cliente y sale el cambio.
+            self.efectivo_real += recibe - sale.change_amount;
+            sale.id
+        }
+
+        fn venta_tarjeta(&mut self, piezas: i32) {
+            registrar_venta(&self.db, 1, None, CreateSaleDto {
+                items: vec![CreateSaleItemDto {
+                    product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
+                }],
+                payment_method: "card".to_string(), amount_paid: 0.0,
+                payments: vec![], discount_total: 0.0, promotion_id: None,
+                requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+            }).unwrap();
+            // No toca el cajón.
+        }
+
+        fn venta_mixta(&mut self, piezas: i32, tarjeta: f64, efectivo: f64) {
+            let sale = registrar_venta(&self.db, 1, None, CreateSaleDto {
+                items: vec![CreateSaleItemDto {
+                    product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
+                }],
+                payment_method: "cash".to_string(), amount_paid: 0.0,
+                payments: vec![
+                    PaymentSplitDto { method: "card".into(), amount: tarjeta },
+                    PaymentSplitDto { method: "cash".into(), amount: efectivo },
+                ],
+                discount_total: 0.0, promotion_id: None,
+                requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+            }).unwrap();
+            self.efectivo_real += efectivo - sale.change_amount;
+        }
+
+        fn gasto(&mut self, monto: f64) {
+            let cr = open_register_id(&self.db).unwrap();
+            self.db.execute(
+                "INSERT INTO expenses (cash_register_id, category, description, amount, user_id)
+                 VALUES (?1, 'varios', 'gasto', ?2, 1)",
+                params![cr, monto],
+            ).unwrap();
+            self.db.execute(
+                "UPDATE cash_registers SET total_expenses = total_expenses + ?1 WHERE id = ?2",
+                params![monto, cr],
+            ).unwrap();
+            self.efectivo_real -= monto;
+        }
+
+        fn apartado_con_anticipo(&mut self, piezas: i32, anticipo: f64) -> i64 {
+            let l = registrar_apartado(&self.db, 1, CreateLayawayDto {
+                customer_id: None, notes: None, due_date: None,
+                initial_payment: anticipo, payment_method: "cash".to_string(),
+                items: vec![CreateLayawayItemDto {
+                    product_id: 1, quantity: piezas, unit_price: 0.0, variant_id: None,
+                }],
+            }).unwrap();
+            self.efectivo_real += anticipo;
+            l.id
+        }
+
+        fn abono(&mut self, layaway_id: i64, monto: f64) {
+            abonar_apartado(&self.db, 1, layaway_id, monto, "cash").unwrap();
+            self.efectivo_real += monto;
+        }
+
+        fn devolucion_efectivo(&mut self, sale_id: i64, piezas: i32) {
+            let partida: i64 = self.db.query_row(
+                "SELECT id FROM sale_items WHERE sale_id = ?1", params![sale_id], |r| r.get(0)).unwrap();
+            let reembolso = registrar_devolucion(&self.db, 1, CreateReturnDto {
+                sale_id, reason: None, refund_method: "cash".to_string(),
+                items: vec![ReturnItemDto { sale_item_id: partida, quantity: piezas }],
+            }).unwrap();
+            self.efectivo_real -= reembolso;
+        }
+
+        fn abierta(&self) -> CashRegister {
+            get_open_register_internal(&self.db).unwrap()
+        }
+    }
+
+    #[test]
+    fn el_corte_cuadra_tras_un_dia_con_movimientos_de_todo_tipo() {
+        let mut m = Mostrador::abre_con(1500.0);
+
+        let v1 = m.venta_efectivo(2, 500.0);   // 200, cambio 300
+        m.venta_tarjeta(3);                     // 300 por tarjeta
+        m.venta_mixta(4, 250.0, 200.0);         // 400: 250 tarjeta + 150 efectivo, cambio 50
+        let apartado = m.apartado_con_anticipo(5, 200.0);
+        m.abono(apartado, 150.0);
+        m.gasto(180.0);
+        m.devolucion_efectivo(v1, 1);           // devuelve 100
+
+        let caja = m.abierta();
+        assert_eq!(
+            expected_cash(&caja), m.efectivo_real,
+            "lo que el sistema espera debe ser lo que hay en el cajón",
+        );
+
+        // Y al cerrar contando exactamente eso, no debe haber diferencia.
+        let cerrada = cerrar_caja(&m.db, 1, CloseRegisterDto { closing_amount: m.efectivo_real }).unwrap();
+        assert_eq!(cerrada.difference, Some(0.0));
+        assert_eq!(cerrada.status, "closed");
+    }
+
+    #[test]
+    fn un_faltante_se_reporta_con_su_signo() {
+        let mut m = Mostrador::abre_con(1000.0);
+        m.venta_efectivo(1, 100.0);
+
+        // Faltan 50 pesos en el cajón.
+        let cerrada = cerrar_caja(&m.db, 1, CloseRegisterDto {
+            closing_amount: m.efectivo_real - 50.0,
+        }).unwrap();
+
+        assert_eq!(cerrada.difference, Some(-50.0));
+    }
+
+    #[test]
+    fn un_sobrante_se_reporta_con_su_signo() {
+        let mut m = Mostrador::abre_con(1000.0);
+        m.venta_efectivo(1, 100.0);
+
+        let cerrada = cerrar_caja(&m.db, 1, CloseRegisterDto {
+            closing_amount: m.efectivo_real + 25.0,
+        }).unwrap();
+
+        assert_eq!(cerrada.difference, Some(25.0));
+    }
+
+    #[test]
+    fn no_se_cierra_una_caja_que_no_esta_abierta() {
+        let m = Mostrador::abre_con(0.0);
+        cerrar_caja(&m.db, 1, CloseRegisterDto { closing_amount: 0.0 }).unwrap();
+
+        assert!(cerrar_caja(&m.db, 1, CloseRegisterDto { closing_amount: 0.0 }).is_err());
+    }
+
+    #[test]
+    fn el_corte_guarda_lo_esperado_para_poder_auditarlo_despues() {
+        let mut m = Mostrador::abre_con(500.0);
+        m.venta_efectivo(3, 300.0);
+
+        let cerrada = cerrar_caja(&m.db, 1, CloseRegisterDto { closing_amount: m.efectivo_real }).unwrap();
+
+        assert_eq!(cerrada.expected_amount, Some(m.efectivo_real));
+        assert_eq!(cerrada.closing_amount, Some(m.efectivo_real));
+        assert!(cerrada.closed_at.is_some());
+    }
+
+    #[test]
+    fn tras_cerrar_no_se_puede_seguir_cobrando() {
+        let mut m = Mostrador::abre_con(0.0);
+        cerrar_caja(&m.db, 1, CloseRegisterDto { closing_amount: 0.0 }).unwrap();
+
+        let r = registrar_venta(&m.db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto {
+                product_id: 1, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: None,
+            }],
+            payment_method: "cash".to_string(), amount_paid: 1000.0,
+            payments: vec![], discount_total: 0.0, promotion_id: None,
+            requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+        });
+        assert!(r.is_err(), "sin turno abierto no hay dónde registrar el dinero");
+        let _ = &mut m;
     }
 }

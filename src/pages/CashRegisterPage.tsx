@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { formatCurrency, formatDateTime } from '../utils';
 import { useSessionStore } from '../stores/useSessionStore';
 import * as api from '../api';
+import { cashBreakdown, expectedCash as computeExpectedCash, round2 } from '../utils/cash';
 import type { CashRegister, Expense } from '../types';
 import { useToast } from '../contexts/ToastContext';
 
@@ -81,21 +82,10 @@ export default function CashRegisterPage() {
     );
 
     const closedHistory = history.filter(h => h.status === 'closed');
-    // Debe reflejar exactamente el mismo cálculo que expected_cash() en el
-    // backend: todo lo que entra o sale del cajón en billetes.
-    const cashLines = register ? [
-        { label: 'Fondo de apertura', amount: register.opening_amount },
-        { label: 'Ventas en efectivo', amount: register.total_cash_sales },
-        { label: 'Abonos de apartados', amount: register.total_layaway_cash },
-        { label: 'Devoluciones en efectivo', amount: -register.total_refunds_cash },
-        { label: 'Gastos', amount: -register.total_expenses },
-    ].filter(l => l.amount !== 0) : [];
+    const cashLines = register ? cashBreakdown(register).filter(l => l.amount !== 0) : [];
+    const expectedCash = register ? computeExpectedCash(register) : 0;
 
-    const expectedCash = register
-        ? Math.round((register.opening_amount + register.total_cash_sales + register.total_layaway_cash
-            - register.total_refunds_cash - register.total_expenses) * 100) / 100
-        : 0;
-    const closeDifference = register ? (parseFloat(closeAmount) || 0) - expectedCash : 0;
+    const closeDifference = register ? round2((parseFloat(closeAmount) || 0) - expectedCash) : 0;
 
     return (
         <div className="page-container">

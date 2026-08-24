@@ -507,6 +507,11 @@ pub fn registrar_venta(
 pub fn cancel_sale(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    cancelar_venta(&db, user_id, sale_id)
+}
+
+/// Núcleo de la cancelación, con la conexión explícita.
+pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> Result<(), String> {
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 

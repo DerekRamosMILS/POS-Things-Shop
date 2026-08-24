@@ -71,6 +71,29 @@ impl Cents {
     }
 }
 
+impl Cents {
+    /// Reparte proporcionalmente: `self * numerador / denominador`, redondeado
+    /// al centavo. Se opera en 128 bits para que el producto intermedio no se
+    /// desborde antes de dividir.
+    ///
+    /// Sirve para repartir el total realmente cobrado entre las partidas de una
+    /// venta, que es como se calcula cuánto devolver.
+    pub fn prorate(self, numerator: Cents, denominator: Cents) -> Cents {
+        if denominator.0 == 0 {
+            return Cents::ZERO;
+        }
+        let product = self.0 as i128 * numerator.0 as i128;
+        let den = denominator.0 as i128;
+        let half = den / 2;
+        let rounded = if (product < 0) != (den < 0) {
+            (product - half) / den
+        } else {
+            (product + half) / den
+        };
+        Cents(rounded as i64)
+    }
+}
+
 impl Add for Cents {
     type Output = Cents;
     fn add(self, other: Cents) -> Cents {
@@ -178,6 +201,40 @@ mod tests {
     fn negative_amounts_can_be_clamped_away() {
         assert_eq!((Cents::from_pesos(10.0) - Cents::from_pesos(25.0)).clamp_non_negative(), Cents::ZERO);
         assert_eq!(Cents::from_pesos(10.0).clamp_non_negative(), Cents::from_pesos(10.0));
+    }
+
+    #[test]
+    fn prorating_splits_a_total_across_parts() {
+        let total = Cents::from_pesos(100.0);
+        // Una partida que vale 30 de 120 se lleva el 25% del total cobrado.
+        assert_eq!(total.prorate(Cents::from_pesos(30.0), Cents::from_pesos(120.0)),
+                   Cents::from_pesos(25.0));
+    }
+
+    #[test]
+    fn prorating_the_whole_gives_back_the_whole() {
+        let total = Cents::from_pesos(116.0);
+        let base = Cents::from_pesos(100.0);
+        assert_eq!(total.prorate(base, base), total);
+    }
+
+    #[test]
+    fn prorating_rounds_to_the_nearest_cent() {
+        // 100 / 3 = 33.333... -> 33.33
+        let total = Cents::from_pesos(100.0);
+        assert_eq!(total.prorate(Cents(1), Cents(3)), Cents::from_pesos(33.33));
+    }
+
+    #[test]
+    fn prorating_by_zero_yields_zero_instead_of_dividing() {
+        assert_eq!(Cents::from_pesos(100.0).prorate(Cents::from_pesos(10.0), Cents::ZERO), Cents::ZERO);
+    }
+
+    #[test]
+    fn prorating_a_large_total_does_not_overflow() {
+        let total = Cents::from_pesos(5_000_000.0);
+        assert_eq!(total.prorate(Cents::from_pesos(1_000_000.0), Cents::from_pesos(2_000_000.0)),
+                   Cents::from_pesos(2_500_000.0));
     }
 
     #[test]

@@ -6,10 +6,11 @@ import { useHoldsStore, type ServiceType } from '../stores/useHoldsStore';
 import { formatCurrency } from '../utils';
 import { configFromSettings, createScannerHandler } from '../utils/scanner';
 import { useProductImage } from '../hooks/useProductImages';
+import { evaluateMixedTender, round2 } from '../utils/cash';
 import KeyboardHelp from '../components/KeyboardHelp';
 import * as api from '../api';
 
-const round2 = (v: number) => Math.round(v * 100) / 100;
+
 import type { CartItem, CartVariant, Category, Customer, PaymentSplit, Product, ProductVariant, Promotion } from '../types';
 
 const variantLabel = (v: CartVariant | null): string =>
@@ -439,21 +440,21 @@ export default function POSPage() {
     const taxRate = parseFloat(config.tax_rate || '0') || 0;
     const tax = Math.round(taxableBase * taxRate / 100 * 100) / 100;
     const total = Math.round((taxableBase + tax) * 100) / 100;
-    const mixedNonCash = round2((parseFloat(mixedCard) || 0) + (parseFloat(mixedTransfer) || 0));
-    // What still has to be paid in cash once card/transfer are applied.
-    const mixedCashDue = round2(Math.max(0, total - mixedNonCash));
     const cashGiven = parseFloat(amountPaid) || 0;
+    // El reparto del cobro mixto se calcula igual que en el backend; vive en
+    // utils/cash para que ambas versiones estén sujetas a las mismas pruebas.
+    const mixed = evaluateMixedTender(
+        total, parseFloat(mixedCard) || 0, parseFloat(mixedTransfer) || 0, cashGiven,
+    );
+    const mixedNonCash = mixed.nonCash;
+    const mixedCashDue = mixed.cashDue;
+    const mixedInvalid = paymentMethod === 'mixed' && mixed.problem !== null;
 
     const changeAmount = paymentMethod === 'cash'
-        ? cashGiven - total
+        ? round2(cashGiven - total)
         : paymentMethod === 'mixed'
-            ? cashGiven - mixedCashDue
+            ? mixed.change
             : 0;
-
-    // A mixed tender is only valid when the card/transfer legs stay within the
-    // total and the cash on the counter covers the rest.
-    const mixedInvalid = paymentMethod === 'mixed'
-        && (mixedNonCash <= 0 || mixedNonCash > total + 0.001 || cashGiven + 0.001 < mixedCashDue);
 
     const cannotCharge = processing || !cashRegisterId || mixedInvalid
         || (paymentMethod === 'cash' && cashGiven < total);
@@ -501,15 +502,19 @@ export default function POSPage() {
         if (!cashRegisterId) { showToast('Abre la caja antes de cobrar', 'error'); setShowPayment(false); return; }
         if (cannotCharge) return;
 
+        // Solo el pago mixto necesita desglose. Con un solo método se manda
+        // vacío a propósito: el backend usa su propio total, y así una
+        // diferencia de centavos entre lo que calculó la pantalla y lo que
+        // calculó el servidor no convierte el cobro en un error incomprensible.
         const payments: PaymentSplit[] = paymentMethod === 'mixed'
             ? [
                 ...(parseFloat(mixedCard) > 0 ? [{ method: 'card', amount: parseFloat(mixedCard) }] : []),
                 ...(parseFloat(mixedTransfer) > 0 ? [{ method: 'transfer', amount: parseFloat(mixedTransfer) }] : []),
                 ...(cashGiven > 0 ? [{ method: 'cash', amount: cashGiven }] : []),
               ]
-            : [{ method: paymentMethod, amount: paymentMethod === 'cash' ? cashGiven : total }];
+            : [];
 
-        const paid = round2(payments.reduce((sum, p) => sum + p.amount, 0));
+        const paid = paymentMethod === 'cash' ? cashGiven : total;
         setProcessing(true);
         const saleItems = items.map(i => ({ ...i }));
         const saleSubtotal = subtotal, saleLineDiscount = lineDiscountTotal, saleTax = tax;
@@ -1046,9 +1051,9 @@ export default function POSPage() {
                                     </div>
                                 </div>
 
-                                {mixedNonCash > total + 0.001 && (
+                                {mixed.problem && mixedNonCash > 0 && (
                                     <p style={{ marginTop: 10, fontSize: 12, color: T.danger }}>
-                                        Tarjeta y transferencia suman más que el total de la venta.
+                                        {mixed.problem}.
                                     </p>
                                 )}
 

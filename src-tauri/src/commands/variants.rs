@@ -150,3 +150,184 @@ pub fn save_variants(state: State<DbState>, sessions: State<SessionState>, token
         }
     }
 }
+
+/// El stock de un producto con variantes debe ser siempre la suma de las suyas.
+///
+/// Cada operación que mueve inventario toca las dos tablas por separado, así que
+/// basta con que una se olvide para que el catálogo empiece a mentir. Estas
+/// pruebas recorren el ciclo completo comprobando el invariante en cada paso.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::layaways::{cancelar_apartado, registrar_apartado};
+    use crate::commands::returns::registrar_devolucion;
+    use crate::commands::sales::{cancelar_venta, registrar_venta};
+    use crate::models::layaway::{CreateLayawayDto, CreateLayawayItemDto};
+    use crate::models::sale::{CreateSaleDto, CreateSaleItemDto};
+
+    fn tienda() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
+        db
+    }
+
+    /// Producto con dos variantes de 5 piezas cada una.
+    fn con_variantes(db: &rusqlite::Connection) -> (i64, i64, i64) {
+        db.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock, has_variants)
+             VALUES ('CAM', 'Camisa', 50.0, 100.0, 0, 1)", [],
+        ).unwrap();
+        let p = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO product_variants (product_id, size, stock) VALUES (?1, 'M', 5)",
+            params![p],
+        ).unwrap();
+        let m = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO product_variants (product_id, size, stock) VALUES (?1, 'L', 5)",
+            params![p],
+        ).unwrap();
+        let l = db.last_insert_rowid();
+        db.execute("UPDATE products SET stock = 10 WHERE id = ?1", params![p]).unwrap();
+        (p, m, l)
+    }
+
+    fn invariante(db: &rusqlite::Connection, product_id: i64, paso: &str) {
+        let (total, suma): (i32, i32) = db.query_row(
+            "SELECT p.stock, COALESCE((SELECT SUM(stock) FROM product_variants
+                                       WHERE product_id = p.id AND is_active = 1), 0)
+             FROM products p WHERE p.id = ?1",
+            params![product_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(total, suma, "el stock dejó de cuadrar con sus variantes tras {}", paso);
+    }
+
+    fn vender(db: &rusqlite::Connection, product_id: i64, variant_id: i64, cantidad: i32) -> i64 {
+        registrar_venta(db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto {
+                product_id, quantity: cantidad, unit_price: 0.0, discount: 0.0,
+                variant_id: Some(variant_id),
+            }],
+            payment_method: "cash".to_string(),
+            amount_paid: 100_000.0,
+            payments: vec![], discount_total: 0.0, promotion_id: None,
+            requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+        }).unwrap().id
+    }
+
+    #[test]
+    fn vender_una_variante_mantiene_el_invariante() {
+        let db = tienda();
+        let (p, m, _) = con_variantes(&db);
+
+        vender(&db, p, m, 2);
+
+        invariante(&db, p, "una venta");
+        let stock_m: i32 = db.query_row(
+            "SELECT stock FROM product_variants WHERE id = ?1", params![m], |r| r.get(0)).unwrap();
+        assert_eq!(stock_m, 3, "solo baja la talla vendida");
+    }
+
+    #[test]
+    fn cancelar_la_venta_mantiene_el_invariante() {
+        let db = tienda();
+        let (p, m, _) = con_variantes(&db);
+        let venta = vender(&db, p, m, 3);
+
+        cancelar_venta(&db, 1, venta).unwrap();
+
+        invariante(&db, p, "cancelar la venta");
+        let stock_m: i32 = db.query_row(
+            "SELECT stock FROM product_variants WHERE id = ?1", params![m], |r| r.get(0)).unwrap();
+        assert_eq!(stock_m, 5, "la talla vuelve a su existencia original");
+    }
+
+    #[test]
+    fn devolver_una_variante_mantiene_el_invariante() {
+        let db = tienda();
+        let (p, m, _) = con_variantes(&db);
+        let venta = vender(&db, p, m, 2);
+        let partida: i64 = db.query_row(
+            "SELECT id FROM sale_items WHERE sale_id = ?1", params![venta], |r| r.get(0)).unwrap();
+
+        registrar_devolucion(&db, 1, crate::commands::returns::CreateReturnDto {
+            sale_id: venta, reason: None, refund_method: "cash".to_string(),
+            items: vec![crate::commands::returns::ReturnItemDto { sale_item_id: partida, quantity: 1 }],
+        }).unwrap();
+
+        invariante(&db, p, "una devolución");
+    }
+
+    #[test]
+    fn apartar_y_cancelar_una_variante_mantiene_el_invariante() {
+        let db = tienda();
+        let (p, m, _) = con_variantes(&db);
+
+        let l = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None, notes: None, due_date: None,
+            initial_payment: 0.0, payment_method: "cash".to_string(),
+            items: vec![CreateLayawayItemDto {
+                product_id: p, quantity: 2, unit_price: 0.0, variant_id: Some(m),
+            }],
+        }).unwrap();
+        invariante(&db, p, "crear el apartado");
+
+        cancelar_apartado(&db, 1, l.id).unwrap();
+        invariante(&db, p, "cancelar el apartado");
+
+        let stock_m: i32 = db.query_row(
+            "SELECT stock FROM product_variants WHERE id = ?1", params![m], |r| r.get(0)).unwrap();
+        assert_eq!(stock_m, 5);
+    }
+
+    #[test]
+    fn no_se_vende_una_variante_sin_existencia_aunque_el_producto_tenga() {
+        let db = tienda();
+        let (p, m, _) = con_variantes(&db);
+        db.execute("UPDATE product_variants SET stock = 0 WHERE id = ?1", params![m]).unwrap();
+        db.execute("UPDATE products SET stock = 5 WHERE id = ?1", params![p]).unwrap();
+
+        let r = registrar_venta(&db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto {
+                product_id: p, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: Some(m),
+            }],
+            payment_method: "cash".to_string(), amount_paid: 1000.0,
+            payments: vec![], discount_total: 0.0, promotion_id: None,
+            requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+        });
+        assert!(r.is_err(), "la talla agotada no debe poder venderse");
+    }
+
+    #[test]
+    fn una_variante_de_otro_producto_no_se_puede_vender() {
+        let db = tienda();
+        let (p, _, _) = con_variantes(&db);
+        db.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock)
+             VALUES ('OTRO', 'Otro', 1.0, 2.0, 10)", [],
+        ).unwrap();
+        let otro = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO product_variants (product_id, size, stock) VALUES (?1, 'XL', 5)",
+            params![otro],
+        ).unwrap();
+        let ajena = db.last_insert_rowid();
+
+        let r = registrar_venta(&db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto {
+                product_id: p, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: Some(ajena),
+            }],
+            payment_method: "cash".to_string(), amount_paid: 1000.0,
+            payments: vec![], discount_total: 0.0, promotion_id: None,
+            requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+        });
+        assert!(r.is_err(), "una variante debe pertenecer al producto que se vende");
+    }
+}

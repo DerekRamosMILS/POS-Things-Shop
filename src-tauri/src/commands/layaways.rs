@@ -3,6 +3,7 @@ use rusqlite::params;
 use tauri::State;
 
 use crate::commands::cash_register::open_register_id;
+use crate::money::Cents;
 use crate::db::connection::DbState;
 use crate::session::{require_admin, require_auth, SessionState};
 use crate::models::layaway::{
@@ -99,6 +100,15 @@ fn post_layaway_payment(
 pub fn create_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateLayawayDto) -> Result<Layaway, String> {
     let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    registrar_apartado(&db, user_id, data)
+}
+
+/// Núcleo de la creación del apartado, con la conexión explícita.
+pub fn registrar_apartado(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    data: CreateLayawayDto,
+) -> Result<Layaway, String> {
 
     if data.items.is_empty() {
         return Err("El apartado no tiene productos".to_string());
@@ -193,7 +203,7 @@ pub fn create_layaway(state: State<DbState>, sessions: State<SessionState>, toke
         }
 
         if data.initial_payment > 0.0 {
-            post_layaway_payment(&db, layaway_id, data.initial_payment, &data.payment_method, user_id)?;
+            post_layaway_payment(db, layaway_id, data.initial_payment, &data.payment_method, user_id)?;
         }
 
         db.execute(
@@ -201,7 +211,7 @@ pub fn create_layaway(state: State<DbState>, sessions: State<SessionState>, toke
             params![format!("Apartado {} creado por {}", folio, total), user_id],
         ).ok();
 
-        get_layaway_internal(&db, layaway_id)
+        get_layaway_internal(db, layaway_id)
     })();
 
     match result {
@@ -257,7 +267,21 @@ pub fn add_layaway_payment(
 ) -> Result<Layaway, String> {
     let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    abonar_apartado(&db, user_id, layaway_id, amount, &payment_method)
+}
 
+/// Registra un abono validando el estado y el saldo.
+///
+/// Las reglas viven aquí y no en el comando para que no dependan de quién
+/// llame: un abono que supere el saldo dejaría el apartado pagado de más y sin
+/// forma de devolver la diferencia.
+pub fn abonar_apartado(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    layaway_id: i64,
+    amount: f64,
+    payment_method: &str,
+) -> Result<Layaway, String> {
     if amount <= 0.0 {
         return Err("El abono debe ser mayor a cero".to_string());
     }
@@ -266,28 +290,38 @@ pub fn add_layaway_payment(
         "SELECT status, total, paid FROM layaways WHERE id = ?1",
         params![layaway_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).map_err(|e| e.to_string())?;
+    ).map_err(|_| "El apartado no existe".to_string())?;
 
     if status != "active" {
         return Err("El apartado no está activo".to_string());
     }
-    if round2(paid + amount) > round2(total) + 0.001 {
-        return Err("El abono supera el saldo pendiente".to_string());
+
+    let saldo = Cents::from_pesos(total) - Cents::from_pesos(paid);
+    if Cents::from_pesos(amount) > saldo {
+        return Err(format!(
+            "El abono supera el saldo pendiente de {}",
+            saldo
+        ));
     }
 
-    post_layaway_payment(&db, layaway_id, amount, &payment_method, user_id)?;
+    post_layaway_payment(db, layaway_id, amount, payment_method, user_id)?;
     db.execute(
         "UPDATE layaways SET paid = paid + ?1 WHERE id = ?2",
         params![amount, layaway_id],
     ).map_err(|e| e.to_string())?;
 
-    get_layaway_internal(&db, layaway_id)
+    get_layaway_internal(db, layaway_id)
 }
 
 #[tauri::command]
 pub fn complete_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<Layaway, String> {
     require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    entregar_apartado(&db, layaway_id)
+}
+
+/// Núcleo de la entrega, con la conexión explícita.
+pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<Layaway, String> {
 
     let (status, total, paid): (String, f64, f64) = db.query_row(
         "SELECT status, total, paid FROM layaways WHERE id = ?1",
@@ -307,13 +341,18 @@ pub fn complete_layaway(state: State<DbState>, sessions: State<SessionState>, to
         params![layaway_id],
     ).map_err(|e| e.to_string())?;
 
-    get_layaway_internal(&db, layaway_id)
+    get_layaway_internal(db, layaway_id)
 }
 
 #[tauri::command]
 pub fn cancel_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    cancelar_apartado(&db, user_id, layaway_id)
+}
+
+/// Núcleo de la cancelación, con la conexión explícita.
+pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i64) -> Result<(), String> {
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
@@ -454,6 +493,155 @@ mod tests {
 
     fn caja_efectivo(db: &rusqlite::Connection) -> f64 {
         db.query_row("SELECT total_layaway_cash FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap()
+    }
+
+    use crate::models::layaway::{CreateLayawayDto, CreateLayawayItemDto};
+
+    fn producto(db: &rusqlite::Connection, sku: &str, precio: f64, stock: i32) -> i64 {
+        db.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock)
+             VALUES (?1, ?1, 10.0, ?2, ?3)",
+            params![sku, precio, stock],
+        ).unwrap();
+        db.last_insert_rowid()
+    }
+
+    fn stock(db: &rusqlite::Connection, id: i64) -> i32 {
+        db.query_row("SELECT stock FROM products WHERE id = ?1", params![id], |r| r.get(0)).unwrap()
+    }
+
+    fn apartado(product_id: i64, cantidad: i32, anticipo: f64, metodo: &str) -> CreateLayawayDto {
+        CreateLayawayDto {
+            customer_id: None,
+            notes: None,
+            due_date: None,
+            initial_payment: anticipo,
+            payment_method: metodo.to_string(),
+            items: vec![CreateLayawayItemDto {
+                product_id, quantity: cantidad, unit_price: 0.0, variant_id: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn crear_un_apartado_reserva_el_inventario() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+
+        let l = registrar_apartado(&db, 1, apartado(p, 3, 100.0, "cash")).unwrap();
+
+        assert_eq!(l.total, 300.0);
+        assert_eq!(l.paid, 100.0);
+        assert_eq!(stock(&db, p), 7, "el apartado saca la mercancía del inventario");
+    }
+
+    #[test]
+    fn el_anticipo_no_puede_superar_el_total() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+
+        assert!(registrar_apartado(&db, 1, apartado(p, 1, 500.0, "cash")).is_err());
+        assert_eq!(stock(&db, p), 10, "nada debe reservarse si el apartado no se creó");
+    }
+
+    #[test]
+    fn no_se_aparta_mas_de_lo_que_hay_en_existencia() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 2);
+
+        assert!(registrar_apartado(&db, 1, apartado(p, 5, 0.0, "cash")).is_err());
+        assert_eq!(stock(&db, p), 2);
+    }
+
+    #[test]
+    fn el_anticipo_en_efectivo_entra_a_la_caja_al_crear_el_apartado() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+
+        registrar_apartado(&db, 1, apartado(p, 2, 50.0, "cash")).unwrap();
+
+        assert_eq!(caja_efectivo(&db), 50.0);
+    }
+
+    #[test]
+    fn no_se_puede_abonar_mas_que_el_saldo() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+        let l = registrar_apartado(&db, 1, apartado(p, 1, 60.0, "cash")).unwrap();
+
+        assert!(abonar_apartado(&db, 1, l.id, 100.0, "cash").is_err(),
+                "el saldo es 40, no puede abonar 100");
+        assert!(abonar_apartado(&db, 1, l.id, 40.0, "cash").is_ok(),
+                "abonar exactamente el saldo sí debe poder");
+    }
+
+    #[test]
+    fn no_se_entrega_un_apartado_con_saldo_pendiente() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+        let l = registrar_apartado(&db, 1, apartado(p, 1, 50.0, "cash")).unwrap();
+
+        assert!(entregar_apartado(&db, l.id).is_err());
+    }
+
+    #[test]
+    fn liquidar_permite_entregar_y_no_devuelve_el_inventario() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+        let l = registrar_apartado(&db, 1, apartado(p, 2, 100.0, "cash")).unwrap();
+
+        db.execute("UPDATE layaways SET paid = total WHERE id = ?1", params![l.id]).unwrap();
+        let entregado = entregar_apartado(&db, l.id).unwrap();
+
+        assert_eq!(entregado.status, "completed");
+        assert_eq!(stock(&db, p), 8, "la mercancía se la llevó el cliente");
+    }
+
+    #[test]
+    fn cancelar_un_apartado_regresa_el_inventario() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+        let l = registrar_apartado(&db, 1, apartado(p, 3, 100.0, "cash")).unwrap();
+        assert_eq!(stock(&db, p), 7);
+
+        cancelar_apartado(&db, 1, l.id).unwrap();
+
+        assert_eq!(stock(&db, p), 10, "la mercancía vuelve a estar disponible");
+        let estado: String = db.query_row(
+            "SELECT status FROM layaways WHERE id = ?1", params![l.id], |r| r.get(0)).unwrap();
+        assert_eq!(estado, "cancelled");
+    }
+
+    #[test]
+    fn no_se_cancela_dos_veces_un_apartado() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+        let l = registrar_apartado(&db, 1, apartado(p, 1, 0.0, "cash")).unwrap();
+
+        cancelar_apartado(&db, 1, l.id).unwrap();
+        assert!(cancelar_apartado(&db, 1, l.id).is_err(),
+                "cancelar de nuevo duplicaría el inventario devuelto");
+        assert_eq!(stock(&db, p), 10);
+    }
+
+    #[test]
+    fn no_se_entrega_un_apartado_ya_cancelado() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "CAM", 100.0, 10);
+        let l = registrar_apartado(&db, 1, apartado(p, 1, 0.0, "cash")).unwrap();
+        cancelar_apartado(&db, 1, l.id).unwrap();
+
+        assert!(entregar_apartado(&db, l.id).is_err());
     }
 
     #[test]
