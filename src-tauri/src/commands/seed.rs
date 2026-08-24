@@ -114,6 +114,14 @@ pub fn seed_demo_data(state: State<DbState>, sessions: State<SessionState>, toke
             ).map_err(|e| e.to_string())?;
             let sale_id = db.last_insert_rowid();
 
+            // El desglose por método sale de sale_payments; sin él, las ventas
+            // de ejemplo aparecerían en el total del reporte pero en ningún
+            // método, que es justo lo que se corrigió para el pago mixto.
+            db.execute(
+                "INSERT INTO sale_payments (sale_id, method, amount) VALUES (?1, ?2, ?3)",
+                params![sale_id, method, total],
+            ).map_err(|e| e.to_string())?;
+
             for (idx, qty) in items {
                 let p = &products[*idx];
                 let pid = ids[*idx];

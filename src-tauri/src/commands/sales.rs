@@ -93,8 +93,11 @@ fn split_tender(
     let mut cash = Cents::ZERO;
     for p in payments {
         let amount = Cents::from_pesos(p.amount);
-        if !amount.is_positive() {
-            return Err("Cada forma de pago debe ser mayor a cero".to_string());
+        // Un importe negativo es un error; uno en cero simplemente no aporta, y
+        // rechazarlo impediría cobrar una venta que suma cero (un obsequio o una
+        // línea totalmente descontada).
+        if amount < Cents::ZERO {
+            return Err("Una forma de pago no puede ser negativa".to_string());
         }
         if p.method == "cash" {
             cash = cash + amount;
@@ -120,6 +123,17 @@ fn split_tender(
         .collect();
     if cash_applied.is_positive() {
         applied.push(("cash".to_string(), cash_applied));
+    }
+
+    // Una venta que suma cero —todo descontado, o un obsequio— no tiene ninguna
+    // pierna con importe. Aun así hay que registrar con qué se "pagó", o el
+    // cobro se queda sin forma de pago.
+    if applied.is_empty() {
+        let metodo = payments
+            .first()
+            .map(|p| p.method.clone())
+            .unwrap_or_else(|| "cash".to_string());
+        applied.push((metodo, Cents::ZERO));
     }
 
     Ok((applied, change))
@@ -196,7 +210,20 @@ pub fn create_sale(
     // The seller on record is the authenticated user, never a client-sent id.
     let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+    registrar_venta(&db, user_id, cash_register_id, data)
+}
 
+/// Núcleo del cobro, con la conexión explícita.
+///
+/// El comando solo resuelve la sesión y toma el candado; toda la lógica de
+/// dinero vive aquí para poder ejercitarla contra una base real en las pruebas,
+/// que es donde importa que no haya sorpresas.
+pub fn registrar_venta(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    cash_register_id: Option<i64>,
+    data: CreateSaleDto,
+) -> Result<Sale, String> {
     if data.items.is_empty() {
         return Err("La venta no tiene productos".to_string());
     }
@@ -209,7 +236,7 @@ pub fn create_sale(
             |row| row.get::<_, i64>(0),
         ) {
             log::warn!("Cobro repetido ignorado (request {}), se devuelve la venta {}", rid, existing_id);
-            return get_sale_by_id(&db, existing_id);
+            return get_sale_by_id(db, existing_id);
         }
     }
 
@@ -219,7 +246,7 @@ pub fn create_sale(
     let result = (|| -> Result<Sale, String> {
         // A sale requires an OPEN cash register. Derive it from the DB instead of
         // trusting the (possibly stale) id persisted in the client.
-        let register_id: i64 = match crate::commands::cash_register::open_register_id(&db) {
+        let register_id: i64 = match crate::commands::cash_register::open_register_id(db) {
             Some(id) => id,
             None => return Err("La caja no está abierta. Ábrela antes de cobrar.".to_string()),
         };
@@ -229,7 +256,7 @@ pub fn create_sale(
             }
         }
 
-        let folio = next_folio(&db)?;
+        let folio = next_folio(db)?;
 
         // Resolve every line from the DB (authoritative price + cost snapshot).
         struct Line {
@@ -314,13 +341,13 @@ pub fn create_sale(
             .map(|l| (l.product_id, l.category_id, l.line_subtotal))
             .collect();
         let promo_discount = match data.promotion_id {
-            Some(id) => promotion_discount(&db, id, &promo_base)?,
+            Some(id) => promotion_discount(db, id, &promo_base)?,
             None => Cents::ZERO,
         };
 
         let discount_total = (line_discount_total + promo_discount).min(subtotal);
         let taxable = (subtotal - discount_total).clamp_non_negative();
-        let tax_rate = config_number(&db, "tax_rate", 0.0);
+        let tax_rate = config_number(db, "tax_rate", 0.0);
         let tax = taxable.percent(tax_rate);
         let total = taxable + tax;
 
@@ -355,7 +382,7 @@ pub fn create_sale(
                 folio, user_id, register_id, subtotal.to_pesos(),
                 discount_total.to_pesos(), tax.to_pesos(), total.to_pesos(), payment_method,
                 amount_paid.to_pesos(), change_amount.to_pesos(), data.notes, data.customer_id,
-                data.client_request_id, data.promotion_id, terminal_id(&db)
+                data.client_request_id, data.promotion_id, terminal_id(db)
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -461,7 +488,7 @@ pub fn create_sale(
         ).ok();
 
         // Return the created sale
-        get_sale_by_id(&db, sale_id)
+        get_sale_by_id(db, sale_id)
     })();
 
     match result {
@@ -809,9 +836,22 @@ mod tests {
     }
 
     #[test]
-    fn zero_or_negative_legs_are_rejected() {
-        assert!(split_tender(&[split("cash", 0.0)], pesos(249.0)).is_err());
+    fn a_negative_leg_is_rejected() {
         assert!(split_tender(&[split("card", -50.0), split("cash", 300.0)], pesos(249.0)).is_err());
+    }
+
+    #[test]
+    fn a_zero_tender_against_a_real_total_is_insufficient() {
+        let err = split_tender(&[split("cash", 0.0)], pesos(249.0)).unwrap_err();
+        assert!(err.contains("insuficiente"), "mensaje poco claro: {}", err);
+    }
+
+    #[test]
+    fn a_sale_that_adds_up_to_zero_needs_no_tender() {
+        let (applied, change) = split_tender(&[split("cash", 0.0)], Cents::ZERO).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].1, Cents::ZERO);
+        assert_eq!(change, Cents::ZERO);
     }
 
     #[test]
@@ -1015,5 +1055,456 @@ mod tests {
         conn.execute("UPDATE system_config SET value = 'x' WHERE key = 'tax_rate'", [])
             .unwrap();
         assert_eq!(config_number(&conn, "tax_rate", 16.0), 16.0);
+    }
+}
+
+/// Pruebas del flujo completo de cobro contra una base real.
+///
+/// Las pruebas unitarias cubren cada pieza por separado; estas verifican que
+/// juntas producen los números correctos y dejan la base consistente, que es lo
+/// que de verdad importa cuando hay dinero de por medio.
+#[cfg(test)]
+mod integracion {
+    use super::*;
+    use crate::models::sale::CreateSaleItemDto;
+    use crate::commands::cash_register::{expected_cash, open_register_id};
+
+    struct Tienda {
+        db: rusqlite::Connection,
+    }
+
+    impl Tienda {
+        fn nueva() -> Tienda {
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            crate::db::migrations::run_migrations(&db).unwrap();
+            db.execute(
+                "INSERT INTO users (id, username, password_hash, full_name, role)
+                 VALUES (1, 'cajero', 'x', 'Cajero', 'cashier')",
+                [],
+            ).unwrap();
+            Tienda { db }
+        }
+
+        fn con_caja(self, fondo: f64) -> Tienda {
+            self.db.execute(
+                "INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, ?1)",
+                params![fondo],
+            ).unwrap();
+            self
+        }
+
+        fn producto(&self, sku: &str, precio: f64, costo: f64, stock: i32) -> i64 {
+            self.db.execute(
+                "INSERT INTO products (sku, name, purchase_price, sale_price, stock)
+                 VALUES (?1, ?1, ?2, ?3, ?4)",
+                params![sku, costo, precio, stock],
+            ).unwrap();
+            self.db.last_insert_rowid()
+        }
+
+        fn cobrar(&self, data: CreateSaleDto) -> Result<Sale, String> {
+            registrar_venta(&self.db, 1, None, data)
+        }
+
+        fn stock(&self, product_id: i64) -> i32 {
+            self.db.query_row("SELECT stock FROM products WHERE id = ?1", params![product_id], |r| r.get(0)).unwrap()
+        }
+
+        fn caja(&self) -> crate::models::cash_register::CashRegister {
+            let id = open_register_id(&self.db).unwrap();
+            self.db.query_row(
+                "SELECT cr.id, cr.user_id, u.full_name, cr.opening_amount, cr.closing_amount,
+                        cr.expected_amount, cr.difference, cr.total_sales, cr.total_cash_sales,
+                        cr.total_card_sales, cr.total_transfer_sales, cr.total_layaway_cash,
+                        cr.total_layaway_card, cr.total_layaway_transfer, cr.total_refunds_cash,
+                        cr.total_expenses, cr.sale_count, cr.status, cr.opened_at, cr.closed_at
+                 FROM cash_registers cr LEFT JOIN users u ON cr.user_id = u.id WHERE cr.id = ?1",
+                params![id],
+                |row| Ok(crate::models::cash_register::CashRegister {
+                    id: row.get(0)?, user_id: row.get(1)?, user_name: row.get(2)?,
+                    opening_amount: row.get(3)?, closing_amount: row.get(4)?,
+                    expected_amount: row.get(5)?, difference: row.get(6)?,
+                    total_sales: row.get(7)?, total_cash_sales: row.get(8)?,
+                    total_card_sales: row.get(9)?, total_transfer_sales: row.get(10)?,
+                    total_layaway_cash: row.get(11)?, total_layaway_card: row.get(12)?,
+                    total_layaway_transfer: row.get(13)?, total_refunds_cash: row.get(14)?,
+                    total_expenses: row.get(15)?, sale_count: row.get(16)?,
+                    status: row.get(17)?, opened_at: row.get(18)?, closed_at: row.get(19)?,
+                }),
+            ).unwrap()
+        }
+    }
+
+    fn venta(items: Vec<(i64, i32)>) -> CreateSaleDto {
+        CreateSaleDto {
+            items: items.into_iter().map(|(product_id, quantity)| CreateSaleItemDto {
+                product_id, quantity, unit_price: 0.0, discount: 0.0, variant_id: None,
+            }).collect(),
+            payment_method: "cash".to_string(),
+            amount_paid: 100_000.0,
+            payments: vec![],
+            discount_total: 0.0,
+            promotion_id: None,
+            requiere_factura: false,
+            notes: None,
+            customer_id: None,
+            client_request_id: None,
+        }
+    }
+
+    #[test]
+    fn una_venta_simple_cuadra_de_punta_a_punta() {
+        let t = Tienda::nueva().con_caja(1000.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let sale = t.cobrar(venta(vec![(p, 2)])).unwrap();
+
+        assert_eq!(sale.total, 498.0);
+        assert_eq!(sale.change_amount, 100_000.0 - 498.0);
+        assert_eq!(t.stock(p), 8, "el stock debe bajar");
+
+        let caja = t.caja();
+        assert_eq!(caja.total_cash_sales, 498.0);
+        assert_eq!(caja.sale_count, 1);
+        assert_eq!(expected_cash(&caja), 1498.0);
+    }
+
+    #[test]
+    fn el_precio_sale_de_la_base_aunque_el_cliente_mienta() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.items[0].unit_price = 1.0; // el cliente intenta cobrar $1
+
+        assert_eq!(t.cobrar(data).unwrap().total, 249.0);
+    }
+
+    #[test]
+    fn el_descuento_del_cliente_se_ignora() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.discount_total = 248.0; // intento de dejar la venta en $1
+
+        assert_eq!(t.cobrar(data).unwrap().total, 249.0);
+    }
+
+    #[test]
+    fn un_descuento_de_linea_no_puede_superar_la_linea() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.items[0].discount = 9999.0;
+
+        let sale = t.cobrar(data).unwrap();
+        assert_eq!(sale.total, 0.0, "el descuento se topa, no deja el total negativo");
+        assert_eq!(sale.discount_total, 249.0);
+    }
+
+    #[test]
+    fn sin_caja_abierta_no_se_cobra() {
+        let t = Tienda::nueva();
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        assert!(t.cobrar(venta(vec![(p, 1)])).is_err());
+    }
+
+    #[test]
+    fn una_venta_sin_stock_se_rechaza_y_no_deja_rastro() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 1);
+
+        assert!(t.cobrar(venta(vec![(p, 5)])).is_err());
+
+        let ventas: i64 = t.db.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas, 0, "la transacción debe revertirse completa");
+        assert_eq!(t.stock(p), 1, "el stock no debe moverse");
+        assert_eq!(t.caja().sale_count, 0);
+    }
+
+    #[test]
+    fn el_efectivo_insuficiente_se_rechaza() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.amount_paid = 100.0;
+
+        assert!(t.cobrar(data).is_err());
+    }
+
+    #[test]
+    fn el_mismo_cobro_enviado_dos_veces_produce_una_sola_venta() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.client_request_id = Some("intento-1".to_string());
+        let primera = t.cobrar(data).unwrap();
+
+        let mut repetida = venta(vec![(p, 1)]);
+        repetida.client_request_id = Some("intento-1".to_string());
+        let segunda = t.cobrar(repetida).unwrap();
+
+        assert_eq!(primera.id, segunda.id, "debe devolver la venta original");
+        assert_eq!(t.stock(p), 9, "el stock solo baja una vez");
+        assert_eq!(t.caja().sale_count, 1);
+    }
+
+    #[test]
+    fn el_pago_mixto_reparte_entre_metodos_y_el_cajon_solo_recibe_efectivo() {
+        let t = Tienda::nueva().con_caja(1000.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.payments = vec![
+            PaymentSplitDto { method: "card".into(), amount: 200.0 },
+            PaymentSplitDto { method: "cash".into(), amount: 100.0 },
+        ];
+        let sale = t.cobrar(data).unwrap();
+
+        assert_eq!(sale.payment_method, "mixed");
+        assert_eq!(sale.change_amount, 51.0);
+
+        let caja = t.caja();
+        assert_eq!(caja.total_card_sales, 200.0);
+        assert_eq!(caja.total_cash_sales, 49.0);
+        assert_eq!(caja.total_sales, 249.0);
+        // En el cajón entraron 49, no los 100 que dio el cliente.
+        assert_eq!(expected_cash(&caja), 1049.0);
+    }
+
+    #[test]
+    fn una_venta_con_tarjeta_no_toca_el_cajon() {
+        let t = Tienda::nueva().con_caja(1000.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.payment_method = "card".to_string();
+        data.amount_paid = 0.0;
+        t.cobrar(data).unwrap();
+
+        let caja = t.caja();
+        assert_eq!(caja.total_card_sales, 249.0);
+        assert_eq!(expected_cash(&caja), 1000.0);
+    }
+
+    #[test]
+    fn la_promocion_se_aplica_con_el_valor_del_servidor() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 200.0, 100.0, 10);
+        t.db.execute(
+            "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, applies_to)
+             VALUES ('10off', 'percentage', 10, date('now','localtime','-1 day'), date('now','localtime','+1 day'), 'all')",
+            [],
+        ).unwrap();
+        let promo_id = t.db.last_insert_rowid();
+
+        let mut data = venta(vec![(p, 1)]);
+        data.promotion_id = Some(promo_id);
+        data.discount_total = 190.0; // el cliente pide un descuento absurdo
+
+        let sale = t.cobrar(data).unwrap();
+        assert_eq!(sale.discount_total, 20.0, "manda el 10% de la promoción");
+        assert_eq!(sale.total, 180.0);
+    }
+
+    #[test]
+    fn una_promocion_vencida_no_descuenta_nada() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 200.0, 100.0, 10);
+        t.db.execute(
+            "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, applies_to)
+             VALUES ('vieja', 'percentage', 50, '2020-01-01', '2020-01-31', 'all')",
+            [],
+        ).unwrap();
+        let promo_id = t.db.last_insert_rowid();
+
+        let mut data = venta(vec![(p, 1)]);
+        data.promotion_id = Some(promo_id);
+
+        assert_eq!(t.cobrar(data).unwrap().total, 200.0);
+    }
+
+    #[test]
+    fn el_impuesto_se_calcula_sobre_la_base_ya_descontada() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 100.0, 50.0, 10);
+        t.db.execute("UPDATE system_config SET value = '16' WHERE key = 'tax_rate'", []).unwrap();
+
+        let mut data = venta(vec![(p, 1)]);
+        data.items[0].discount = 20.0;
+
+        let sale = t.cobrar(data).unwrap();
+        assert_eq!(sale.subtotal, 100.0);
+        assert_eq!(sale.discount_total, 20.0);
+        assert_eq!(sale.tax, 12.80, "16% de 80");
+        assert_eq!(sale.total, 92.80);
+    }
+
+    #[test]
+    fn las_partidas_guardadas_cuadran_con_el_encabezado() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let a = t.producto("A", 100.0, 50.0, 10);
+        let b = t.producto("B", 250.0, 90.0, 10);
+
+        let mut data = venta(vec![(a, 2), (b, 1)]);
+        data.items[0].discount = 15.0;
+        let sale = t.cobrar(data).unwrap();
+
+        let suma_partidas: f64 = t.db.query_row(
+            "SELECT SUM(subtotal) FROM sale_items WHERE sale_id = ?1", params![sale.id], |r| r.get(0),
+        ).unwrap();
+
+        // subtotal bruto - descuentos de línea == suma de las partidas
+        assert_eq!(suma_partidas, sale.subtotal - sale.discount_total);
+        assert_eq!(sale.total, suma_partidas + sale.tax);
+    }
+
+    #[test]
+    fn el_desglose_del_cobro_suma_exactamente_el_total() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 333.33, 100.0, 10);
+
+        let mut data = venta(vec![(p, 3)]);
+        data.payments = vec![
+            PaymentSplitDto { method: "transfer".into(), amount: 500.0 },
+            PaymentSplitDto { method: "cash".into(), amount: 600.0 },
+        ];
+        let sale = t.cobrar(data).unwrap();
+
+        let suma: f64 = t.db.query_row(
+            "SELECT SUM(amount) FROM sale_payments WHERE sale_id = ?1", params![sale.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(suma, sale.total);
+    }
+
+    #[test]
+    fn facturar_sin_cliente_se_rechaza_y_revierte() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.requiere_factura = true;
+
+        assert!(t.cobrar(data).is_err());
+        let ventas: i64 = t.db.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas, 0);
+        assert_eq!(t.stock(p), 10);
+    }
+
+    #[test]
+    fn facturar_con_cliente_sin_rfc_se_rechaza() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+        t.db.execute("INSERT INTO customers (id, name) VALUES (7, 'Sin RFC')", []).unwrap();
+
+        let mut data = venta(vec![(p, 1)]);
+        data.requiere_factura = true;
+        data.customer_id = Some(7);
+
+        let err = t.cobrar(data).unwrap_err();
+        assert!(err.contains("RFC"), "el mensaje debe decir qué falta: {}", err);
+    }
+
+    #[test]
+    fn facturar_guarda_una_copia_de_los_datos_fiscales() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+        t.db.execute(
+            "INSERT INTO customers (id, name, rfc, razon_social, regimen_fiscal, cp_fiscal, uso_cfdi)
+             VALUES (7, 'Cliente', 'ABC010101AB1', 'Ropa SA', '601', '64000', 'G03')",
+            [],
+        ).unwrap();
+
+        let mut data = venta(vec![(p, 1)]);
+        data.requiere_factura = true;
+        data.customer_id = Some(7);
+        let sale = t.cobrar(data).unwrap();
+
+        let (rfc, razon, regimen): (String, String, String) = t.db.query_row(
+            "SELECT fiscal_rfc, fiscal_razon_social, fiscal_regimen FROM sales WHERE id = ?1",
+            params![sale.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+
+        assert_eq!(rfc, "ABC010101AB1");
+        assert_eq!(razon, "Ropa SA");
+        assert_eq!(regimen, "601");
+
+        // Si el cliente cambia su RFC después, la venta conserva el de entonces.
+        t.db.execute("UPDATE customers SET rfc = 'XXX999999XX9' WHERE id = 7", []).unwrap();
+        let guardado: String = t.db.query_row(
+            "SELECT fiscal_rfc FROM sales WHERE id = ?1", params![sale.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(guardado, "ABC010101AB1");
+    }
+
+    #[test]
+    fn una_venta_que_suma_cero_no_revienta() {
+        // Un obsequio o una línea totalmente descontada dejaba el desglose vacío
+        // y el backend se caía al leer la primera forma de pago.
+        let t = Tienda::nueva().con_caja(500.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.items[0].discount = 249.0;
+        data.amount_paid = 0.0;
+
+        let sale = t.cobrar(data).unwrap();
+        assert_eq!(sale.total, 0.0);
+        assert_eq!(sale.payment_method, "cash");
+        assert_eq!(t.stock(p), 9, "el producto sí sale del inventario");
+        assert_eq!(expected_cash(&t.caja()), 500.0, "no entra dinero al cajón");
+    }
+
+    #[test]
+    fn los_folios_del_dia_avanzan_sin_repetirse() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 10.0, 5.0, 100);
+
+        let folios: Vec<String> = (0..5)
+            .map(|_| t.cobrar(venta(vec![(p, 1)])).unwrap().folio)
+            .collect();
+
+        let unicos: std::collections::HashSet<_> = folios.iter().collect();
+        assert_eq!(unicos.len(), 5, "no debe haber folios repetidos: {:?}", folios);
+        assert!(folios[4].ends_with("005"));
+    }
+
+    #[test]
+    fn el_costo_queda_congelado_en_la_partida() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+        let sale = t.cobrar(venta(vec![(p, 1)])).unwrap();
+
+        // Resurtir más caro no debe reescribir la utilidad de una venta pasada.
+        t.db.execute("UPDATE products SET purchase_price = 180.0 WHERE id = ?1", params![p]).unwrap();
+
+        let costo: f64 = t.db.query_row(
+            "SELECT unit_cost FROM sale_items WHERE sale_id = ?1", params![sale.id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(costo, 100.0);
+    }
+
+    #[test]
+    fn se_registra_el_movimiento_de_inventario() {
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+        let sale = t.cobrar(venta(vec![(p, 3)])).unwrap();
+
+        let (tipo, cantidad, previo, nuevo): (String, i32, i32, i32) = t.db.query_row(
+            "SELECT movement_type, quantity, previous_stock, new_stock
+             FROM inventory_movements WHERE reference_id = ?1",
+            params![sale.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+
+        assert_eq!(tipo, "sale");
+        assert_eq!(cantidad, -3);
+        assert_eq!(previo, 10);
+        assert_eq!(nuevo, 7);
     }
 }

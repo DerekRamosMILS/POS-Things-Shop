@@ -66,6 +66,13 @@ fn post_layaway_payment(
 ) -> Result<(), String> {
     let register_id = open_register_id(db);
 
+    // Un abono en efectivo entra al cajón: sin turno abierto no hay dónde
+    // registrarlo y el siguiente corte aparecería con un sobrante inexplicable.
+    // Mismo criterio que para las devoluciones en efectivo.
+    if method == "cash" && register_id.is_none() {
+        return Err("Abre la caja antes de recibir un abono en efectivo.".to_string());
+    }
+
     db.execute(
         "INSERT INTO layaway_payments (layaway_id, amount, payment_method, user_id, cash_register_id)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -423,4 +430,89 @@ fn get_layaway_internal(db: &rusqlite::Connection, layaway_id: i64) -> Result<La
     layaway.items = Some(items);
     layaway.payments = Some(payments);
     Ok(layaway)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tienda() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
+        db
+    }
+
+    fn abrir_caja(db: &rusqlite::Connection) {
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
+    }
+
+    fn caja_efectivo(db: &rusqlite::Connection) -> f64 {
+        db.query_row("SELECT total_layaway_cash FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn un_abono_en_efectivo_entra_a_la_caja_del_turno() {
+        let db = tienda();
+        abrir_caja(&db);
+
+        post_layaway_payment(&db, 1, 500.0, "cash", 1).unwrap();
+
+        assert_eq!(caja_efectivo(&db), 500.0);
+    }
+
+    #[test]
+    fn un_abono_con_tarjeta_no_toca_el_efectivo() {
+        let db = tienda();
+        abrir_caja(&db);
+
+        post_layaway_payment(&db, 1, 500.0, "card", 1).unwrap();
+
+        assert_eq!(caja_efectivo(&db), 0.0);
+        let tarjeta: f64 = db.query_row(
+            "SELECT total_layaway_card FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(tarjeta, 500.0);
+    }
+
+    #[test]
+    fn sin_caja_abierta_no_se_recibe_efectivo() {
+        let db = tienda();
+
+        let err = post_layaway_payment(&db, 1, 500.0, "cash", 1).unwrap_err();
+        assert!(err.contains("Abre la caja"), "mensaje poco claro: {}", err);
+
+        let abonos: i64 = db.query_row("SELECT COUNT(*) FROM layaway_payments", [], |r| r.get(0)).unwrap();
+        assert_eq!(abonos, 0, "no debe quedar registrado un abono que no se pudo ubicar");
+    }
+
+    #[test]
+    fn sin_caja_abierta_si_se_admite_una_transferencia() {
+        // No pasa por el cajón, así que no descuadra nada.
+        let db = tienda();
+        assert!(post_layaway_payment(&db, 1, 500.0, "transfer", 1).is_ok());
+    }
+
+    #[test]
+    fn el_abono_queda_ligado_al_turno_en_que_ocurrio() {
+        let db = tienda();
+        abrir_caja(&db);
+        post_layaway_payment(&db, 1, 500.0, "cash", 1).unwrap();
+
+        let cr: Option<i64> = db.query_row(
+            "SELECT cash_register_id FROM layaway_payments LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(cr, Some(1));
+    }
+
+    #[test]
+    fn cada_metodo_suma_en_su_propia_columna() {
+        assert_eq!(layaway_register_field("cash"), "total_layaway_cash");
+        assert_eq!(layaway_register_field("card"), "total_layaway_card");
+        assert_eq!(layaway_register_field("transfer"), "total_layaway_transfer");
+        assert_eq!(layaway_register_field("otro"), "total_layaway_cash");
+    }
 }

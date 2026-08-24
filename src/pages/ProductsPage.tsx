@@ -198,15 +198,25 @@ export default function ProductsPage() {
         setShowForm(true); setError('');
     };
 
+    const photoRequestFor = useRef<number | null>(null);
+
     const openEditForm = (product: Product) => {
         setEditingProduct(product);
         setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active });
         // El listado ya no trae la foto: se pide solo al abrir la ficha.
         setPhotoPreview(null);
         if (product.has_image) {
+            // Abrir dos fichas seguidas puede resolver las peticiones al revés;
+            // el id descarta la respuesta que ya no corresponde.
+            photoRequestFor.current = product.id;
             api.getProductImages([product.id])
-                .then(rows => setPhotoPreview(rows.find(([id]) => id === product.id)?.[1] ?? null))
-                .catch(() => setPhotoPreview(null));
+                .then(rows => {
+                    if (photoRequestFor.current !== product.id) return;
+                    setPhotoPreview(rows.find(([id]) => id === product.id)?.[1] ?? null);
+                })
+                .catch(() => {
+                    if (photoRequestFor.current === product.id) setPhotoPreview(null);
+                });
         }
         setPhotoChanged(false);
         setPriceHistory([]);

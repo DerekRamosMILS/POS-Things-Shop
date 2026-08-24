@@ -308,3 +308,114 @@ pub fn get_cashier_report(state: State<DbState>, sessions: State<SessionState>, 
 
     Ok(reports)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::commands::sales::registrar_venta;
+    use crate::models::sale::{CreateSaleDto, CreateSaleItemDto, PaymentSplitDto};
+
+    fn tienda() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (1, 'P', 'P', 50.0, 100.0, 1000)",
+            [],
+        ).unwrap();
+        db
+    }
+
+    fn cobrar(db: &rusqlite::Connection, cantidad: i32, pagos: Vec<(&str, f64)>) {
+        registrar_venta(db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto {
+                product_id: 1, quantity: cantidad, unit_price: 0.0, discount: 0.0, variant_id: None,
+            }],
+            payment_method: "cash".to_string(),
+            amount_paid: 100_000.0,
+            payments: pagos.into_iter()
+                .map(|(m, a)| PaymentSplitDto { method: m.to_string(), amount: a })
+                .collect(),
+            discount_total: 0.0,
+            promotion_id: None,
+            requiere_factura: false,
+            notes: None,
+            customer_id: None,
+            client_request_id: None,
+        }).unwrap();
+    }
+
+    /// Réplica de la consulta del reporte diario, sin la capa de comandos.
+    fn desglose_del_dia(db: &rusqlite::Connection) -> (f64, f64, f64, f64) {
+        db.query_row(
+            "SELECT
+                COALESCE(SUM(total), 0),
+                COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                          JOIN sales s2 ON s2.id = sp.sale_id
+                          WHERE sp.method = 'cash' AND s2.status = 'completed'
+                            AND date(s2.created_at) = date(sales.created_at)), 0),
+                COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                          JOIN sales s2 ON s2.id = sp.sale_id
+                          WHERE sp.method = 'card' AND s2.status = 'completed'
+                            AND date(s2.created_at) = date(sales.created_at)), 0),
+                COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                          JOIN sales s2 ON s2.id = sp.sale_id
+                          WHERE sp.method = 'transfer' AND s2.status = 'completed'
+                            AND date(s2.created_at) = date(sales.created_at)), 0)
+             FROM sales
+             WHERE status = 'completed'
+             GROUP BY date(created_at)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap()
+    }
+
+    #[test]
+    fn una_venta_mixta_aparece_repartida_entre_sus_metodos() {
+        // Con `CASE WHEN payment_method` esta venta no aparecía en ningún método
+        // y el desglose no cuadraba contra el total.
+        let db = tienda();
+        cobrar(&db, 3, vec![("card", 200.0), ("cash", 150.0)]);
+
+        let (total, efectivo, tarjeta, transferencia) = desglose_del_dia(&db);
+
+        assert_eq!(total, 300.0);
+        assert_eq!(tarjeta, 200.0);
+        assert_eq!(efectivo, 100.0);
+        assert_eq!(transferencia, 0.0);
+        assert_eq!(efectivo + tarjeta + transferencia, total, "el desglose debe sumar el total");
+    }
+
+    #[test]
+    fn el_desglose_suma_el_total_con_ventas_de_todo_tipo() {
+        let db = tienda();
+        cobrar(&db, 1, vec![("cash", 500.0)]);
+        cobrar(&db, 2, vec![("card", 200.0)]);
+        cobrar(&db, 1, vec![("transfer", 100.0)]);
+        cobrar(&db, 4, vec![("card", 300.0), ("transfer", 50.0), ("cash", 100.0)]);
+
+        let (total, efectivo, tarjeta, transferencia) = desglose_del_dia(&db);
+
+        assert_eq!(total, 100.0 + 200.0 + 100.0 + 400.0);
+        assert_eq!(efectivo + tarjeta + transferencia, total);
+    }
+
+    #[test]
+    fn una_venta_cancelada_sale_del_desglose() {
+        let db = tienda();
+        cobrar(&db, 1, vec![("cash", 100.0)]);
+        cobrar(&db, 2, vec![("card", 200.0)]);
+        db.execute("UPDATE sales SET status = 'cancelled' WHERE id = 2", []).unwrap();
+
+        let (total, efectivo, tarjeta, _) = desglose_del_dia(&db);
+
+        assert_eq!(total, 100.0);
+        assert_eq!(efectivo, 100.0);
+        assert_eq!(tarjeta, 0.0, "lo cancelado no debe seguir contando");
+    }
+}

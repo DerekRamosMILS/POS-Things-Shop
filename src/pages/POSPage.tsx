@@ -227,6 +227,8 @@ export default function POSPage() {
     // apuntando al estado actual sin volver a montarlo en cada render.
     const selectedLineRef = useRef(0);
     const showHelpRef = useRef(false);
+    const showLayawayRef = useRef(false);
+    const variantPickerRef = useRef(false);
     const handleHoldRef = useRef<() => void>(() => {});
     const onScanRef = useRef<(code: string) => void>(() => {});
     const liveRef = useRef({ showPayment, items, lastSale });
@@ -290,7 +292,14 @@ export default function POSPage() {
             if (e.key === 'F8') { e.preventDefault(); if (lines.length > 0) handleHoldRef.current(); return; }
             if (e.key === 'F9') { e.preventDefault(); if (lines.length > 0) { setServiceType('layaway'); setShowLayaway(true); } return; }
 
-            if (typing || sp || ls || lines.length === 0) { scanner(e); return; }
+            // Con un modal abierto el escáner queda inhabilitado: escanear
+            // mientras se cobra metía el producto al ticket por detrás, después
+            // de que el cajero ya había visto el total.
+            const modalAbierto = sp || ls || showHelpRef.current
+                || showLayawayRef.current || variantPickerRef.current;
+            if (modalAbierto) return;
+
+            if (typing || lines.length === 0) { scanner(e); return; }
 
             const current = Math.min(selectedLineRef.current, lines.length - 1);
             const line = lines[current];
@@ -362,6 +371,8 @@ export default function POSPage() {
     onScanRef.current = (code: string) => { handleBarcodeScan(code); };
     selectedLineRef.current = selectedLine;
     showHelpRef.current = showHelp;
+    showLayawayRef.current = showLayaway;
+    variantPickerRef.current = variantPickerProduct !== null;
     handleHoldRef.current = () => handleHold();
 
     const handleBarcodeScan = async (code: string) => {
