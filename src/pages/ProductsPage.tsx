@@ -7,6 +7,7 @@ import type { Product, Category, CreateProductDto, UpdateProductDto, Notificatio
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { invalidateProductImage, useProductImage } from '../hooks/useProductImages';
+import CaptureSettings from '../components/CaptureSettings';
 
 // ─── Fotos ───────────────────────────────────────────────────────────────────
 // Las fotos se guardan como archivos, no dentro de la base, así que pueden
@@ -203,6 +204,7 @@ export default function ProductsPage() {
     };
 
     const photoRequestFor = useRef<number | null>(null);
+    const [showCaptura, setShowCaptura] = useState(false);
 
     const openEditForm = (product: Product) => {
         setEditingProduct(product);
@@ -391,10 +393,30 @@ export default function ProductsPage() {
                     <h1 className="page-title">Productos</h1>
                     <p className="page-subtitle">{filtered.length} de {products.length} productos · inventario {formatCurrency(inventoryValue)}</p>
                 </div>
-                <button onClick={openCreateForm} className="btn btn-primary">
-                    <IcoPlus /> Nuevo Producto
-                </button>
+                <div style={{ display: 'flex', gap: 10 }}>
+                    <button onClick={() => setShowCaptura(true)} className="btn btn-ghost">
+                        Capturar desde el celular
+                    </button>
+                    <button onClick={openCreateForm} className="btn btn-primary">
+                        <IcoPlus /> Nuevo Producto
+                    </button>
+                </div>
             </div>
+
+            {showCaptura && (
+                <div className="modal-overlay" onClick={() => setShowCaptura(false)}>
+                    <div className="glass-modal animate-scale-in" style={{ width: '100%', maxWidth: 520, padding: 26 }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                            <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)' }}>Capturar desde el celular</h3>
+                            <button onClick={() => setShowCaptura(false)} style={{ padding: 6, borderRadius: 9, color: 'var(--t3)' }}><IcoX /></button>
+                        </div>
+                        <CaptureSettings compacto />
+                        <button onClick={() => { setShowCaptura(false); loadData(); }} className="btn btn-ghost" style={{ width: '100%', marginTop: 16, justifyContent: 'center' }}>
+                            Cerrar y actualizar lista
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* KPI cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16 }}>

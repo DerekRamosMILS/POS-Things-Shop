@@ -14,7 +14,7 @@ import type { CaptureStatus } from '../types';
  * Como el puerto queda abierto para todo el WiFi mientras está encendido, la
  * pantalla insiste en apagarlo al terminar y muestra siempre que está activo.
  */
-export default function CaptureSettings() {
+export default function CaptureSettings({ compacto = false }: { compacto?: boolean } = {}) {
     const { showToast } = useToast();
     const { confirm } = useConfirm();
     const [estado, setEstado] = useState<CaptureStatus>({
@@ -62,8 +62,15 @@ export default function CaptureSettings() {
         finally { setOcupado(false); }
     };
 
+    // En el modal de Productos el contenedor lo pone quien lo abre.
+    const Envoltura = compacto
+        ? ({ children }: { children: React.ReactNode }) => <div>{children}</div>
+        : ({ children }: { children: React.ReactNode }) => (
+            <div className="card" style={{ padding: '22px 24px' }}>{children}</div>
+        );
+
     return (
-        <div className="card" style={{ padding: '22px 24px' }}>
+        <Envoltura>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
                 <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)' }}>
                     Capturar productos desde el celular
@@ -131,6 +138,6 @@ export default function CaptureSettings() {
                     </div>
                 </>
             )}
-        </div>
+        </Envoltura>
     );
 }
