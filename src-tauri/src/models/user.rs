@@ -7,6 +7,7 @@ pub struct User {
     pub full_name: String,
     pub role: String,
     pub is_active: bool,
+    pub must_change_password: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -43,5 +44,11 @@ pub struct LoginResponse {
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordDto {
     pub user_id: i64,
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeOwnPasswordDto {
+    pub current_password: String,
     pub new_password: String,
 }

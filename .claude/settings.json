@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/USER/.claude/projects/d--POS-things/memory\" 2>/dev/**)",
+      "Read(//c/Users/USER/.claude/projects/d--POS-things/**)"
+    ]
+  }
+}

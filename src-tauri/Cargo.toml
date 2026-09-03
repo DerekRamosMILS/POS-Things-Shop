@@ -9,6 +9,9 @@ edition = "2021"
 name = "things_shop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -16,18 +19,22 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 argon2 = "0.5"
+password-hash = { version = "0.5", features = ["getrandom"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-printpdf = "0.7"
-rust_xlsxwriter = "0.79"
-rand = "0.8"
-log = "0.4"
-env_logger = "0.11"
+log = { version = "0.4", features = ["std"] }
+
+# Servidor de captura en red local: el celular sube fotos directo a la caja,
+# sin nube ni backend externo.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [profile.release]
 strip = true

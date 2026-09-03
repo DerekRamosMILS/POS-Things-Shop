@@ -2,114 +2,353 @@ import { useEffect, useState } from 'react';
 import { formatCurrency, formatDateTime, STATUS_LABELS, PAYMENT_METHOD_LABELS } from '../utils';
 import * as api from '../api';
 import type { Sale } from '../types';
-import { Receipt, Eye, XCircle, Search } from 'lucide-react';
 import { useSessionStore } from '../stores/useSessionStore';
+import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
+
+// ─── Inline SVGs ─────────────────────────────────────────────────────────────
+const IcoSearch  = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
+const IcoX       = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>;
+const IcoEye     = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>;
+const IcoBan     = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>;
+const IcoFilter  = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>;
+const IcoReceipt = () => <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="opacity-40"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>;
+
+function IcoBtn({ onClick, title, children, hoverColor = 'var(--primary)', hoverBg = 'rgba(139,120,245,0.10)' }: {
+    onClick: () => void; title: string; children: React.ReactNode;
+    hoverColor?: string; hoverBg?: string;
+}) {
+    return (
+        <button onClick={onClick} title={title} className="p-2 rounded-lg transition-colors" style={{ color: 'var(--t3)' }}
+            onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = hoverColor; (e.currentTarget as HTMLButtonElement).style.background = hoverBg; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+        >{children}</button>
+    );
+}
 
 export default function SalesPage() {
     const [sales, setSales] = useState<Sale[]>([]);
     const [loading, setLoading] = useState(true);
     const [detail, setDetail] = useState<Sale | null>(null);
     const [search, setSearch] = useState('');
+    const [statusFilter, setStatusFilter] = useState('');
+    const [paymentFilter, setPaymentFilter] = useState('');
+    const [dateFrom, setDateFrom] = useState('');
+    const [dateTo, setDateTo] = useState('');
     const { user } = useSessionStore();
+    const { showToast } = useToast();
+    const { confirm } = useConfirm();
 
-    useEffect(() => { loadSales(); }, []);
+    const [returnMode, setReturnMode] = useState(false);
+    const [returnQtys, setReturnQtys] = useState<Record<number, number>>({});
+    const [returnReason, setReturnReason] = useState('');
+    const [refundMethod, setRefundMethod] = useState('cash');
+
+    /// Reimprime el ticket de una venta anterior — el cliente que vuelve al día
+    /// siguiente por su comprobante. El ticket se arma desde lo guardado.
+    const handleReprint = async (saleId: number) => {
+        try {
+            await api.printSaleReceipt(saleId, false);
+            showToast('Ticket enviado a la impresora');
+        } catch (err) {
+            showToast(
+                String(err).includes('SIN_IMPRESORA')
+                    ? 'Configura la impresora de tickets en Ajustes para reimprimir'
+                    : String(err),
+                'error',
+            );
+        }
+    };
+    const [processing, setProcessing] = useState(false);
+
+    const handleReturn = async () => {
+        if (!detail || !user) return;
+        const items = Object.entries(returnQtys)
+            .map(([id, qty]) => ({ sale_item_id: Number(id), quantity: qty }))
+            .filter(it => it.quantity > 0);
+        if (items.length === 0) { showToast('Selecciona cantidades a devolver', 'error'); return; }
+        setProcessing(true);
+        try {
+            await api.createReturn({ sale_id: detail.id, reason: returnReason || null, refund_method: refundMethod, items });
+            showToast('Devolución registrada', 'success');
+            const fresh = await api.getSaleDetail(detail.id);
+            setDetail(fresh); setReturnMode(false); setReturnQtys({}); setReturnReason('');
+            loadSales();
+        } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
+    };
+
+    useEffect(() => { loadSales(); }, [statusFilter, paymentFilter, dateFrom, dateTo]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const loadSales = async () => {
-        try { const s = await api.getSales(); setSales(s); } catch (err) { console.error(err); } finally { setLoading(false); }
+        setLoading(true);
+        try {
+            const s = await api.getSales({
+                status: statusFilter || undefined,
+                payment_method: paymentFilter || undefined,
+                date_from: dateFrom || undefined,
+                date_to: dateTo || undefined,
+            });
+            setSales(s);
+        }
+        catch (err) { showToast(String(err), 'error'); }
+        finally { setLoading(false); }
     };
 
     const handleViewDetail = async (saleId: number) => {
-        try { const d = await api.getSaleDetail(saleId); setDetail(d); } catch (err) { alert(String(err)); }
+        try {
+            const d = await api.getSaleDetail(saleId);
+            setDetail(d); setReturnMode(false); setReturnQtys({}); setReturnReason('');
+        }
+        catch (err) { showToast(String(err), 'error'); }
     };
 
     const handleCancel = async (saleId: number) => {
-        if (!user || !confirm('¿Cancelar esta venta? Se restaurará el inventario.')) return;
-        try { await api.cancelSale(saleId, user.id); loadSales(); setDetail(null); } catch (err) { alert(String(err)); }
+        if (!user) return;
+        const ok = await confirm({ title: 'Cancelar venta', message: '¿Cancelar esta venta? Se restaurará el inventario.', variant: 'danger', confirmLabel: 'Cancelar venta' });
+        if (!ok) return;
+        try { await api.cancelSale(saleId); loadSales(); setDetail(null); }
+        catch (err) { showToast(String(err), 'error'); }
     };
 
-    const filtered = sales.filter((s) => !search || s.folio.toLowerCase().includes(search.toLowerCase()));
+    const filtered = sales.filter(s => {
+        const q = search.toLowerCase().trim();
+        if (q && ![s.folio, s.user_name || '', s.payment_method, s.status].some(v => v.toLowerCase().includes(q))) return false;
+        if (statusFilter && s.status !== statusFilter) return false;
+        if (paymentFilter && s.payment_method !== paymentFilter) return false;
+        if (dateFrom && s.created_at.slice(0, 10) < dateFrom) return false;
+        if (dateTo && s.created_at.slice(0, 10) > dateTo) return false;
+        return true;
+    });
 
-    if (loading) return <div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>;
+    const totalSales = filtered.filter(s => s.status === 'completed').reduce((sum, s) => sum + s.total, 0);
+    const cancelledCount = filtered.filter(s => s.status !== 'completed').length;
+    const hasFilters = !!(search || statusFilter || paymentFilter || dateFrom || dateTo);
+
+    if (loading) return (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2.5" strokeLinecap="round" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+        </div>
+    );
 
     return (
-        <div className="p-10 h-full flex flex-col animate-fade-in">
-            <div className="flex items-center justify-between mb-8">
+        <div className="page-container">
+            {/* Header */}
+            <div className="page-header">
                 <div>
-                    <h1 className="text-4xl font-bold text-text-primary">Ventas</h1>
-                    <p className="text-text-secondary text-lg mt-2">{sales.length} ventas registradas</p>
-                </div>
-                <div className="relative w-96">
-                    <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-text-muted" size={24} />
-                    <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar por folio..." className="w-full pl-[68px] pr-6 py-5 bg-bg-secondary border border-border rounded-2xl text-text-primary text-xl placeholder-text-muted focus:border-primary transition-colors focus:shadow-[0_0_15px_rgba(0,224,90,0.15)] shadow-[inset_0_2px_10px_rgba(0,0,0,0.2)]" />
+                    <h1 className="page-title">Ventas</h1>
+                    <p className="page-subtitle">{filtered.length} de {sales.length} ventas · {formatCurrency(totalSales)} completadas</p>
                 </div>
             </div>
 
-            <div className="glass rounded-[32px] border border-border flex-1 flex flex-col overflow-hidden shadow-[0_10px_50px_rgba(0,0,0,0.5)]">
-                <div className="overflow-auto flex-1">
-                    <table className="w-full">
+            {/* KPIs */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 14 }}>
+                <div className="card" style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--t3)', marginBottom: 8 }}>Total filtrado</p>
+                    <p style={{ fontSize: 22, fontWeight: 900, color: 'var(--success)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(totalSales)}</p>
+                </div>
+                <div className="card" style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--t3)', marginBottom: 8 }}>Tickets</p>
+                    <p style={{ fontSize: 22, fontWeight: 900, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{filtered.length}</p>
+                </div>
+                <div className="card" style={{ padding: '20px 24px' }}>
+                    <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--t3)', marginBottom: 8 }}>Canceladas</p>
+                    <p style={{ fontSize: 22, fontWeight: 900, color: cancelledCount > 0 ? 'var(--danger)' : 'var(--success)', fontVariantNumeric: 'tabular-nums' }}>{cancelledCount}</p>
+                </div>
+            </div>
+
+            {/* Filters */}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ flex: 1, minWidth: 240, position: 'relative' }}>
+                    <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--t3)', pointerEvents: 'none' }}><IcoSearch /></span>
+                    <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar folio, cajero, método de pago…" className="input" style={{ paddingLeft: 36 }} />
+                </div>
+                <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="input" style={{ width: 'auto' }} />
+                <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="input" style={{ width: 'auto' }} />
+                <select value={paymentFilter} onChange={e => setPaymentFilter(e.target.value)} className="input" style={{ width: 'auto', minWidth: 150 }}>
+                    <option value="">Todos los pagos</option>
+                    {Object.entries(PAYMENT_METHOD_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+                <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="input" style={{ width: 'auto', minWidth: 150 }}>
+                    <option value="">Todos los estados</option>
+                    {Object.entries(STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+                {hasFilters && (
+                    <button onClick={() => { setSearch(''); setStatusFilter(''); setPaymentFilter(''); setDateFrom(''); setDateTo(''); }} className="btn btn-ghost btn-sm" style={{ gap: 6 }}>
+                        <IcoFilter /> Limpiar
+                    </button>
+                )}
+            </div>
+
+            {/* Table */}
+            <div className="card" style={{ flex: 1, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ overflowX: 'auto', overflowY: 'auto', flex: 1 }}>
+                    <table className="table-base">
                         <thead>
-                            <tr className="border-b border-border">
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Folio</th>
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Fecha</th>
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Cajero</th>
-                                <th className="text-left text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Pago</th>
-                                <th className="text-right text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Total</th>
-                                <th className="text-center text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Estado</th>
-                                <th className="text-center text-base font-bold text-text-muted uppercase px-8 py-6 tracking-wide">Acciones</th>
+                            <tr>
+                                <th>Folio</th>
+                                <th>Fecha</th>
+                                <th>Cajero</th>
+                                <th>Método</th>
+                                <th style={{ textAlign: 'right' }}>Total</th>
+                                <th style={{ textAlign: 'center' }}>Estado</th>
+                                <th style={{ textAlign: 'center', width: 90 }}>Acciones</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {filtered.map((s) => (
-                                <tr key={s.id} className="border-b border-border/50 hover:bg-white/5 transition-colors">
-                                    <td className="px-8 py-6 text-xl font-bold text-primary">{s.folio}</td>
-                                    <td className="px-8 py-6 text-lg text-text-secondary font-mono tracking-wider">{formatDateTime(s.created_at)}</td>
-                                    <td className="px-8 py-6 text-xl text-text-secondary">{s.user_name}</td>
-                                    <td className="px-8 py-6 text-xl text-text-secondary">{PAYMENT_METHOD_LABELS[s.payment_method] || s.payment_method}</td>
-                                    <td className="px-8 py-6 text-right text-2xl font-black text-text-primary tracking-tight">{formatCurrency(s.total)}</td>
-                                    <td className="px-8 py-6 text-center"><span className={`text-base font-bold px-5 py-2.5 rounded-xl border border-transparent ${s.status === 'completed' ? 'bg-success/10 text-success border-success/30' : 'bg-danger/10 text-danger border-danger/30'}`}>{STATUS_LABELS[s.status] || s.status}</span></td>
-                                    <td className="px-8 py-6"><div className="flex items-center justify-center gap-4">
-                                        <button onClick={() => handleViewDetail(s.id)} className="p-4 text-text-muted hover:text-primary hover:bg-primary/10 rounded-xl transition-all border border-transparent hover:border-primary/30 hover:scale-110 shadow-[0_4px_10px_rgba(0,0,0,0.1)]"><Eye size={24} /></button>
-                                        {s.status === 'completed' && <button onClick={() => handleCancel(s.id)} className="p-4 text-text-muted hover:text-danger hover:bg-danger/10 rounded-xl transition-all border border-transparent hover:border-danger/30 hover:scale-110 shadow-[0_4px_10px_rgba(0,0,0,0.1)]"><XCircle size={24} /></button>}
-                                    </div></td>
+                            {filtered.map(s => (
+                                <tr key={s.id}>
+                                    <td>
+                                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--primary)', fontFamily: 'monospace' }}>{s.folio}</span>
+                                    </td>
+                                    <td style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--t2)' }}>{formatDateTime(s.created_at)}</td>
+                                    <td style={{ color: 'var(--t2)', fontSize: 13 }}>{s.user_name}</td>
+                                    <td style={{ color: 'var(--t2)', fontSize: 13 }}>{PAYMENT_METHOD_LABELS[s.payment_method] || s.payment_method}</td>
+                                    <td style={{ textAlign: 'right' }}>
+                                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(s.total)}</span>
+                                    </td>
+                                    <td style={{ textAlign: 'center' }}>
+                                        <span className={`badge ${s.status === 'completed' ? 'badge-success' : 'badge-danger'}`}>
+                                            {STATUS_LABELS[s.status] || s.status}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                                            <IcoBtn onClick={() => handleViewDetail(s.id)} title="Ver detalle"><IcoEye /></IcoBtn>
+                                            {s.status === 'completed' && (
+                                                <IcoBtn onClick={() => handleCancel(s.id)} title="Cancelar" hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)"><IcoBan /></IcoBtn>
+                                            )}
+                                        </div>
+                                    </td>
                                 </tr>
                             ))}
                         </tbody>
                     </table>
-                    {filtered.length === 0 && <div className="py-24 text-center text-text-muted"><Receipt size={72} strokeWidth={1.5} className="mx-auto mb-5 opacity-30" /><p className="text-xl font-medium tracking-wide">No se encontraron ventas</p></div>}
+                    {filtered.length === 0 && (
+                        <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--t3)' }}>
+                            <IcoReceipt />
+                            <p style={{ marginTop: 12, fontSize: 13 }}>No se encontraron ventas</p>
+                        </div>
+                    )}
                 </div>
             </div>
 
-            {/* Detail Modal */}
+            {/* ── Detail Modal ── */}
             {detail && (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 animate-fade-in" onClick={() => setDetail(null)}>
-                    <div className="bg-bg-secondary border border-white/10 rounded-[32px] w-full max-w-3xl p-12 lg:p-14 animate-fade-in shadow-[0_20px_80px_rgba(0,0,0,0.9)]" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex justify-between mb-10">
-                            <h3 className="text-3xl font-black text-text-primary">Venta {detail.folio}</h3>
-                            <button onClick={() => setDetail(null)} className="text-text-muted hover:text-text-primary text-3xl font-bold">✕</button>
-                        </div>
-                        <div className="space-y-8">
-                            <div className="grid grid-cols-2 gap-6">
-                                <div className="bg-bg-primary rounded-2xl p-6 border border-border">
-                                    <p className="text-base font-bold text-text-muted uppercase tracking-widest mb-2">Fecha</p>
-                                    <p className="text-xl font-bold text-text-primary font-mono tracking-wider">{formatDateTime(detail.created_at)}</p>
-                                </div>
-                                <div className="bg-bg-primary rounded-2xl p-6 border border-border">
-                                    <p className="text-base font-bold text-text-muted uppercase tracking-widest mb-2">Método de Pago</p>
-                                    <p className="text-xl font-bold text-text-primary">{PAYMENT_METHOD_LABELS[detail.payment_method]}</p>
-                                </div>
+                <div className="modal-overlay" onClick={() => setDetail(null)}>
+                    <div className="glass-modal animate-scale-in" style={{ width: '100%', maxWidth: 480, maxHeight: '90vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+                        {/* Modal header */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 24px', borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+                            <div>
+                                <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)' }}>Detalle de Venta</h3>
+                                <p style={{ fontSize: 12, fontFamily: 'monospace', color: 'var(--primary)', marginTop: 2 }}>{detail.folio}</p>
                             </div>
-                            <div className="bg-bg-primary rounded-2xl p-8 space-y-4 border border-border">
-                                {detail.items?.map((item) => (
-                                    <div key={item.id} className="flex justify-between text-xl py-4 border-b border-border/50 last:border-0">
-                                        <span className="text-text-secondary font-medium"><span className="text-text-muted mr-3">{item.quantity}x</span> {item.product_name}</span>
-                                        <span className="text-text-primary font-black drop-shadow-[0_0_8px_rgba(255,255,255,0.1)]">{formatCurrency(item.subtotal)}</span>
+                            <button onClick={() => setDetail(null)} style={{ padding: 6, borderRadius: 9, color: 'var(--t3)', transition: 'all 0.15s' }}
+                                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,255,255,0.08)'; (e.currentTarget as HTMLButtonElement).style.color = 'var(--t1)'; }}
+                                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; }}
+                            ><IcoX /></button>
+                        </div>
+
+                        <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                            {/* Meta */}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                {[
+                                    { label: 'Fecha', value: formatDateTime(detail.created_at), mono: true },
+                                    { label: 'Método de Pago', value: PAYMENT_METHOD_LABELS[detail.payment_method] || detail.payment_method },
+                                    { label: 'Cajero', value: detail.user_name || '—' },
+                                    { label: 'Estado', value: STATUS_LABELS[detail.status] || detail.status },
+                                ].map(m => (
+                                    <div key={m.label} style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
+                                        <p style={{ fontSize: 10, color: 'var(--t3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>{m.label}</p>
+                                        <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--t1)', fontFamily: m.mono ? 'monospace' : 'inherit' }}>{m.value}</p>
                                     </div>
                                 ))}
                             </div>
-                            <div className="bg-primary/10 border-2 border-primary/30 rounded-3xl p-8 flex justify-between items-center shadow-[0_10px_30px_rgba(0,224,90,0.15)]">
-                                <span className="text-3xl font-black text-text-primary uppercase tracking-widest">Total</span>
-                                <span className="text-5xl font-black text-primary drop-shadow-[0_0_15px_rgba(0,224,90,0.4)]">{formatCurrency(detail.total)}</span>
+
+                            {/* Items */}
+                            <div style={{ borderRadius: 14, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                                {detail.items?.map((item, i) => {
+                                    const available = item.quantity - item.returned_quantity;
+                                    return (
+                                        <div key={item.id} style={{
+                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                            padding: '11px 16px',
+                                            borderTop: i > 0 ? '1px solid var(--border)' : 'none',
+                                        }}>
+                                            <div>
+                                                <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 500 }}>{item.product_name}</span>
+                                                {item.variant_label && <span className="badge badge-primary" style={{ marginLeft: 6 }}>{item.variant_label}</span>}
+                                                <span style={{ fontSize: 11, color: 'var(--t3)', marginLeft: 8 }}>×{item.quantity}</span>
+                                                {item.discount > 0 && <span className="badge badge-accent" style={{ marginLeft: 6 }}>-{formatCurrency(item.discount)}</span>}
+                                                {item.returned_quantity > 0 && <span className="badge badge-danger" style={{ marginLeft: 6 }}>Devuelto ×{item.returned_quantity}</span>}
+                                            </div>
+                                            {returnMode ? (
+                                                <input type="number" min={0} max={available} value={returnQtys[item.id] ?? 0}
+                                                    onChange={e => setReturnQtys({ ...returnQtys, [item.id]: Math.max(0, Math.min(available, parseInt(e.target.value) || 0)) })}
+                                                    disabled={available <= 0}
+                                                    className="input" style={{ width: 70, textAlign: 'center' }} />
+                                            ) : (
+                                                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(item.subtotal)}</span>
+                                            )}
+                                        </div>
+                                    );
+                                })}
                             </div>
+
+                            {returnMode && (
+                                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+                                    <div>
+                                        <label className="form-label">Motivo (opcional)</label>
+                                        <input value={returnReason} onChange={e => setReturnReason(e.target.value)} className="input" placeholder="Ej. Talla equivocada" />
+                                    </div>
+                                    <div>
+                                        <label className="form-label">Se devuelve en</label>
+                                        <select value={refundMethod} onChange={e => setRefundMethod(e.target.value)} className="input">
+                                            <option value="cash">Efectivo</option>
+                                            <option value="card">Tarjeta</option>
+                                            <option value="transfer">Transferencia</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Totals */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                {detail.discount_total > 0 && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--t3)' }}>
+                                        <span>Descuento</span>
+                                        <span style={{ color: 'var(--danger)' }}>-{formatCurrency(detail.discount_total)}</span>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 18px', borderRadius: 14, background: 'rgba(139,120,245,0.08)', border: '1px solid rgba(139,120,245,0.2)', marginTop: 4 }}>
+                                    <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--t1)' }}>Total</span>
+                                    <span style={{ fontSize: 26, fontWeight: 900, color: 'var(--primary)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>{formatCurrency(detail.total)}</span>
+                                </div>
+                                {detail.amount_paid > 0 && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--t3)', padding: '0 4px' }}>
+                                        <span>Pagado: {formatCurrency(detail.amount_paid)}</span>
+                                        <span>Cambio: {formatCurrency(detail.change_amount)}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {detail.status === 'completed' && (
+                                returnMode ? (
+                                    <div style={{ display: 'flex', gap: 10 }}>
+                                        <button onClick={() => { setReturnMode(false); setReturnQtys({}); setReturnReason(''); }} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Cancelar</button>
+                                        <button onClick={handleReturn} disabled={processing} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>Confirmar devolución</button>
+                                    </div>
+                                ) : (
+                                    <div style={{ display: 'flex', gap: 10 }}>
+                                        <button onClick={() => handleReprint(detail.id)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>
+                                            Reimprimir ticket
+                                        </button>
+                                        <button onClick={() => setReturnMode(true)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Devolver artículos</button>
+                                        <button onClick={() => handleCancel(detail.id)} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>
+                                            <IcoBan /> Cancelar Venta
+                                        </button>
+                                    </div>
+                                )
+                            )}
                         </div>
                     </div>
                 </div>

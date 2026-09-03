@@ -3,14 +3,17 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::expense::{CreateExpenseDto, Expense};
+use crate::session::{require_admin, require_auth, SessionState};
 
 #[tauri::command]
 pub fn create_expense(
     state: State<DbState>,
-    user_id: i64,
+    sessions: State<SessionState>,
+    token: String,
     cash_register_id: Option<i64>,
     data: CreateExpenseDto,
 ) -> Result<Expense, String> {
+    let user_id = require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -46,7 +49,8 @@ pub fn create_expense(
 }
 
 #[tauri::command]
-pub fn get_expenses(state: State<DbState>, cash_register_id: Option<i64>) -> Result<Vec<Expense>, String> {
+pub fn get_expenses(state: State<DbState>, sessions: State<SessionState>, token: String, cash_register_id: Option<i64>) -> Result<Vec<Expense>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(cr_id) = cash_register_id {
@@ -90,19 +94,75 @@ pub fn get_expenses(state: State<DbState>, cash_register_id: Option<i64>) -> Res
 }
 
 #[tauri::command]
-pub fn update_expense(state: State<DbState>, data: Expense) -> Result<(), String> {
+pub fn update_expense(state: State<DbState>, sessions: State<SessionState>, token: String, data: Expense) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Current amount + owning register
+    let (old_amount, cr_id): (f64, Option<i64>) = db.query_row(
+        "SELECT amount, cash_register_id FROM expenses WHERE id = ?1",
+        params![data.id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+
+    if let Some(cr_id) = cr_id {
+        if register_is_closed(&db, cr_id)? {
+            return Err("No se puede editar un gasto de una caja ya cerrada".to_string());
+        }
+    }
+
     db.execute(
         "UPDATE expenses SET category = ?1, description = ?2, amount = ?3 WHERE id = ?4",
         params![data.category, data.description, data.amount, data.id],
     ).map_err(|e| e.to_string())?;
+
+    // Keep the register's expense total in sync
+    if let Some(cr_id) = cr_id {
+        let delta = data.amount - old_amount;
+        db.execute(
+            "UPDATE cash_registers SET total_expenses = total_expenses + ?1 WHERE id = ?2",
+            params![delta, cr_id],
+        ).map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_expense(state: State<DbState>, id: i64) -> Result<(), String> {
+pub fn delete_expense(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
+
+    let (amount, cr_id): (f64, Option<i64>) = db.query_row(
+        "SELECT amount, cash_register_id FROM expenses WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+
+    if let Some(cr_id) = cr_id {
+        if register_is_closed(&db, cr_id)? {
+            return Err("No se puede eliminar un gasto de una caja ya cerrada".to_string());
+        }
+    }
+
     db.execute("DELETE FROM expenses WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
+
+    if let Some(cr_id) = cr_id {
+        db.execute(
+            "UPDATE cash_registers SET total_expenses = total_expenses - ?1 WHERE id = ?2",
+            params![amount, cr_id],
+        ).map_err(|e| e.to_string())?;
+    }
+
     Ok(())
+}
+
+fn register_is_closed(db: &rusqlite::Connection, cr_id: i64) -> Result<bool, String> {
+    let status: String = db.query_row(
+        "SELECT status FROM cash_registers WHERE id = ?1",
+        params![cr_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    Ok(status == "closed")
 }

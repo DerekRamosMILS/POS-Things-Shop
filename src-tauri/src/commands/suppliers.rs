@@ -3,9 +3,11 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::supplier::{CreateSupplierDto, Supplier, UpdateSupplierDto};
+use crate::session::{require_admin, require_auth, SessionState};
 
 #[tauri::command]
-pub fn get_suppliers(state: State<DbState>) -> Result<Vec<Supplier>, String> {
+pub fn get_suppliers(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Supplier>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = db.prepare(
@@ -35,7 +37,8 @@ pub fn get_suppliers(state: State<DbState>) -> Result<Vec<Supplier>, String> {
 }
 
 #[tauri::command]
-pub fn create_supplier(state: State<DbState>, data: CreateSupplierDto) -> Result<Supplier, String> {
+pub fn create_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateSupplierDto) -> Result<Supplier, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -65,7 +68,8 @@ pub fn create_supplier(state: State<DbState>, data: CreateSupplierDto) -> Result
 }
 
 #[tauri::command]
-pub fn update_supplier(state: State<DbState>, data: UpdateSupplierDto) -> Result<(), String> {
+pub fn update_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateSupplierDto) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -77,7 +81,8 @@ pub fn update_supplier(state: State<DbState>, data: UpdateSupplierDto) -> Result
 }
 
 #[tauri::command]
-pub fn delete_supplier(state: State<DbState>, id: i64) -> Result<(), String> {
+pub fn delete_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(

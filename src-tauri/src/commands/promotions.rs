@@ -3,9 +3,11 @@ use tauri::State;
 
 use crate::db::connection::DbState;
 use crate::models::promotion::{CreatePromotionDto, Promotion};
+use crate::session::{require_admin, require_auth, SessionState};
 
 #[tauri::command]
-pub fn get_promotions(state: State<DbState>) -> Result<Vec<Promotion>, String> {
+pub fn get_promotions(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Promotion>, String> {
+    require_auth(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = db.prepare(
@@ -35,7 +37,8 @@ pub fn get_promotions(state: State<DbState>) -> Result<Vec<Promotion>, String> {
 }
 
 #[tauri::command]
-pub fn create_promotion(state: State<DbState>, data: CreatePromotionDto) -> Result<Promotion, String> {
+pub fn create_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreatePromotionDto) -> Result<Promotion, String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -65,7 +68,8 @@ pub fn create_promotion(state: State<DbState>, data: CreatePromotionDto) -> Resu
 }
 
 #[tauri::command]
-pub fn update_promotion(state: State<DbState>, data: Promotion) -> Result<(), String> {
+pub fn update_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, data: Promotion) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
     db.execute(
@@ -80,7 +84,8 @@ pub fn update_promotion(state: State<DbState>, data: Promotion) -> Result<(), St
 }
 
 #[tauri::command]
-pub fn delete_promotion(state: State<DbState>, id: i64) -> Result<(), String> {
+pub fn delete_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute("DELETE FROM promotions WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
