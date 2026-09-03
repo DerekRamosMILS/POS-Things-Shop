@@ -582,25 +582,28 @@ pub fn capture_server_status(
     require_auth(&sessions, &token)?;
 
     let guard = captura.activo.lock().map_err(|e| e.to_string())?;
+    // Enumerar las interfaces del equipo no es gratis y el botón de Productos
+    // consulta esto cada pocos segundos: se hace una sola vez.
+    let alternativas = direcciones_disponibles();
     match guard.as_ref() {
         Some(e) => {
             let url = format!("http://{}:{}/?c={}", e.ip, e.puerto, e.codigo);
-            let interfaz = direcciones_disponibles()
-                .into_iter()
+            let interfaz = alternativas
+                .iter()
                 .find(|d| d.ip == e.ip)
-                .map(|d| d.interfaz);
+                .map(|d| d.interfaz.clone());
             Ok(EstadoCaptura {
                 encendido: true,
                 qr_svg: qr_svg(&url),
                 url: Some(url),
                 codigo: Some(e.codigo.clone()),
                 interfaz,
-                alternativas: direcciones_disponibles(),
+                alternativas,
             })
         }
         None => Ok(EstadoCaptura {
             encendido: false, url: None, codigo: None, qr_svg: None,
-            interfaz: None, alternativas: direcciones_disponibles(),
+            interfaz: None, alternativas,
         }),
     }
 }

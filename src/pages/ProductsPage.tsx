@@ -221,7 +221,11 @@ export default function ProductsPage() {
 
     const openEditForm = (product: Product) => {
         setEditingProduct(product);
-        setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active });
+        // Lo capturado desde el celular sin precio queda inactivo a propósito.
+        // Ponerle precio es justo lo que faltaba para venderlo, así que el
+        // interruptor llega encendido en vez de dejarlo guardado y sin vender.
+        const faltabaPrecio = !product.is_active && product.sale_price <= 0;
+        setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active || faltabaPrecio });
         // El listado ya no trae la foto: se pide solo al abrir la ficha.
         setPhotoPreview(null);
         setPhotoThumb(null);
