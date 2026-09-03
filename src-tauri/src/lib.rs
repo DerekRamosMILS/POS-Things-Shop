@@ -19,8 +19,56 @@ use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Atiende `--restablecer-admin` antes de levantar la interfaz.
+///
+/// Una tienda que olvida la contraseña no tiene a quién pedirle un correo de
+/// recuperación: todo vive en ese equipo. Esta es la salida, y por eso está en
+/// la línea de comandos y no dentro de la aplicación, que es justo a lo que no
+/// se puede entrar.
+///
+/// Devuelve `true` si atendió la petición y no hay que abrir la ventana.
+fn atender_recuperacion() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(pos) = args.iter().position(|a| a == "--restablecer-admin") else {
+        return false;
+    };
+
+    let usuario = args.get(pos + 1).cloned().unwrap_or_else(|| "admin".to_string());
+    let nueva = match args.get(pos + 2) {
+        Some(v) => v.clone(),
+        None => {
+            eprintln!("Uso: things-shop --restablecer-admin <usuario> <nueva-contraseña>");
+            eprintln!("Ejemplo: things-shop --restablecer-admin admin nuevaclave123");
+            std::process::exit(2);
+        }
+    };
+
+    let conn = match init_db() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("No se pudo abrir la base de datos: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match commands::users::restablecer_admin(&conn, &usuario, &nueva) {
+        Ok(mensaje) => {
+            println!("{}", mensaje);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn run() {
     logging::init();
+
+    if atender_recuperacion() {
+        return;
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

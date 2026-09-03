@@ -346,7 +346,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return [] as unknown as T;
 
         case 'capture_server_status':
-            return { encendido: false, url: null, codigo: null, qr_svg: null } as unknown as T;
+            return { encendido: false, url: null, codigo: null, qr_svg: null, interfaz: null, alternativas: [] } as unknown as T;
 
         case 'start_capture_server':
         case 'stop_capture_server':
@@ -561,7 +561,8 @@ export const marcarFacturada = (saleId: number, uuid: string) =>
     invoke<void>('marcar_facturada', { saleId, uuid });
 
 // Captura desde el celular
-export const startCaptureServer = () => invoke<CaptureStatus>('start_capture_server');
+export const startCaptureServer = (ipPreferida?: string) =>
+    invoke<CaptureStatus>('start_capture_server', { ipPreferida });
 export const stopCaptureServer = () => invoke<CaptureStatus>('stop_capture_server');
 export const captureServerStatus = () => invoke<CaptureStatus>('capture_server_status');
 

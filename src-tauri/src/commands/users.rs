@@ -306,6 +306,61 @@ pub fn change_own_password(state: State<DbState>, sessions: State<SessionState>,
     Ok(())
 }
 
+/// Restablece la contraseña de un administrador desde fuera de la interfaz.
+///
+/// Sin esto, una tienda que olvida la contraseña queda encerrada fuera de sus
+/// propios datos: no hay correo de recuperación ni servidor al que pedirle
+/// nada, porque todo vive en ese equipo.
+///
+/// No es un agujero de seguridad: quien puede ejecutar esto ya tiene el archivo
+/// de la base en sus manos, y con él puede hacer lo que quiera de todos modos.
+/// Queda registrado en la bitácora y obliga a cambiarla al entrar.
+pub fn restablecer_admin(
+    db: &rusqlite::Connection,
+    usuario: &str,
+    nueva: &str,
+) -> Result<String, String> {
+    let (id, rol): (i64, String) = db
+        .query_row(
+            "SELECT id, role FROM users WHERE username = ?1",
+            params![usuario],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| format!("No existe el usuario '{}'", usuario))?;
+
+    if rol != "admin" {
+        return Err(format!("'{}' no es administrador", usuario));
+    }
+
+    let hash = hash_password(nueva)?;
+    db.execute(
+        "UPDATE users SET password_hash = ?1, is_active = 1, must_change_password = 1,
+                updated_at = datetime('now','localtime')
+         WHERE id = ?2",
+        params![hash, id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Las sesiones abiertas con la contraseña vieja dejan de servir.
+    db.execute("DELETE FROM sessions WHERE user_id = ?1", params![id]).ok();
+    db.execute("DELETE FROM login_attempts WHERE username = ?1", params![usuario]).ok();
+
+    db.execute(
+        "INSERT INTO app_logs (level, module, message, user_id)
+         VALUES ('warn', 'auth', ?1, ?2)",
+        params![
+            format!("Contraseña de '{}' restablecida desde la línea de comandos", usuario),
+            id
+        ],
+    )
+    .ok();
+
+    Ok(format!(
+        "Listo. Entra como '{}' con la contraseña que acabas de poner; el sistema te pedirá cambiarla.",
+        usuario
+    ))
+}
+
 /// Ensure at least one admin user exists (called on startup). The seeded
 /// account is flagged so the app forces a password change on first login.
 pub fn ensure_admin_exists(db: &rusqlite::Connection) -> Result<(), String> {
@@ -377,6 +432,103 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM login_attempts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn restablecer_deja_entrar_con_la_nueva_contrasena() {
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+
+        restablecer_admin(&conn, "admin", "nuevaclave123").unwrap();
+
+        let hash: String = conn.query_row(
+            "SELECT password_hash FROM users WHERE username = 'admin'", [], |r| r.get(0)).unwrap();
+        let parsed = PasswordHash::new(&hash).unwrap();
+        assert!(Argon2::default().verify_password(b"nuevaclave123", &parsed).is_ok());
+    }
+
+    #[test]
+    fn restablecer_obliga_a_cambiarla_al_entrar() {
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+        conn.execute("UPDATE users SET must_change_password = 0", []).unwrap();
+
+        restablecer_admin(&conn, "admin", "nuevaclave123").unwrap();
+
+        let debe: i64 = conn.query_row(
+            "SELECT must_change_password FROM users WHERE username = 'admin'", [], |r| r.get(0)).unwrap();
+        assert_eq!(debe, 1);
+    }
+
+    #[test]
+    fn restablecer_reactiva_una_cuenta_desactivada() {
+        // Si el único admin quedó desactivado, restablecer es la salida.
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+        conn.execute("UPDATE users SET is_active = 0", []).unwrap();
+
+        restablecer_admin(&conn, "admin", "nuevaclave123").unwrap();
+
+        let activo: i64 = conn.query_row(
+            "SELECT is_active FROM users WHERE username = 'admin'", [], |r| r.get(0)).unwrap();
+        assert_eq!(activo, 1);
+    }
+
+    #[test]
+    fn restablecer_levanta_el_bloqueo_por_intentos_fallidos() {
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+        for _ in 0..MAX_LOGIN_FAILURES {
+            record_failure(&conn, "admin");
+        }
+        assert!(lockout_remaining(&conn, "admin") > 0);
+
+        restablecer_admin(&conn, "admin", "nuevaclave123").unwrap();
+
+        assert_eq!(lockout_remaining(&conn, "admin"), 0);
+    }
+
+    #[test]
+    fn restablecer_cierra_las_sesiones_abiertas() {
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+        let id: i64 = conn.query_row(
+            "SELECT id FROM users WHERE username = 'admin'", [], |r| r.get(0)).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, role, expires_at) VALUES ('t', ?1, 'admin', 99999999999)",
+            params![id],
+        ).unwrap();
+
+        restablecer_admin(&conn, "admin", "nuevaclave123").unwrap();
+
+        let quedan: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(quedan, 0);
+    }
+
+    #[test]
+    fn no_se_restablece_una_contrasena_demasiado_corta() {
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+        assert!(restablecer_admin(&conn, "admin", "corta").is_err());
+    }
+
+    #[test]
+    fn no_se_restablece_a_alguien_que_no_es_administrador() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO users (username, password_hash, full_name, role)
+             VALUES ('cajero', 'x', 'Cajero', 'cashier')", [],
+        ).unwrap();
+
+        let err = restablecer_admin(&conn, "cajero", "nuevaclave123").unwrap_err();
+        assert!(err.contains("no es administrador"));
+    }
+
+    #[test]
+    fn un_usuario_inexistente_da_un_mensaje_claro() {
+        let conn = db();
+        let err = restablecer_admin(&conn, "nadie", "nuevaclave123").unwrap_err();
+        assert!(err.contains("No existe"));
     }
 
     #[test]

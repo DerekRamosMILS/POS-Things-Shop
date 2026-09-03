@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Json, State as AxumState};
@@ -54,20 +54,62 @@ pub struct EstadoCaptura {
     pub codigo: Option<String>,
     /// QR con la dirección ya emparejada, como SVG listo para mostrar.
     pub qr_svg: Option<String>,
+    /// Interfaz que se está usando, para saber si es la correcta de un vistazo.
+    pub interfaz: Option<String>,
+    /// Las demás direcciones de esta máquina, por si el celular no alcanza la
+    /// elegida y hay que probar otra.
+    pub alternativas: Vec<DireccionRed>,
 }
 
-/// Dirección de esta máquina en la red local.
+/// Una dirección por la que el celular podría alcanzar esta máquina.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct DireccionRed {
+    /// Nombre de la interfaz, para que se pueda distinguir cuál es cuál.
+    pub interfaz: String,
+    pub ip: String,
+}
+
+/// Interfaces que casi nunca son la red de la tienda.
 ///
-/// Se abre un socket UDP hacia una dirección externa y se pregunta qué interfaz
-/// habría usado el sistema. No se envía ningún paquete: es la forma de averiguar
-/// la IP correcta cuando hay varias tarjetas de red.
+/// Un VPN, Docker o una máquina virtual crean interfaces con direcciones
+/// privadas perfectamente válidas a las que, sin embargo, el celular no llega.
+fn es_interfaz_virtual(nombre: &str) -> bool {
+    const PREFIJOS: [&str; 8] = ["utun", "tun", "tap", "ppp", "docker", "veth", "vmnet", "bridge"];
+    let n = nombre.to_lowercase();
+    PREFIJOS.iter().any(|p| n.starts_with(p))
+}
+
+/// Direcciones por las que el celular podría llegar, la mejor primero.
+///
+/// Preguntar "¿por dónde salgo a internet?" —el truco del socket UDP— devuelve
+/// la interfaz de la ruta por defecto, que con un VPN encendido es el túnel. El
+/// teléfono está en el WiFi de la tienda y a esa dirección no llega nunca, así
+/// que hay que mirar todas las interfaces y quedarse con las reales.
+pub fn direcciones_disponibles() -> Vec<DireccionRed> {
+    let Ok(interfaces) = local_ip_address::list_afinet_netifas() else {
+        return Vec::new();
+    };
+
+    let mut candidatas: Vec<(u8, DireccionRed)> = interfaces
+        .into_iter()
+        .filter_map(|(nombre, ip)| match ip {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() && v4.is_private() => {
+                // Las interfaces físicas van primero; las virtuales quedan como
+                // último recurso por si la tienda usa una configuración rara.
+                let prioridad = if es_interfaz_virtual(&nombre) { 1 } else { 0 };
+                Some((prioridad, DireccionRed { interfaz: nombre, ip: v4.to_string() }))
+            }
+            _ => None,
+        })
+        .collect();
+
+    candidatas.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.interfaz.cmp(&b.1.interfaz)));
+    candidatas.into_iter().map(|(_, d)| d).collect()
+}
+
+/// Dirección elegida por defecto: la primera real que se encuentre.
 fn ip_local() -> Option<String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V4(ip) if !ip.is_loopback() => Some(ip.to_string()),
-        _ => None,
-    }
+    direcciones_disponibles().first().map(|d| d.ip.clone())
 }
 
 /// Código de emparejamiento de seis dígitos.
@@ -379,6 +421,7 @@ pub fn start_capture_server(
     sessions: State<'_, SessionState>,
     captura: State<'_, Arc<CaptureState>>,
     token: String,
+    ip_preferida: Option<String>,
 ) -> Result<EstadoCaptura, String> {
     require_admin(&sessions, &token)?;
 
@@ -390,9 +433,20 @@ pub fn start_capture_server(
         }
     }
 
-    let ip = ip_local().ok_or(
-        "No se encontró una dirección de red. Conecta este equipo al WiFi de la tienda.",
-    )?;
+    // El usuario puede forzar una dirección concreta cuando la automática no es
+    // la que ve el celular.
+    let ip = match ip_preferida {
+        Some(elegida) if !elegida.trim().is_empty() => {
+            let existe = direcciones_disponibles().iter().any(|d| d.ip == elegida);
+            if !existe {
+                return Err(format!("La dirección {} ya no está disponible", elegida));
+            }
+            elegida
+        }
+        _ => ip_local().ok_or(
+            "No se encontró una dirección de red. Conecta este equipo al WiFi de la tienda.",
+        )?,
+    };
     let codigo = nuevo_codigo();
 
     let ctx = Contexto {
@@ -455,7 +509,10 @@ pub fn stop_capture_server(
     if let Some(estado) = guard.take() {
         let _ = estado.apagar.send(());
     }
-    Ok(EstadoCaptura { encendido: false, url: None, codigo: None, qr_svg: None })
+    Ok(EstadoCaptura {
+        encendido: false, url: None, codigo: None, qr_svg: None,
+        interfaz: None, alternativas: direcciones_disponibles(),
+    })
 }
 
 #[tauri::command]
@@ -466,14 +523,23 @@ pub fn capture_server_status(
     match guard.as_ref() {
         Some(e) => {
             let url = format!("http://{}:{}/?c={}", e.ip, e.puerto, e.codigo);
+            let interfaz = direcciones_disponibles()
+                .into_iter()
+                .find(|d| d.ip == e.ip)
+                .map(|d| d.interfaz);
             Ok(EstadoCaptura {
                 encendido: true,
                 qr_svg: qr_svg(&url),
                 url: Some(url),
                 codigo: Some(e.codigo.clone()),
+                interfaz,
+                alternativas: direcciones_disponibles(),
             })
         }
-        None => Ok(EstadoCaptura { encendido: false, url: None, codigo: None, qr_svg: None }),
+        None => Ok(EstadoCaptura {
+            encendido: false, url: None, codigo: None, qr_svg: None,
+            interfaz: None, alternativas: direcciones_disponibles(),
+        }),
     }
 }
 
@@ -681,6 +747,48 @@ mod tests {
     fn normalizar_conserva_el_orden_en_que_se_capturaron() {
         let v = normalizar(&["L".into(), "S".into(), "M".into(), "s".into()]);
         assert_eq!(v, vec!["L", "S", "M"]);
+    }
+
+    #[test]
+    fn las_interfaces_de_vpn_y_contenedores_se_reconocen() {
+        // Con un VPN encendido, su túnel tiene una IP privada válida a la que el
+        // celular no llega nunca; no puede ser la que aparece en el QR.
+        for virtual_ in ["utun4", "utun0", "tun0", "tap0", "ppp0", "docker0", "vmnet1", "bridge100"] {
+            assert!(es_interfaz_virtual(virtual_), "{} debería tratarse como virtual", virtual_);
+        }
+        for real in ["en0", "en1", "eth0", "wlan0", "Wi-Fi", "Ethernet"] {
+            assert!(!es_interfaz_virtual(real), "{} es una interfaz real", real);
+        }
+    }
+
+    #[test]
+    fn la_deteccion_de_mayusculas_no_deja_pasar_un_tunel() {
+        assert!(es_interfaz_virtual("UTUN4"));
+        assert!(es_interfaz_virtual("Docker0"));
+    }
+
+    #[test]
+    fn solo_se_ofrecen_direcciones_privadas_alcanzables() {
+        // No se puede fijar qué interfaces tiene la máquina que corre la prueba,
+        // pero sí que nada de lo ofrecido sea inservible para un celular.
+        for d in direcciones_disponibles() {
+            let ip: std::net::Ipv4Addr = d.ip.parse().expect("debe ser IPv4");
+            assert!(ip.is_private(), "{} no es una dirección de red local", d.ip);
+            assert!(!ip.is_loopback(), "{} es loopback", d.ip);
+            assert!(!ip.is_link_local(), "{} es autoasignada", d.ip);
+            assert!(!d.interfaz.is_empty());
+        }
+    }
+
+    #[test]
+    fn las_interfaces_reales_se_ofrecen_antes_que_los_tuneles() {
+        let lista = direcciones_disponibles();
+        let primer_virtual = lista.iter().position(|d| es_interfaz_virtual(&d.interfaz));
+        let ultima_real = lista.iter().rposition(|d| !es_interfaz_virtual(&d.interfaz));
+
+        if let (Some(v), Some(r)) = (primer_virtual, ultima_real) {
+            assert!(r < v, "una interfaz virtual quedó antes que una real: {:?}", lista);
+        }
     }
 
     #[test]

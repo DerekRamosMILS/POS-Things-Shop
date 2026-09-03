@@ -19,6 +19,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
     const { confirm } = useConfirm();
     const [estado, setEstado] = useState<CaptureStatus>({
         encendido: false, url: null, codigo: null, qr_svg: null,
+        interfaz: null, alternativas: [],
     });
     const [ocupado, setOcupado] = useState(false);
 
@@ -28,11 +29,25 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
 
     useEffect(() => { consultar(); }, [consultar]);
 
-    const encender = async () => {
+    const encender = async (ip?: string) => {
         setOcupado(true);
         try {
-            setEstado(await api.startCaptureServer());
+            setEstado(await api.startCaptureServer(ip));
             showToast('Captura encendida. Escanea el código con el celular.');
+        } catch (err) { showToast(String(err), 'error'); }
+        finally { setOcupado(false); }
+    };
+
+    /// Vuelve a levantar el servidor en otra dirección.
+    ///
+    /// Hace falta cuando el equipo tiene varias redes —un VPN encendido, por
+    /// ejemplo— y la que se eligió sola no es la que ve el teléfono.
+    const cambiarRed = async (ip: string) => {
+        setOcupado(true);
+        try {
+            await api.stopCaptureServer();
+            setEstado(await api.startCaptureServer(ip));
+            showToast('Probando con otra red. Vuelve a escanear el código.');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }
     };
@@ -91,7 +106,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
 
             {!estado.encendido ? (
                 <>
-                    <button onClick={encender} disabled={ocupado} className="btn btn-primary btn-sm">
+                    <button onClick={() => encender()} disabled={ocupado} className="btn btn-primary btn-sm">
                         {ocupado ? 'Encendiendo...' : 'Encender captura'}
                     </button>
                     <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 10, lineHeight: 1.5 }}>
@@ -112,6 +127,9 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                         <div style={{ flex: 1, minWidth: 190 }}>
                             <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 4 }}>
                                 Escanea con la cámara del celular
+                                {estado.interfaz && (
+                                    <span style={{ marginLeft: 6, opacity: .75 }}>· red {estado.interfaz}</span>
+                                )}
                             </p>
                             <p style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 12, lineHeight: 1.5 }}>
                                 O abre esta dirección en el navegador del teléfono y captura el
@@ -127,6 +145,31 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                             </p>
                         </div>
                     </div>
+
+                    {estado.alternativas.length > 1 && (
+                        <div style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 14, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.22)' }}>
+                            <p style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 8, lineHeight: 1.5 }}>
+                                Este equipo tiene varias redes. Si el celular no abre la
+                                página, es que está en otra: prueba con la de abajo.
+                            </p>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                {estado.alternativas.map(d => {
+                                    const enUso = estado.url?.includes(d.ip);
+                                    return (
+                                        <button
+                                            key={d.ip}
+                                            onClick={() => !enUso && cambiarRed(d.ip)}
+                                            disabled={ocupado || enUso}
+                                            className={enUso ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
+                                            style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}
+                                        >
+                                            {d.ip} <span style={{ opacity: .65, marginLeft: 4 }}>{d.interfaz}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
 
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <button onClick={apagar} disabled={ocupado} className="btn btn-danger btn-sm">
