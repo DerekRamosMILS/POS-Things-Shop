@@ -21,6 +21,8 @@ const PUERTO: u16 = 7423;
 const MAX_INTENTOS: u32 = 5;
 /// Cuánto dura el bloqueo.
 const BLOQUEO_SEGUNDOS: i64 = 300;
+/// Tope de variantes que puede generar un cruce de tallas y colores.
+const MAX_VARIANTES: usize = 60;
 /// Tope del cuerpo de una petición: dos fotos de catálogo más los campos.
 const MAX_CUERPO: usize = 24 * 1024 * 1024;
 
@@ -77,6 +79,31 @@ fn nuevo_codigo() -> String {
     format!("{:06}", n % 1_000_000)
 }
 
+/// Quita espacios, descarta vacíos y elimina repetidos conservando el orden.
+fn normalizar(valores: &[String]) -> Vec<String> {
+    let mut vistos = std::collections::HashSet::new();
+    valores
+        .iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .filter(|v| vistos.insert(v.to_lowercase()))
+        .collect()
+}
+
+/// Cruza tallas con colores. Si solo hay una de las dos listas, la otra queda
+/// vacía; si no hay ninguna, el producto no lleva variantes.
+fn combinar(tallas: &[String], colores: &[String]) -> Vec<(Option<String>, Option<String>)> {
+    match (tallas.is_empty(), colores.is_empty()) {
+        (true, true) => Vec::new(),
+        (false, true) => tallas.iter().map(|t| (Some(t.clone()), None)).collect(),
+        (true, false) => colores.iter().map(|c| (None, Some(c.clone()))).collect(),
+        (false, false) => tallas
+            .iter()
+            .flat_map(|t| colores.iter().map(move |c| (Some(t.clone()), Some(c.clone()))))
+            .collect(),
+    }
+}
+
 /// Comparación que no delata el código por el tiempo que tarda en fallar.
 fn iguales(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
@@ -113,6 +140,12 @@ struct ProductoDelCelular {
     existencia: Option<i32>,
     #[serde(default)]
     notas: Option<String>,
+    /// Tallas y colores elegidos. Se cruzan entre sí: tres tallas y dos colores
+    /// dan seis variantes, cada una con su propia existencia.
+    #[serde(default)]
+    tallas: Vec<String>,
+    #[serde(default)]
+    colores: Vec<String>,
     /// Pares de foto y miniatura, ambas como data URL JPEG.
     #[serde(default)]
     fotos: Vec<FotoDelCelular>,
@@ -261,6 +294,17 @@ fn guardar_producto(
     let existencia = entrada.existencia.unwrap_or(0).max(0);
     let activo = if precio > 0.0 { 1 } else { 0 };
 
+    // Se limpian aquí para que el cruce no genere variantes vacías ni repetidas.
+    let tallas = normalizar(&entrada.tallas);
+    let colores = normalizar(&entrada.colores);
+    let combinaciones = combinar(&tallas, &colores);
+    if combinaciones.len() > MAX_VARIANTES {
+        return Err(format!(
+            "Son {} combinaciones de talla y color; el máximo es {}",
+            combinaciones.len(), MAX_VARIANTES
+        ));
+    }
+
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let resultado = (|| -> Result<String, String> {
@@ -281,6 +325,23 @@ fn guardar_producto(
         ).map_err(|e| e.to_string())?;
 
         let product_id = db.last_insert_rowid();
+
+        // Cada combinación arranca con la misma existencia; ajustarla una por
+        // una desde el teléfono sería tedioso y se puede afinar en la caja.
+        if !combinaciones.is_empty() {
+            for (talla, color) in &combinaciones {
+                db.execute(
+                    "INSERT INTO product_variants (product_id, size, color, stock)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![product_id, talla, color, existencia],
+                ).map_err(|e| e.to_string())?;
+            }
+            // El stock del producto es la suma de sus variantes.
+            db.execute(
+                "UPDATE products SET has_variants = 1, stock = ?1 WHERE id = ?2",
+                params![existencia * combinaciones.len() as i32, product_id],
+            ).map_err(|e| e.to_string())?;
+        }
 
         for foto in &entrada.fotos {
             agregar_foto(db, &NuevaFotoDto {
@@ -442,6 +503,8 @@ mod tests {
             costo: None,
             existencia: Some(3),
             notas: None,
+            tallas: vec![],
+            colores: vec![],
             fotos: (0..fotos)
                 .map(|_| FotoDelCelular { photo: jpeg(), thumbnail: jpeg() })
                 .collect(),
@@ -522,6 +585,102 @@ mod tests {
 
         let productos: i64 = conn.query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0)).unwrap();
         assert_eq!(productos, 0, "la transacción debe revertirse completa");
+    }
+
+    #[test]
+    fn las_tallas_y_colores_se_cruzan_en_variantes() {
+        let conn = db();
+        let mut e = entrada("Vestido", Some(499.0), 0);
+        e.tallas = vec!["S".into(), "M".into(), "L".into()];
+        e.colores = vec!["Rojo".into(), "Azul".into()];
+        e.existencia = Some(2);
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 6, "tres tallas por dos colores");
+
+        // El stock del producto debe ser la suma de sus variantes.
+        let (stock, tiene): (i32, i32) = conn.query_row(
+            "SELECT stock, has_variants FROM products WHERE sku = ?1",
+            params![sku], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stock, 12);
+        assert_eq!(tiene, 1);
+    }
+
+    #[test]
+    fn solo_tallas_no_inventa_colores() {
+        let conn = db();
+        let mut e = entrada("Playera", Some(199.0), 0);
+        e.tallas = vec!["CH".into(), "G".into()];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants WHERE color IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 2);
+    }
+
+    #[test]
+    fn solo_colores_tampoco_inventa_tallas() {
+        let conn = db();
+        let mut e = entrada("Bufanda", Some(99.0), 0);
+        e.colores = vec!["Negro".into()];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants WHERE size IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 1);
+    }
+
+    #[test]
+    fn sin_tallas_ni_colores_el_producto_no_lleva_variantes() {
+        let conn = db();
+        let mut e = entrada("Cinturón", Some(150.0), 0);
+        e.existencia = Some(7);
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let (stock, tiene): (i32, i32) = conn.query_row(
+            "SELECT stock, has_variants FROM products WHERE sku = ?1",
+            params![sku], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stock, 7);
+        assert_eq!(tiene, 0);
+    }
+
+    #[test]
+    fn las_tallas_repetidas_o_vacias_se_descartan() {
+        let conn = db();
+        let mut e = entrada("Blusa", Some(299.0), 0);
+        e.tallas = vec!["M".into(), " m ".into(), "".into(), "  ".into(), "G".into()];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 2, "'M' y ' m ' son la misma talla");
+    }
+
+    #[test]
+    fn un_cruce_absurdo_de_tallas_y_colores_se_rechaza() {
+        let conn = db();
+        let mut e = entrada("Imposible", Some(10.0), 0);
+        e.tallas = (0..20).map(|i| format!("T{}", i)).collect();
+        e.colores = (0..20).map(|i| format!("C{}", i)).collect();
+
+        let err = guardar_producto(&conn, e).unwrap_err();
+        assert!(err.contains("combinaciones"), "mensaje poco claro: {}", err);
+
+        let productos: i64 = conn.query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(productos, 0, "no debe quedar el producto sin sus variantes");
+    }
+
+    #[test]
+    fn normalizar_conserva_el_orden_en_que_se_capturaron() {
+        let v = normalizar(&["L".into(), "S".into(), "M".into(), "s".into()]);
+        assert_eq!(v, vec!["L", "S", "M"]);
     }
 
     #[test]
@@ -742,6 +901,58 @@ mod http {
             let (estado, _) = pedir(s.puerto, "GET", ruta, "123456", None);
             assert_eq!(estado, 404, "la ruta {} no debería existir", ruta);
         }
+    }
+
+    #[test]
+    fn la_pagina_ofrece_camara_y_galeria_por_separado() {
+        // Un solo botón deja al teléfono decidir, y decide distinto en cada
+        // modelo; la encargada necesita poder elegir.
+        let s = levantar("123456");
+        let (_, cuerpo) = pedir(s.puerto, "GET", "/", "", None);
+
+        assert!(cuerpo.contains("Tomar foto"));
+        assert!(cuerpo.contains("De la galería"));
+        assert!(cuerpo.contains(r#"capture="environment""#), "falta el atributo que abre la cámara");
+    }
+
+    #[test]
+    fn la_pagina_permite_capturar_tallas_y_colores() {
+        let s = levantar("123456");
+        let (_, cuerpo) = pedir(s.puerto, "GET", "/", "", None);
+
+        assert!(cuerpo.contains("Tallas"));
+        assert!(cuerpo.contains("Colores"));
+    }
+
+    #[test]
+    fn un_producto_con_tallas_llega_con_sus_variantes() {
+        let s = levantar("123456");
+        let cuerpo = r#"{"codigo":"","nombre":"Vestido amarillo","precio":499.0,
+            "existencia":2,"tallas":["S","M","L"],"colores":["Amarillo"],"fotos":[]}"#;
+
+        let (estado, resp) = pedir(s.puerto, "POST", "/api/producto", "123456", Some(cuerpo));
+        assert_eq!(estado, 200, "respuesta: {}", resp);
+
+        let db = s.db.lock().unwrap();
+        let variantes: i64 = db.query_row(
+            "SELECT COUNT(*) FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 3);
+
+        let stock: i32 = db.query_row("SELECT stock FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 6, "dos piezas por cada una de las tres tallas");
+    }
+
+    #[test]
+    fn un_producto_sin_precio_llega_como_borrador() {
+        let s = levantar("123456");
+        let cuerpo = r#"{"codigo":"","nombre":"Falta precio","existencia":1,"fotos":[]}"#;
+
+        let (estado, _) = pedir(s.puerto, "POST", "/api/producto", "123456", Some(cuerpo));
+        assert_eq!(estado, 200);
+
+        let activo: i32 = s.db.lock().unwrap()
+            .query_row("SELECT is_active FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(activo, 0);
     }
 
     #[test]
