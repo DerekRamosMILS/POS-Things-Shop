@@ -205,6 +205,19 @@ export default function ProductsPage() {
 
     const photoRequestFor = useRef<number | null>(null);
     const [showCaptura, setShowCaptura] = useState(false);
+    const [capturaActiva, setCapturaActiva] = useState(false);
+
+    // El botón dice si la captura está prendida: sin eso, la única forma de
+    // saberlo es abrir la ventana.
+    useEffect(() => {
+        let vivo = true;
+        const revisar = () => api.captureServerStatus()
+            .then(e => { if (vivo) setCapturaActiva(e.encendido); })
+            .catch(() => {});
+        revisar();
+        const t = setInterval(revisar, 5000);
+        return () => { vivo = false; clearInterval(t); };
+    }, []);
 
     const openEditForm = (product: Product) => {
         setEditingProduct(product);
@@ -394,8 +407,15 @@ export default function ProductsPage() {
                     <p className="page-subtitle">{filtered.length} de {products.length} productos · inventario {formatCurrency(inventoryValue)}</p>
                 </div>
                 <div style={{ display: 'flex', gap: 10 }}>
-                    <button onClick={() => setShowCaptura(true)} className="btn btn-ghost">
+                    <button onClick={() => setShowCaptura(true)} className="btn btn-ghost" style={{ gap: 9 }}>
+                        <span style={{
+                            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                            background: capturaActiva ? 'var(--success)' : 'var(--t3)',
+                        }} />
                         Capturar desde el celular
+                        <span style={{ fontSize: 11, color: capturaActiva ? 'var(--success)' : 'var(--t3)', fontWeight: 600 }}>
+                            {capturaActiva ? 'Prendido' : 'Apagado'}
+                        </span>
                     </button>
                     <button onClick={openCreateForm} className="btn btn-primary">
                         <IcoPlus /> Nuevo Producto

@@ -33,7 +33,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
         setOcupado(true);
         try {
             setEstado(await api.startCaptureServer(ip));
-            showToast('Captura encendida. Escanea el código con el celular.');
+            showToast('Listo. Apunta la cámara del celular al código.');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }
     };
@@ -47,7 +47,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
         try {
             await api.stopCaptureServer();
             setEstado(await api.startCaptureServer(ip));
-            showToast('Probando con otra red. Vuelve a escanear el código.');
+            showToast('Cambiado. Vuelve a apuntar la cámara al código.');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }
     };
@@ -64,7 +64,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
     const reiniciarCodigo = async () => {
         const ok = await confirm({
             title: 'Generar un código nuevo',
-            message: 'Los celulares que ya estaban capturando tendrán que volver a escanear. ¿Continuar?',
+            message: 'Los celulares que estén capturando tendrán que volver a apuntar la cámara al código nuevo. ¿Continuar?',
             confirmLabel: 'Generar',
         });
         if (!ok) return;
@@ -99,9 +99,8 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
             </div>
 
             <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 16, lineHeight: 1.5 }}>
-                Toma las fotos con el teléfono, ponle nombre y precio, y el producto queda
-                dado de alta con un código propio. Funciona por el WiFi de la tienda, sin
-                internet ni servidor externo.
+                Toma las fotos con el teléfono y el producto se da de alta solo. El
+                celular tiene que estar en el mismo WiFi que esta computadora.
             </p>
 
             {!estado.encendido ? (
@@ -110,9 +109,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                         {ocupado ? 'Encendiendo...' : 'Encender captura'}
                     </button>
                     <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 10, lineHeight: 1.5 }}>
-                        Mientras esté encendida, cualquier equipo del mismo WiFi puede llegar
-                        al puerto. Hace falta el código para dar de alta algo, pero conviene
-                        apagarla al terminar.
+                        Apágala cuando termines de capturar.
                     </p>
                 </>
             ) : (
@@ -120,26 +117,22 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                     <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
                         {estado.qr_svg && (
                             <div
-                                style={{ width: 150, height: 150, borderRadius: 12, overflow: 'hidden', background: '#fff', padding: 8, flexShrink: 0 }}
+                                style={{ width: 168, height: 168, borderRadius: 12, background: '#fff', padding: 10, flexShrink: 0, display: 'grid', placeItems: 'center' }}
                                 dangerouslySetInnerHTML={{ __html: estado.qr_svg }}
                             />
                         )}
                         <div style={{ flex: 1, minWidth: 190 }}>
-                            <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 4 }}>
-                                Escanea con la cámara del celular
-                                {estado.interfaz && (
-                                    <span style={{ marginLeft: 6, opacity: .75 }}>· red {estado.interfaz}</span>
-                                )}
+                            <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', marginBottom: 6 }}>
+                                Apunta la cámara del celular al código
                             </p>
-                            <p style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 12, lineHeight: 1.5 }}>
-                                O abre esta dirección en el navegador del teléfono y captura el
-                                código cuando lo pida.
+                            <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
+                                Se abre solo. Si no, escribe esta dirección en el teléfono:
                             </p>
-                            <label className="form-label">Dirección</label>
+
                             <input readOnly value={estado.url ?? ''} className="input"
                                 style={{ fontFamily: 'monospace', fontSize: 11, marginBottom: 10 }}
                                 onFocus={e => e.currentTarget.select()} />
-                            <label className="form-label">Código</label>
+                            <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 2 }}>Y este número:</p>
                             <p style={{ fontSize: 26, fontWeight: 900, letterSpacing: '0.14em', color: 'var(--t1)', fontFamily: 'ui-monospace, monospace' }}>
                                 {estado.codigo}
                             </p>
@@ -149,8 +142,7 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                     {estado.alternativas.length > 1 && (
                         <div style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 14, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.22)' }}>
                             <p style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 8, lineHeight: 1.5 }}>
-                                Este equipo tiene varias redes. Si el celular no abre la
-                                página, es que está en otra: prueba con la de abajo.
+                                Si el celular no abre la página, prueba con otra de estas:
                             </p>
                             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                 {estado.alternativas.map(d => {

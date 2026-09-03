@@ -81,6 +81,16 @@ pub const HTML: &str = r####"
     background: rgba(255,255,255,.05); color: var(--t2);
     border: 1px solid var(--line); width: auto;
   }
+  .reparto { margin-top: 14px; }
+  .reparto .linea {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 0; border-bottom: 1px solid var(--line);
+  }
+  .reparto .linea:last-child { border-bottom: none; }
+  .reparto .que { flex: 1; font-size: 15px; }
+  .reparto input { width: 84px; text-align: center; padding: 10px 6px; font-size: 17px; }
+  .total { display: flex; justify-content: space-between; margin-top: 12px; font-size: 14px; }
+  .total b { color: var(--t1); }
   .hist { font-size: 13px; color: var(--t3); }
   .hist div { padding: 7px 0; border-bottom: 1px solid var(--line); }
   .hist div:last-child { border-bottom: none; }
@@ -90,7 +100,7 @@ pub const HTML: &str = r####"
 <body>
 
 <h1>Capturar producto</h1>
-<p class="sub">Se guarda directo en la caja. No necesita internet.</p>
+<p class="sub">Se guarda directo en la computadora de la tienda.</p>
 
 <div id="aviso"></div>
 
@@ -106,11 +116,11 @@ pub const HTML: &str = r####"
       <input id="precio" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00">
     </div>
     <div>
-      <label for="existencia">Piezas <span id="porQue"></span></label>
+      <label for="existencia">Piezas</label>
       <input id="existencia" type="number" inputmode="numeric" min="0" step="1" placeholder="1">
     </div>
   </div>
-  <p class="hint">Sin precio se guarda como borrador y no se puede vender hasta que le pongas uno.</p>
+  <p class="hint">Si no sabes el precio, déjalo vacío y se lo pones después en la computadora.</p>
 </div>
 
 <div class="card">
@@ -130,6 +140,12 @@ pub const HTML: &str = r####"
   <div class="chips" id="chipsColores"></div>
 
   <p class="hint" id="resumenVariantes">Sin tallas ni colores se guarda como una sola pieza.</p>
+
+  <div class="reparto" id="reparto" style="display:none">
+    <label style="margin-top:6px">¿Cuántas piezas de cada una?</label>
+    <div id="lineasReparto"></div>
+    <div class="total"><span>Total</span><b id="totalPiezas">0</b></div>
+  </div>
 </div>
 
 <div class="card">
@@ -179,6 +195,8 @@ pub const HTML: &str = r####"
   var fotos = [];
   var tallas = [];
   var colores = [];
+  // Piezas por combinación, indexadas por talla|color.
+  var reparto = {};
   var enviando = false;
 
   // Las más usadas en ropa, para no teclearlas una por una.
@@ -248,24 +266,73 @@ pub const HTML: &str = r####"
     });
   }
 
+  // Cada pareja de talla y color que hay que contar por separado.
+  function listaCombinaciones() {
+    if (!tallas.length && !colores.length) return [];
+    if (!colores.length) return tallas.map(function (t) { return { talla: t, color: null }; });
+    if (!tallas.length) return colores.map(function (c) { return { talla: null, color: c }; });
+    var out = [];
+    tallas.forEach(function (t) {
+      colores.forEach(function (c) { out.push({ talla: t, color: c }); });
+    });
+    return out;
+  }
+
+  function etiqueta(c) {
+    return [c.talla, c.color].filter(Boolean).join(' · ');
+  }
+
+  function claveDe(c) {
+    return (c.talla || '') + '|' + (c.color || '');
+  }
+
   function pintarResumen() {
-    var n = combinaciones();
-    if (n === 0) {
+    var lista = listaCombinaciones();
+
+    if (lista.length === 0) {
       $('resumenVariantes').textContent = 'Sin tallas ni colores se guarda como una sola pieza.';
-      $('porQue').textContent = '';
+    } else if (lista.length === 1) {
+      $('resumenVariantes').textContent =
+        'Una sola combinación: se usan las piezas que pusiste arriba.';
     } else {
       $('resumenVariantes').textContent =
-        n + (n === 1 ? ' variante' : ' variantes') + ', cada una con las piezas que pongas arriba.';
-      $('porQue').textContent = 'por variante';
+        lista.length + ' combinaciones. Pon cuántas piezas tienes de cada una.';
     }
+
+    // Con una sola combinación no hay nada que repartir; preguntarlo sobraría.
+    if (lista.length > 1) {
+      $('reparto').style.display = 'block';
+      $('lineasReparto').innerHTML = lista.map(function (c) {
+        var k = claveDe(c);
+        var valor = reparto[k] !== undefined ? reparto[k] : '';
+        return '<div class="linea"><span class="que">' + escapar(etiqueta(c)) + '</span>' +
+               '<input type="number" inputmode="numeric" min="0" step="1" placeholder="0" ' +
+               'data-clave="' + escapar(k) + '" value="' + valor + '"></div>';
+      }).join('');
+      actualizarTotal();
+    } else {
+      $('reparto').style.display = 'none';
+    }
+
     pintarSugerencias();
   }
 
+  function actualizarTotal() {
+    var suma = 0;
+    Array.prototype.forEach.call($('lineasReparto').querySelectorAll('input'), function (i) {
+      suma += parseInt(i.value, 10) || 0;
+    });
+    $('totalPiezas').textContent = suma + (suma === 1 ? ' pieza' : ' piezas');
+  }
+
+  $('lineasReparto').addEventListener('input', function (e) {
+    if (e.target.tagName !== 'INPUT') return;
+    reparto[e.target.dataset.clave] = e.target.value;
+    actualizarTotal();
+  });
+
   function combinaciones() {
-    if (!tallas.length && !colores.length) return 0;
-    if (!colores.length) return tallas.length;
-    if (!tallas.length) return colores.length;
-    return tallas.length * colores.length;
+    return listaCombinaciones().length;
   }
 
   function agregar(lista, valor, contenedor, tipo) {
@@ -377,6 +444,8 @@ pub const HTML: &str = r####"
     $('precio').value = '';
     $('notas').value = '';
     fotos = [];
+    // El reparto es de esa prenda: la siguiente tendrá otras cantidades.
+    reparto = {};
     if (!conservarVariantes) {
       tallas.length = 0;
       colores.length = 0;
@@ -384,6 +453,7 @@ pub const HTML: &str = r####"
       pintarChips(tallas, 'chipsTallas', 'talla');
       pintarChips(colores, 'chipsColores', 'color');
     }
+    pintarResumen();
     pintarGaleria();
     $('nombre').focus();
   }
@@ -410,6 +480,13 @@ pub const HTML: &str = r####"
           notas: $('notas').value.trim() || null,
           tallas: tallas,
           colores: colores,
+          piezas: listaCombinaciones().map(function (c) {
+            return {
+              talla: c.talla,
+              color: c.color,
+              cantidad: parseInt(reparto[claveDe(c)], 10) || 0
+            };
+          }),
           fotos: fotos
         })
       });
@@ -422,7 +499,7 @@ pub const HTML: &str = r####"
         aviso(data.mensaje || 'No se pudo guardar.', 'bad');
       }
     } catch (err) {
-      aviso('Se perdió la conexión con la caja. Revisa que sigas en el mismo WiFi.', 'bad');
+      aviso('Se perdió la conexión. Revisa que sigas en el WiFi de la tienda.', 'bad');
     } finally {
       enviando = false;
       $('guardar').disabled = false;
@@ -437,10 +514,10 @@ pub const HTML: &str = r####"
   fetch('/api/verificar', { headers: { 'X-Codigo': codigo } })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
     .then(function (res) {
-      if (!res.ok) aviso(res.d.mensaje + ' Vuelve a escanear el código en la caja.', 'bad');
+      if (!res.ok) aviso(res.d.mensaje + ' Vuelve a apuntar la cámara al código.', 'bad');
     })
     .catch(function () {
-      aviso('No se pudo contactar la caja. Revisa el WiFi.', 'bad');
+      aviso('No se pudo conectar. Revisa que estés en el WiFi de la tienda.', 'bad');
     });
 
   pintarGaleria();

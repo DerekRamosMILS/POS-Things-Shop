@@ -15,7 +15,10 @@ const SEL: &str = "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.categ
                           p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
                           p.low_stock_ignored, p.created_at, p.updated_at,
                           c.name as category_name, s.name as supplier_name,
-                          (p.image_url IS NOT NULL AND p.image_url != '') as has_image,
+                          -- Las fotos viven en product_images; mirar la columna
+                          -- vieja dejaba sin imagen a todo lo capturado desde el
+                          -- celular, que nunca la llena.
+                          EXISTS(SELECT 1 FROM product_images WHERE product_id = p.id) as has_image,
                           p.has_variants
                    FROM products p
                    LEFT JOIN categories c ON p.category_id = c.id

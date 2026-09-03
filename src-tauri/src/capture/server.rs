@@ -146,6 +146,23 @@ fn combinar(tallas: &[String], colores: &[String]) -> Vec<(Option<String>, Optio
     }
 }
 
+/// Piezas capturadas para una combinación concreta, si el teléfono las mandó.
+fn piezas_de(
+    piezas: &[PiezasDeVariante],
+    talla: &Option<String>,
+    color: &Option<String>,
+) -> Option<i32> {
+    let coincide = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.trim().eq_ignore_ascii_case(y.trim()),
+        _ => false,
+    };
+    piezas
+        .iter()
+        .find(|p| coincide(&p.talla, talla) && coincide(&p.color, color))
+        .map(|p| p.cantidad)
+}
+
 /// Comparación que no delata el código por el tiempo que tarda en fallar.
 fn iguales(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
@@ -159,13 +176,32 @@ fn qr_svg(url: &str) -> Option<String> {
     use qrcode::QrCode;
 
     let code = QrCode::new(url.as_bytes()).ok()?;
-    Some(
-        code.render()
-            .min_dimensions(220, 220)
-            .dark_color(svg::Color("#0a0716"))
-            .light_color(svg::Color("#ffffff"))
-            .build(),
-    )
+    let svg = code
+        .render()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#0a0716"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+
+    // El renderizador fija ancho y alto en píxeles, así que el QR se recortaba
+    // al meterlo en un recuadro más chico. Con medidas relativas y su viewBox
+    // intacto, escala al espacio que tenga sin perder módulos.
+    Some(escalable(&svg))
+}
+
+/// Cambia el ancho y alto absolutos del SVG por medidas relativas.
+fn escalable(svg: &str) -> String {
+    let mut salida = svg.to_string();
+    for atributo in ["width", "height"] {
+        if let Some(inicio) = salida.find(&format!("{}=\"", atributo)) {
+            let desde = inicio + atributo.len() + 2;
+            if let Some(largo) = salida[desde..].find('"') {
+                salida.replace_range(desde..desde + largo, "100%");
+            }
+        }
+    }
+    salida
 }
 
 // ─── Lo que el celular envía ─────────────────────────────────────────────────
@@ -188,9 +224,22 @@ struct ProductoDelCelular {
     tallas: Vec<String>,
     #[serde(default)]
     colores: Vec<String>,
+    /// Piezas de cada combinación, capturadas una por una desde el teléfono.
+    /// Cuando llega vacío se usa `existencia` para todas.
+    #[serde(default)]
+    piezas: Vec<PiezasDeVariante>,
     /// Pares de foto y miniatura, ambas como data URL JPEG.
     #[serde(default)]
     fotos: Vec<FotoDelCelular>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct PiezasDeVariante {
+    #[serde(default)]
+    talla: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    cantidad: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,20 +417,24 @@ fn guardar_producto(
 
         let product_id = db.last_insert_rowid();
 
-        // Cada combinación arranca con la misma existencia; ajustarla una por
-        // una desde el teléfono sería tedioso y se puede afinar en la caja.
+        // Las piezas se capturan por combinación. Repartir la misma cantidad
+        // entre todas multiplicaba el inventario: nueve vestidos con tres
+        // tallas y tres colores se convertían en ochenta y uno.
         if !combinaciones.is_empty() {
+            let mut total = 0;
             for (talla, color) in &combinaciones {
+                let cantidad = piezas_de(&entrada.piezas, talla, color).unwrap_or(existencia).max(0);
+                total += cantidad;
                 db.execute(
                     "INSERT INTO product_variants (product_id, size, color, stock)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![product_id, talla, color, existencia],
+                    params![product_id, talla, color, cantidad],
                 ).map_err(|e| e.to_string())?;
             }
             // El stock del producto es la suma de sus variantes.
             db.execute(
                 "UPDATE products SET has_variants = 1, stock = ?1 WHERE id = ?2",
-                params![existencia * combinaciones.len() as i32, product_id],
+                params![total, product_id],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -571,6 +624,7 @@ mod tests {
             notas: None,
             tallas: vec![],
             colores: vec![],
+            piezas: vec![],
             fotos: (0..fotos)
                 .map(|_| FotoDelCelular { photo: jpeg(), thumbnail: jpeg() })
                 .collect(),
@@ -673,6 +727,119 @@ mod tests {
             params![sku], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(stock, 12);
         assert_eq!(tiene, 1);
+    }
+
+    #[test]
+    fn las_piezas_se_capturan_por_combinacion_no_se_multiplican() {
+        // Nueve vestidos en tres tallas no son veintisiete: son nueve
+        // repartidos. Antes se ponían nueve de cada una.
+        let conn = db();
+        let mut e = entrada("Vestido", Some(499.0), 0);
+        e.tallas = vec!["CH".into(), "M".into(), "G".into()];
+        e.existencia = Some(9);
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: 2 },
+            PiezasDeVariante { talla: Some("M".into()), color: None, cantidad: 4 },
+            PiezasDeVariante { talla: Some("G".into()), color: None, cantidad: 3 },
+        ];
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row(
+            "SELECT stock FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 9, "el total es la suma de lo capturado, no un múltiplo");
+
+        let de_mediana: i32 = conn.query_row(
+            "SELECT stock FROM product_variants WHERE size = 'M'", [], |r| r.get(0)).unwrap();
+        assert_eq!(de_mediana, 4);
+    }
+
+    #[test]
+    fn las_piezas_por_talla_y_color_se_respetan_una_a_una() {
+        let conn = db();
+        let mut e = entrada("Blusa", Some(299.0), 0);
+        e.tallas = vec!["CH".into(), "G".into()];
+        e.colores = vec!["Rojo".into(), "Azul".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: Some("Rojo".into()), cantidad: 1 },
+            PiezasDeVariante { talla: Some("CH".into()), color: Some("Azul".into()), cantidad: 2 },
+            PiezasDeVariante { talla: Some("G".into()), color: Some("Rojo".into()), cantidad: 3 },
+            PiezasDeVariante { talla: Some("G".into()), color: Some("Azul".into()), cantidad: 4 },
+        ];
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row(
+            "SELECT stock FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 10);
+
+        let g_azul: i32 = conn.query_row(
+            "SELECT stock FROM product_variants WHERE size = 'G' AND color = 'Azul'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(g_azul, 4);
+    }
+
+    #[test]
+    fn una_sola_talla_usa_la_cantidad_general_sin_preguntar() {
+        // Con una sola combinación no hay nada que repartir.
+        let conn = db();
+        let mut e = entrada("Bufanda", Some(99.0), 0);
+        e.tallas = vec!["Unitalla".into()];
+        e.existencia = Some(6);
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row(
+            "SELECT stock FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 6);
+    }
+
+    #[test]
+    fn una_combinacion_sin_piezas_capturadas_usa_la_cantidad_general() {
+        let conn = db();
+        let mut e = entrada("Playera", Some(199.0), 0);
+        e.tallas = vec!["CH".into(), "G".into()];
+        e.existencia = Some(5);
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: 2 },
+        ];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let g: i32 = conn.query_row(
+            "SELECT stock FROM product_variants WHERE size = 'G'", [], |r| r.get(0)).unwrap();
+        assert_eq!(g, 5, "lo que no se capturó cae en la cantidad general");
+    }
+
+    #[test]
+    fn las_piezas_se_emparejan_sin_importar_mayusculas_ni_espacios() {
+        let conn = db();
+        let mut e = entrada("Falda", Some(350.0), 0);
+        e.tallas = vec!["M".into()];
+        e.colores = vec!["Rojo".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some(" m ".into()), color: Some("ROJO".into()), cantidad: 7 },
+        ];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row("SELECT stock FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 7);
+    }
+
+    #[test]
+    fn una_cantidad_negativa_por_variante_se_trata_como_cero() {
+        let conn = db();
+        let mut e = entrada("Rara", Some(10.0), 0);
+        e.tallas = vec!["CH".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: -5 },
+        ];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row("SELECT stock FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 0);
     }
 
     #[test]
@@ -820,6 +987,24 @@ mod tests {
         let svg = qr_svg("http://192.168.1.50:7423/?c=123456").unwrap();
         assert!(svg.contains("<svg"));
         assert!(svg.len() > 200);
+    }
+
+    #[test]
+    fn el_qr_escala_a_su_contenedor_en_vez_de_recortarse() {
+        // Con ancho y alto en píxeles, el código se cortaba dentro de un
+        // recuadro más chico y dejaba de poder escanearse.
+        let svg = qr_svg("http://192.168.1.50:7423/?c=123456").unwrap();
+        assert!(svg.contains(r#"width="100%""#), "falta el ancho relativo: {}", &svg[..120]);
+        assert!(svg.contains(r#"height="100%""#), "falta el alto relativo");
+        assert!(svg.contains("viewBox"), "sin viewBox no puede escalar");
+    }
+
+    #[test]
+    fn escalable_no_toca_el_resto_del_svg() {
+        let original = r#"<svg width="220" height="220" viewBox="0 0 25 25"><rect x="1" y="2"/></svg>"#;
+        let resultado = escalable(original);
+        assert!(resultado.contains(r#"viewBox="0 0 25 25""#));
+        assert!(resultado.contains(r#"<rect x="1" y="2"/>"#));
     }
 }
 
