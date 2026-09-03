@@ -13,7 +13,7 @@ use tauri::State;
 use crate::commands::product_photos::{agregar_foto, NuevaFotoDto};
 use crate::commands::products::siguiente_sku;
 use crate::db::connection::DbState;
-use crate::session::{require_admin, SessionState};
+use crate::session::{require_admin, require_auth, SessionState};
 
 /// Puerto por defecto. Alto y poco común para no chocar con nada de la tienda.
 const PUERTO: u16 = 7423;
@@ -193,12 +193,18 @@ fn qr_svg(url: &str) -> Option<String> {
 /// Cambia el ancho y alto absolutos del SVG por medidas relativas.
 fn escalable(svg: &str) -> String {
     let mut salida = svg.to_string();
-    for atributo in ["width", "height"] {
-        if let Some(inicio) = salida.find(&format!("{}=\"", atributo)) {
-            let desde = inicio + atributo.len() + 2;
-            if let Some(largo) = salida[desde..].find('"') {
-                salida.replace_range(desde..desde + largo, "100%");
-            }
+    // Solo los atributos de la etiqueta `<svg>`: buscar en todo el documento
+    // podría dar con un `stroke-width` de cualquier figura de adentro.
+    let Some(abre) = salida.find("<svg") else {
+        return salida;
+    };
+    for atributo in [" width=\"", " height=\""] {
+        let Some(inicio) = salida[abre..].find(atributo).map(|i| abre + i) else {
+            continue;
+        };
+        let desde = inicio + atributo.len();
+        if let Some(largo) = salida[desde..].find('"') {
+            salida.replace_range(desde..desde + largo, "100%");
         }
     }
     salida
@@ -482,7 +488,7 @@ pub fn start_capture_server(
         let guard = captura.activo.lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
             drop(guard);
-            return capture_server_status(captura);
+            return capture_server_status(sessions, captura, token);
         }
     }
 
@@ -547,7 +553,7 @@ pub fn start_capture_server(
         });
     }
 
-    capture_server_status(captura)
+    capture_server_status(sessions, captura, token)
 }
 
 #[tauri::command]
@@ -570,8 +576,14 @@ pub fn stop_capture_server(
 
 #[tauri::command]
 pub fn capture_server_status(
+    sessions: State<'_, SessionState>,
     captura: State<'_, Arc<CaptureState>>,
+    token: String,
 ) -> Result<EstadoCaptura, String> {
+    // El estado incluye la dirección y el código de emparejamiento: sin sesión
+    // no tiene por qué verlos nadie, igual que para encender o apagar.
+    require_auth(&sessions, &token)?;
+
     let guard = captura.activo.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
         Some(e) => {
@@ -997,6 +1009,16 @@ mod tests {
         assert!(svg.contains(r#"width="100%""#), "falta el ancho relativo: {}", &svg[..120]);
         assert!(svg.contains(r#"height="100%""#), "falta el alto relativo");
         assert!(svg.contains("viewBox"), "sin viewBox no puede escalar");
+    }
+
+    #[test]
+    fn escalable_no_confunde_el_ancho_del_svg_con_el_de_una_figura() {
+        // Buscar "width=" en todo el documento daba con el trazo de adentro y
+        // dejaba el SVG con su tamaño fijo, es decir recortado otra vez.
+        let original = r#"<svg width="220" height="220" viewBox="0 0 9 9"><path stroke-width="2"/></svg>"#;
+        let resultado = escalable(original);
+        assert!(resultado.contains(r#"<svg width="100%" height="100%""#));
+        assert!(resultado.contains(r#"stroke-width="2""#), "no debe tocar la figura");
     }
 
     #[test]

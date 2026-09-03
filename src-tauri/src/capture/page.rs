@@ -307,7 +307,7 @@ pub const HTML: &str = r####"
         var valor = reparto[k] !== undefined ? reparto[k] : '';
         return '<div class="linea"><span class="que">' + escapar(etiqueta(c)) + '</span>' +
                '<input type="number" inputmode="numeric" min="0" step="1" placeholder="0" ' +
-               'data-clave="' + escapar(k) + '" value="' + valor + '"></div>';
+               'data-clave="' + escapar(k) + '" value="' + escapar(valor) + '"></div>';
       }).join('');
       actualizarTotal();
     } else {
@@ -331,8 +331,16 @@ pub const HTML: &str = r####"
     actualizarTotal();
   });
 
-  function combinaciones() {
-    return listaCombinaciones().length;
+  function piezasCapturadas() {
+    var lista = listaCombinaciones();
+    if (lista.length < 2) return [];
+    return lista.map(function (c) {
+      return {
+        talla: c.talla,
+        color: c.color,
+        cantidad: parseInt(reparto[claveDe(c)], 10) || 0
+      };
+    });
   }
 
   function agregar(lista, valor, contenedor, tipo) {
@@ -480,13 +488,10 @@ pub const HTML: &str = r####"
           notas: $('notas').value.trim() || null,
           tallas: tallas,
           colores: colores,
-          piezas: listaCombinaciones().map(function (c) {
-            return {
-              talla: c.talla,
-              color: c.color,
-              cantidad: parseInt(reparto[claveDe(c)], 10) || 0
-            };
-          }),
+          // Solo cuando hubo algo que repartir. Con una sola combinación el
+          // reparto está vacío y mandarlo pondría cero piezas, ignorando las
+          // que se pusieron arriba.
+          piezas: piezasCapturadas(),
           fotos: fotos
         })
       });

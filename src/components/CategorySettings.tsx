@@ -53,11 +53,16 @@ export default function CategorySettings() {
 
     const quitar = async (c: Category) => {
         const tiene = c.product_count ?? 0;
+        if (tiene > 0) {
+            showToast(
+                `"${c.name}" tiene ${tiene} producto${tiene === 1 ? '' : 's'}. Cámbialos de categoría antes de quitarla.`,
+                'error',
+            );
+            return;
+        }
         const ok = await confirm({
             title: `Quitar "${c.name}"`,
-            message: tiene > 0
-                ? `Hay ${tiene} producto(s) en esta categoría. Se quedarán sin categoría, pero no se borran. ¿Continuar?`
-                : `Se quitará "${c.name}" de la lista. ¿Continuar?`,
+            message: `Se quitará "${c.name}" de la lista. ¿Continuar?`,
             variant: 'danger',
             confirmLabel: 'Quitar',
         });
