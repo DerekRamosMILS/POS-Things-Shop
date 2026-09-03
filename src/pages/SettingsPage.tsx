@@ -3,6 +3,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
+import CaptureSettings from '../components/CaptureSettings';
 import HardwareSettings from '../components/HardwareSettings';
 import type { SystemConfig } from '../types';
 import { useToast } from '../contexts/ToastContext';
@@ -297,6 +298,9 @@ export default function SettingsPage() {
                     </div>
                 )}
             </div>
+
+            {/* Captura desde el celular */}
+            <CaptureSettings />
 
             {/* Hardware del mostrador */}
             <HardwareSettings

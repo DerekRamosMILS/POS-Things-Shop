@@ -8,10 +8,12 @@ import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { invalidateProductImage, useProductImage } from '../hooks/useProductImages';
 
-// ─── Image compression ───────────────────────────────────────────────────────
-// Product photos are stored inline (data URL) in the DB, so downscale + compress
-// before saving to keep them small and the catalog fast.
-async function compressImage(file: File, maxDim = 512, quality = 0.72): Promise<string> {
+// ─── Fotos ───────────────────────────────────────────────────────────────────
+// Las fotos se guardan como archivos, no dentro de la base, así que pueden
+// conservarse a resolución de catálogo. Se envían dos tamaños: el bueno y una
+// miniatura para los listados. El redimensionado ocurre aquí para que el
+// backend no necesite una biblioteca de imágenes.
+async function compressImage(file: File, maxDim = 1600, quality = 0.85): Promise<string> {
     const dataUrl: string = await new Promise((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(r.result as string);
@@ -141,6 +143,7 @@ export default function ProductsPage() {
 
     // Photo state
     const [photoPreview, setPhotoPreview] = useState<string | null>(null); // current preview URL
+    const [photoThumb, setPhotoThumb] = useState<string | null>(null);     // miniatura para listados
     const [photoChanged, setPhotoChanged] = useState(false);               // whether user changed photo
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -192,6 +195,7 @@ export default function ProductsPage() {
         setEditingProduct(null);
         setForm({ sku: '', barcode: null, name: '', description: null, category_id: null, supplier_id: null, purchase_price: 0, sale_price: 0, stock: 0, min_stock: defaultMinStock });
         setPhotoPreview(null);
+        setPhotoThumb(null);
         setPhotoChanged(false);
         setPriceHistory([]);
         setHasVariants(false); setVariants([]);
@@ -205,14 +209,20 @@ export default function ProductsPage() {
         setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active });
         // El listado ya no trae la foto: se pide solo al abrir la ficha.
         setPhotoPreview(null);
+        setPhotoThumb(null);
         if (product.has_image) {
             // Abrir dos fichas seguidas puede resolver las peticiones al revés;
             // el id descarta la respuesta que ya no corresponde.
             photoRequestFor.current = product.id;
-            api.getProductImages([product.id])
-                .then(rows => {
-                    if (photoRequestFor.current !== product.id) return;
-                    setPhotoPreview(rows.find(([id]) => id === product.id)?.[1] ?? null);
+            // La ficha muestra la foto buena, no la miniatura del listado.
+            api.getProductImageList(product.id)
+                .then(imgs => {
+                    const principal = imgs.find(i => i.position === 0) ?? imgs[0];
+                    if (!principal) return null;
+                    return api.getProductPhoto(principal.id);
+                })
+                .then(url => {
+                    if (photoRequestFor.current === product.id) setPhotoPreview(url ?? null);
                 })
                 .catch(() => {
                     if (photoRequestFor.current === product.id) setPhotoPreview(null);
@@ -242,13 +252,17 @@ export default function ProductsPage() {
             showToast('El archivo debe ser una imagen', 'error');
             e.target.value = ''; return;
         }
-        if (file.size > 5 * 1024 * 1024) {
-            showToast('La imagen supera el límite de 5 MB', 'error');
+        if (file.size > 20 * 1024 * 1024) {
+            showToast('La imagen supera el límite de 20 MB', 'error');
             e.target.value = ''; return;
         }
         try {
-            const compressed = await compressImage(file);
-            setPhotoPreview(compressed);
+            const [grande, chica] = await Promise.all([
+                compressImage(file),
+                compressImage(file, 320, 0.7),
+            ]);
+            setPhotoPreview(grande);
+            setPhotoThumb(chica);
             setPhotoChanged(true);
         } catch {
             showToast('No se pudo procesar la imagen', 'error');
@@ -259,6 +273,7 @@ export default function ProductsPage() {
 
     const handleRemovePhoto = () => {
         setPhotoPreview(null);
+        setPhotoThumb(null);
         setPhotoChanged(true);
     };
 
@@ -283,9 +298,16 @@ export default function ProductsPage() {
                 const created = await api.createProduct(form);
                 productId = created.id;
             }
-            // Save photo if changed
+            // La foto se guarda como archivo. Reemplazar significa quitar las
+            // anteriores: el formulario maneja una sola imagen principal.
             if (photoChanged) {
-                await api.setProductImage(productId, photoPreview);
+                const previas = await api.getProductImageList(productId);
+                for (const img of previas) await api.deleteProductImage(img.id);
+                if (photoPreview && photoThumb) {
+                    await api.addProductImage({
+                        product_id: productId, photo: photoPreview, thumbnail: photoThumb,
+                    });
+                }
                 invalidateProductImage(productId);
             }
             // Save variants (or clear them if variants were turned off)

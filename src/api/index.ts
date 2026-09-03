@@ -15,6 +15,7 @@ import type {
     Promotion, CreatePromotionDto,
     Notification, CreateReminderDto,
     Customer, CreateCustomerDto, UpdateCustomerDto, CatalogoFiscal,
+    CaptureStatus, ProductImage,
     PriceHistoryEntry, CreateReturnDto,
     Layaway, CreateLayawayDto,
 } from '../types';
@@ -344,6 +345,23 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_backup_list':
             return [] as unknown as T;
 
+        case 'capture_server_status':
+            return { encendido: false, url: null, codigo: null, qr_svg: null } as unknown as T;
+
+        case 'start_capture_server':
+        case 'stop_capture_server':
+        case 'add_product_image':
+        case 'get_product_photo':
+        case 'delete_product_image':
+        case 'reorder_product_images':
+            throw new Error('Solo disponible en la app de escritorio');
+
+        case 'get_product_image_list':
+            return [] as unknown as T;
+
+        case 'get_next_sku':
+            return 'TS-000001' as unknown as T;
+
         case 'list_printers':
             return ['Impresora de ejemplo (modo web)'] as unknown as T;
 
@@ -541,6 +559,24 @@ export const exportarPendientesFactura = (path: string, desde?: string, hasta?: 
     invoke<number>('exportar_pendientes_factura', { path, desde, hasta });
 export const marcarFacturada = (saleId: number, uuid: string) =>
     invoke<void>('marcar_facturada', { saleId, uuid });
+
+// Captura desde el celular
+export const startCaptureServer = () => invoke<CaptureStatus>('start_capture_server');
+export const stopCaptureServer = () => invoke<CaptureStatus>('stop_capture_server');
+export const captureServerStatus = () => invoke<CaptureStatus>('capture_server_status');
+
+// Fotos de producto
+export const addProductImage = (data: { product_id: number; photo: string; thumbnail: string }) =>
+    invoke<ProductImage>('add_product_image', { data });
+export const getProductImageList = (productId: number) =>
+    invoke<ProductImage[]>('get_product_image_list', { productId });
+export const getProductPhoto = (imageId: number) =>
+    invoke<string>('get_product_photo', { imageId });
+export const deleteProductImage = (imageId: number) =>
+    invoke<void>('delete_product_image', { imageId });
+export const reorderProductImages = (productId: number, imageIds: number[]) =>
+    invoke<void>('reorder_product_images', { productId, imageIds });
+export const getNextSku = () => invoke<string>('get_next_sku');
 
 // Hardware de mostrador
 export const listPrinters = () => invoke<string[]>('list_printers');

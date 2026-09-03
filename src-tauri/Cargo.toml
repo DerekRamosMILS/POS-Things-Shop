@@ -30,6 +30,12 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 log = { version = "0.4", features = ["std"] }
 
+# Servidor de captura en red local: el celular sube fotos directo a la caja,
+# sin nube ni backend externo.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
 [profile.release]
 strip = true
 lto = true

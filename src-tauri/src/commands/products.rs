@@ -112,6 +112,71 @@ pub fn get_product_by_barcode(
     }
 }
 
+/// Genera un SKU que no se ha usado nunca.
+///
+/// El formato es `TS-000123`: corto, legible en voz alta y ordenable. Sale del
+/// consecutivo más alto existente, no de contar renglones, para que borrar un
+/// producto no haga que el siguiente reutilice su código: un SKU repetido
+/// confundiría el historial de ventas de dos prendas distintas.
+pub fn siguiente_sku(db: &rusqlite::Connection) -> Result<String, String> {
+    // El consecutivo vive en su propio contador y nunca retrocede. Derivarlo del
+    // máximo existente haría que borrar el producto más reciente devolviera su
+    // código al siguiente, y dos prendas distintas compartirían historial.
+    let contador: i64 = db
+        .query_row(
+            "SELECT value FROM system_config WHERE key = 'sku_counter'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+
+    // Un respaldo restaurado puede traer productos por encima del contador.
+    let mayor_en_uso: i64 = db
+        .query_row(
+            "SELECT COALESCE(MAX(CAST(substr(sku, 4) AS INTEGER)), 0)
+             FROM products WHERE sku GLOB 'TS-[0-9]*'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut n = contador.max(mayor_en_uso) + 1;
+    loop {
+        let candidato = format!("TS-{:06}", n);
+        let existe: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM products WHERE sku = ?1",
+                params![candidato],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if existe == 0 {
+            db.execute(
+                "INSERT INTO system_config (key, value, description)
+                 VALUES ('sku_counter', ?1, 'Último consecutivo de SKU emitido')
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![n.to_string()],
+            ).map_err(|e| e.to_string())?;
+            return Ok(candidato);
+        }
+        n += 1;
+    }
+}
+
+/// SKU sugerido para la pantalla de alta.
+#[tauri::command]
+pub fn get_next_sku(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+) -> Result<String, String> {
+    require_admin(&sessions, &token)?;
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    siguiente_sku(&db)
+}
+
 #[tauri::command]
 pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
     require_admin(&sessions, &token)?;
@@ -244,4 +309,104 @@ pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, t
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    fn crear(db: &rusqlite::Connection, sku: &str) {
+        db.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock)
+             VALUES (?1, ?1, 1.0, 2.0, 1)",
+            params![sku],
+        ).unwrap();
+    }
+
+    #[test]
+    fn el_primer_producto_recibe_el_codigo_inicial() {
+        assert_eq!(siguiente_sku(&db()).unwrap(), "TS-000001");
+    }
+
+    #[test]
+    fn el_codigo_avanza_con_cada_producto() {
+        let conn = db();
+        crear(&conn, "TS-000001");
+        crear(&conn, "TS-000002");
+        assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000003");
+    }
+
+    /// Da de alta como lo hace la aplicación: pidiendo el consecutivo.
+    fn alta(db: &rusqlite::Connection) -> String {
+        let sku = siguiente_sku(db).unwrap();
+        crear(db, &sku);
+        sku
+    }
+
+    #[test]
+    fn borrar_un_producto_no_hace_que_su_codigo_se_reutilice() {
+        // Reutilizar un SKU mezclaría el historial de ventas de dos prendas.
+        let conn = db();
+        alta(&conn);
+        let segundo = alta(&conn);
+        conn.execute("DELETE FROM products WHERE sku = ?1", params![segundo]).unwrap();
+
+        assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000003",
+                   "el consecutivo no debe retroceder al borrar el más reciente");
+    }
+
+    #[test]
+    fn vaciar_el_catalogo_entero_no_reinicia_el_consecutivo() {
+        let conn = db();
+        alta(&conn); alta(&conn); alta(&conn);
+        conn.execute("DELETE FROM products", []).unwrap();
+
+        assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000004");
+    }
+
+    #[test]
+    fn un_respaldo_con_codigos_mas_altos_hace_avanzar_el_contador() {
+        // Restaurar un respaldo puede traer productos por encima del contador.
+        let conn = db();
+        alta(&conn);
+        crear(&conn, "TS-000500");
+
+        assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000501");
+    }
+
+    #[test]
+    fn los_codigos_escritos_a_mano_no_interfieren() {
+        let conn = db();
+        crear(&conn, "VESTIDO-AMARILLO");
+        crear(&conn, "TS-000005");
+        assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000006");
+    }
+
+    #[test]
+    fn si_el_codigo_sugerido_ya_existe_se_salta() {
+        let conn = db();
+        crear(&conn, "TS-000001");
+        // Alguien ocupó a mano el que tocaba.
+        crear(&conn, "TS-000002");
+        conn.execute("DELETE FROM products WHERE sku = 'TS-000001'", []).unwrap();
+
+        let sku = siguiente_sku(&conn).unwrap();
+        assert_eq!(sku, "TS-000003");
+    }
+
+    #[test]
+    fn cien_codigos_seguidos_no_se_repiten() {
+        let conn = db();
+        let mut vistos = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let sku = alta(&conn);
+            assert!(vistos.insert(sku.clone()), "el código {} salió dos veces", sku);
+        }
+    }
 }

@@ -1,3 +1,4 @@
+mod capture;
 mod commands;
 mod db;
 mod hardware;
@@ -13,7 +14,7 @@ use commands::{
 };
 use db::connection::{init_db, purge_old_logs, DbState};
 use session::SessionState;
-use std::sync::Mutex;
+use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
@@ -63,14 +64,16 @@ pub fn run() {
             // Rehydrate still-valid sessions so logins survive restarts.
             let session_map = session::load_sessions(&conn);
 
-            app.manage(DbState { db: Mutex::new(conn) });
+            app.manage(DbState::new(conn));
             app.manage(SessionState::with_map(session_map));
+            app.manage(Arc::new(capture::CaptureState::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             // Products
             products::get_products,
             products::get_product_by_barcode,
+            products::get_next_sku,
             products::create_product,
             products::update_product,
             products::delete_product,
@@ -176,6 +179,10 @@ pub fn run() {
             hardware::test_printer,
             hardware::print_sale_receipt,
             hardware::print_layaway_receipt,
+            // Captura desde el celular
+            capture::server::start_capture_server,
+            capture::server::stop_capture_server,
+            capture::server::capture_server_status,
             // Demo data
             seed::seed_demo_data,
         ])

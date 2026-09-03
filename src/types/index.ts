@@ -373,6 +373,21 @@ export interface CreatePromotionDto {
 }
 
 // Customer types
+export interface CaptureStatus {
+    encendido: boolean;
+    url: string | null;
+    codigo: string | null;
+    /** QR con la dirección ya emparejada, listo para insertar. */
+    qr_svg: string | null;
+}
+
+export interface ProductImage {
+    id: number;
+    product_id: number;
+    position: number;
+    created_at: string;
+}
+
 export interface DatosFiscales {
     rfc: string | null;
     razon_social: string | null;

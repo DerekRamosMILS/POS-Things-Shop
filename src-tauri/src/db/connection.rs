@@ -1,12 +1,20 @@
 use rusqlite::Connection;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::migrations;
 
 pub struct DbState {
-    pub db: Mutex<Connection>,
+    /// Compartido con el servidor de captura, que corre en otra tarea y necesita
+    /// la misma conexión —y por tanto el mismo candado— que los comandos.
+    pub db: Arc<Mutex<Connection>>,
+}
+
+impl DbState {
+    pub fn new(conn: Connection) -> Self {
+        DbState { db: Arc::new(Mutex::new(conn)) }
+    }
 }
 
 /// Get the database directory path within the app's data directory
