@@ -41,6 +41,9 @@ export default function CategorySettings() {
 
     const guardarNombre = async (c: Category) => {
         const nombre = nombreEditado.trim();
+        // Enter guarda y quita el recuadro; si además se pierde el foco durante
+        // el guardado, esto evita mandar el mismo cambio dos veces.
+        if (ocupado) return;
         if (!nombre || nombre === c.name) { setEditando(null); return; }
         setOcupado(true);
         try {

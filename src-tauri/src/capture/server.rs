@@ -214,7 +214,7 @@ fn escalable(svg: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 struct ProductoDelCelular {
-    codigo: String,
+    // El código de emparejamiento se comprueba en la cabecera X-Codigo, no aquí.
     nombre: String,
     #[serde(default)]
     precio: Option<f64>,
@@ -349,9 +349,6 @@ async fn crear_producto(
 
     if let Err((code, msg)) = autorizado(&ctx.captura, &headers) {
         return fallo(code, msg);
-    }
-    if !iguales(&entrada.codigo, "") && entrada.nombre.trim().is_empty() {
-        return fallo(StatusCode::BAD_REQUEST, "Ponle nombre al producto".into());
     }
     if entrada.nombre.trim().is_empty() {
         return fallo(StatusCode::BAD_REQUEST, "Ponle nombre al producto".into());
@@ -628,7 +625,6 @@ mod tests {
 
     fn entrada(nombre: &str, precio: Option<f64>, fotos: usize) -> ProductoDelCelular {
         ProductoDelCelular {
-            codigo: "123456".into(),
             nombre: nombre.into(),
             precio,
             costo: None,

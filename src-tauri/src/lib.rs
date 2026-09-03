@@ -125,7 +125,6 @@ pub fn run() {
             products::create_product,
             products::update_product,
             products::delete_product,
-            products::set_product_image,
             // Fotos de producto
             product_photos::add_product_image,
             product_photos::get_product_images,

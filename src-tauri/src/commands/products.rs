@@ -245,23 +245,6 @@ pub fn update_product(state: State<DbState>, sessions: State<SessionState>, toke
 }
 
 #[tauri::command]
-pub fn set_product_image(
-    state: State<DbState>,
-    sessions: State<SessionState>,
-    token: String,
-    product_id: i64,
-    image_url: Option<String>,
-) -> Result<(), String> {
-    require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE products SET image_url=?1, updated_at=datetime('now','localtime') WHERE id=?2",
-        params![image_url, product_id],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 pub fn delete_product(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;

@@ -481,7 +481,6 @@ pub const HTML: &str = r####"
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Codigo': codigo },
         body: JSON.stringify({
-          codigo: codigo,
           nombre: nombre,
           precio: parseFloat($('precio').value) || null,
           existencia: parseInt($('existencia').value, 10) || 0,

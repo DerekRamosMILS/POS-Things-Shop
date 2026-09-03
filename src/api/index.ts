@@ -194,13 +194,6 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_inventory_movements':
             return [] as unknown as T;
 
-        case 'set_product_image': {
-            const { productId, imageUrl } = args as { productId: number; imageUrl: string | null };
-            const p = webProducts.find(p => p.id === productId);
-            if (p) p.image_url = imageUrl ?? null;
-            return undefined as unknown as T;
-        }
-
         case 'create_product': {
             const data = args?.data as CreateProductDto;
             const id = webProducts.length + 1;
@@ -466,8 +459,6 @@ export const getProductByBarcode = (barcode: string) => invoke<Product | null>('
 export const createProduct = (data: CreateProductDto) => invoke<Product>('create_product', { data });
 export const updateProduct = (data: UpdateProductDto) => invoke<Product>('update_product', { data });
 export const deleteProduct = (id: number) => invoke<void>('delete_product', { id });
-export const setProductImage = (productId: number, imageUrl: string | null) =>
-    invoke<void>('set_product_image', { productId, imageUrl });
 export const getProductImages = (productIds: number[]) =>
     invoke<[number, string][]>('get_product_images', { productIds });
 

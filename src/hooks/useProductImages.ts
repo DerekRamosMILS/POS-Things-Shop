@@ -4,11 +4,10 @@ import * as api from '../api';
 /**
  * Carga las fotos de producto bajo demanda.
  *
- * Las fotos viven como data URL dentro de la fila del producto (~54 KB cada
- * una), así que los listados ya no las devuelven: traer 500 productos con foto
- * movería decenas de megabytes cada vez que se abre el punto de venta. Aquí se
- * piden solo las de los productos visibles, por lote, y se recuerdan mientras la
- * aplicación siga abierta.
+ * Las fotos son archivos en disco y los listados no las devuelven: traer 500
+ * productos con foto movería decenas de megabytes cada vez que se abre el punto
+ * de venta. Aquí se piden solo las de los productos visibles, por lote, y se
+ * recuerdan mientras la aplicación siga abierta.
  */
 
 const cache = new Map<number, string | null>();
@@ -52,9 +51,16 @@ function request(id: number) {
     schedule();
 }
 
-/** Olvida la foto de un producto tras editarla, para que se vuelva a pedir. */
+/**
+ * Olvida la foto de un producto tras editarla y la vuelve a pedir.
+ *
+ * Sin la petición la miniatura se quedaba en blanco: el efecto que la pide solo
+ * corre cuando cambia el producto o su `hasImage`, y al reemplazar una foto no
+ * cambia ninguno de los dos.
+ */
 export function invalidateProductImage(id: number) {
     cache.delete(id);
+    request(id);
     listeners.forEach(fn => fn());
 }
 
