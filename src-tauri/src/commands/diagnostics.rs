@@ -127,6 +127,8 @@ pub fn build_report(db: &Connection) -> String {
         .map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "db")).count())
         .unwrap_or(0);
     let _ = writeln!(out, "Respaldos guardados: {}", backups);
+    let fotos: i64 = scalar(db, "SELECT COUNT(*) FROM product_images").parse().unwrap_or(0);
+    let _ = writeln!(out, "Fotos de producto: {} ({})", fotos, human_size(crate::photos::espacio_usado()));
     let _ = writeln!(out);
 
     // ── Configuración ──
@@ -199,6 +201,14 @@ mod tests {
         for table in TABLES {
             assert!(report.contains(table), "falta el conteo de {}", table);
         }
+    }
+
+    #[test]
+    fn it_reports_the_photo_storage() {
+        // Las fotos viven fuera de la base; su peso no aparece en el tamaño del
+        // archivo y hay que reportarlo aparte.
+        let report = build_report(&db());
+        assert!(report.contains("Fotos de producto:"));
     }
 
     #[test]

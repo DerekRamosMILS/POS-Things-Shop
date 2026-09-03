@@ -219,48 +219,6 @@ pub struct PriceHistoryEntry {
     pub created_at: String,
 }
 
-/// Fotos de los productos que están en pantalla, pedidas por lote.
-///
-/// El punto de venta muestra unas dos docenas a la vez, así que traerlas por
-/// lote mantiene el catálogo ligero sin dejar la pantalla sin imágenes.
-#[tauri::command]
-pub fn get_product_images(
-    state: State<DbState>,
-    sessions: State<SessionState>,
-    token: String,
-    product_ids: Vec<i64>,
-) -> Result<Vec<(i64, String)>, String> {
-    require_auth(&sessions, &token)?;
-    if product_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Tope defensivo: un lote enorme anularía el propósito de haberlas sacado
-    // del listado.
-    if product_ids.len() > 60 {
-        return Err("Demasiadas imágenes en una sola petición".to_string());
-    }
-
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let placeholders = vec!["?"; product_ids.len()].join(",");
-
-    let mut stmt = db
-        .prepare(&format!(
-            "SELECT id, image_url FROM products
-             WHERE id IN ({}) AND image_url IS NOT NULL AND image_url != ''",
-            placeholders
-        ))
-        .map_err(|e| e.to_string())?;
-
-    let params = rusqlite::params_from_iter(product_ids.iter());
-    let images = stmt
-        .query_map(params, |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    Ok(images)
-}
-
 #[tauri::command]
 pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64) -> Result<Vec<PriceHistoryEntry>, String> {
     require_auth(&sessions, &token)?;

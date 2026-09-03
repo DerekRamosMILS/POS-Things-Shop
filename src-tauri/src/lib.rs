@@ -4,10 +4,11 @@ mod hardware;
 mod logging;
 mod models;
 mod money;
+mod photos;
 mod session;
 
 use commands::{
-    backup, cash_register, categories, config, customers, diagnostics, expenses, fiscal, inventory, layaways,
+    backup, cash_register, categories, config, customers, diagnostics, expenses, fiscal, inventory, layaways, product_photos,
     notifications, products, promotions, reports, returns, sales, seed, suppliers, users, variants,
 };
 use db::connection::{init_db, purge_old_logs, DbState};
@@ -56,6 +57,8 @@ pub fn run() {
             }
 
             purge_old_logs(&conn);
+            product_photos::migrar_fotos_incrustadas(&conn);
+            crate::photos::limpiar_huerfanas(&conn);
 
             // Rehydrate still-valid sessions so logins survive restarts.
             let session_map = session::load_sessions(&conn);
@@ -72,7 +75,14 @@ pub fn run() {
             products::update_product,
             products::delete_product,
             products::set_product_image,
-            products::get_product_images,
+            // Fotos de producto
+            product_photos::add_product_image,
+            product_photos::get_product_images,
+            product_photos::get_product_image_list,
+            product_photos::get_product_photo,
+            product_photos::delete_product_image,
+            product_photos::reorder_product_images,
+
             products::get_price_history,
             // Variants
             variants::get_variants,

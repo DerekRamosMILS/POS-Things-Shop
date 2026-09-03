@@ -9,6 +9,7 @@ pub mod fiscal;
 pub mod inventory;
 pub mod layaways;
 pub mod notifications;
+pub mod product_photos;
 pub mod products;
 pub mod promotions;
 pub mod reports;
