@@ -1,4 +1,3 @@
-use chrono::Local;
 use rusqlite::params;
 use tauri::State;
 
@@ -120,13 +119,7 @@ pub fn registrar_apartado(
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let result = (|| -> Result<Layaway, String> {
-        let today = Local::now().format("%Y%m%d").to_string();
-        let count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM layaways WHERE folio LIKE ?1",
-            params![format!("A-{}-%", today)],
-            |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
-        let folio = format!("A-{}-{:03}", today, count + 1);
+        let folio = crate::folios::siguiente(db, crate::folios::Serie::Apartados)?;
 
         struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: f64, prev_stock: i32, variant_id: Option<i64>, variant_label: Option<String> }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());

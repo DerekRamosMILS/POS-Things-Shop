@@ -538,7 +538,7 @@ export const getCashierReport = (days?: number) => invoke<CashierReport[]>('get_
 
 // Backup
 export const createBackup = () => invoke<string>('create_backup');
-export const exportDatabase = (path: string) => invoke<void>('export_database', { path });
+export const exportDatabase = (path: string) => invoke<string>('export_database', { path });
 export const getBackupList = () => invoke<string[]>('get_backup_list');
 export const getLogPath = () => invoke<string>('get_log_path');
 export const generateDiagnosticReport = (path: string) =>

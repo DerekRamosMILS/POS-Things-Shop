@@ -61,17 +61,58 @@ pub fn create_backup(state: State<DbState>, sessions: State<SessionState>, token
     perform_backup(&db)
 }
 
+/// Copia completa para llevarse en una USB: la base y las fotos.
+///
+/// Las fotos dejaron de vivir dentro de la base, así que copiar solo el archivo
+/// `.db` producía una copia que al restaurarse traía todo el catálogo sin una
+/// sola imagen. Se escriben las dos cosas en una carpeta con fecha.
 #[tauri::command]
-pub fn export_database(state: State<DbState>, sessions: State<SessionState>, token: String, path: String) -> Result<(), String> {
+pub fn export_database(state: State<DbState>, sessions: State<SessionState>, token: String, path: String) -> Result<String, String> {
     require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
 
+    exportar_a(&db, &get_db_path(), &crate::photos::photos_dir(), std::path::Path::new(&path))
+}
+
+/// Núcleo de la exportación, con rutas explícitas para poder probarlo.
+pub fn exportar_a(
+    db: &Connection,
+    db_path: &std::path::Path,
+    fotos_dir: &std::path::Path,
+    destino_elegido: &std::path::Path,
+) -> Result<String, String> {
+    // Sin esto la copia se lleva la base sin lo que sigue en el WAL.
     db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").map_err(|e| e.to_string())?;
 
-    let db_path = get_db_path();
-    fs::copy(&db_path, &path).map_err(|e| format!("Error al exportar: {}", e))?;
+    let carpeta = destino_elegido.join(format!(
+        "things-shop-{}",
+        Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    let fotos_destino = carpeta.join("fotos");
+    fs::create_dir_all(&fotos_destino).map_err(|e| format!("Error al exportar: {}", e))?;
 
-    Ok(())
+    fs::copy(db_path, carpeta.join("things-shop.db"))
+        .map_err(|e| format!("Error al exportar: {}", e))?;
+
+    let mut fotos = 0usize;
+    if let Ok(entradas) = fs::read_dir(fotos_dir) {
+        for entrada in entradas.flatten() {
+            let nombre = entrada.file_name();
+            if !nombre.to_string_lossy().ends_with(".jpg") {
+                continue;
+            }
+            fs::copy(entrada.path(), fotos_destino.join(&nombre))
+                .map_err(|e| format!("Error al copiar las fotos: {}", e))?;
+            fotos += 1;
+        }
+    }
+
+    log::info!("Exportación creada en {:?} con {} fotos", carpeta, fotos);
+    Ok(format!(
+        "Copia guardada en {} ({} fotos)",
+        carpeta.file_name().unwrap_or_default().to_string_lossy(),
+        fotos
+    ))
 }
 
 /// Stage a backup to be restored on the next app launch. Restoring in place while
@@ -180,6 +221,38 @@ mod tests {
             rusqlite::params![sku],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn la_copia_para_llevarse_incluye_las_fotos() {
+        // Copiar solo el .db daba una copia con todo el catálogo y ni una sola
+        // imagen: las fotos dejaron de vivir dentro de la base.
+        let tmp = std::env::temp_dir().join(format!("ts-export-{}", uuid::Uuid::new_v4()));
+        let fotos = tmp.join("fotos");
+        let destino = tmp.join("usb");
+        fs::create_dir_all(&fotos).unwrap();
+        fs::create_dir_all(&destino).unwrap();
+
+        let db_path = tmp.join("things-shop.db");
+        let conn = open_db(&db_path);
+        add_product(&conn, "CAM-1");
+        fs::write(fotos.join("una.jpg"), [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
+        fs::write(fotos.join("una_t.jpg"), [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
+        fs::write(fotos.join("notas.txt"), b"esto no es una foto").unwrap();
+
+        let mensaje = exportar_a(&conn, &db_path, &fotos, &destino).unwrap();
+        assert!(mensaje.contains("2 fotos"), "mensaje inesperado: {}", mensaje);
+
+        let carpeta = fs::read_dir(&destino).unwrap().next().unwrap().unwrap().path();
+        assert!(carpeta.join("things-shop.db").exists(), "falta la base");
+        assert!(carpeta.join("fotos/una.jpg").exists(), "falta la foto");
+        assert!(carpeta.join("fotos/una_t.jpg").exists(), "falta la miniatura");
+        assert!(!carpeta.join("fotos/notas.txt").exists(), "solo se copian fotos");
+
+        let copia = Connection::open(carpeta.join("things-shop.db")).unwrap();
+        assert_eq!(count_products(&copia), 1);
+
+        fs::remove_dir_all(&tmp).ok();
     }
 
     /// El ciclo completo tal como lo vive la tienda: respaldar, seguir vendiendo,

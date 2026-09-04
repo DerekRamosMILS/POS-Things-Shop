@@ -1,6 +1,7 @@
 mod capture;
 mod commands;
 mod db;
+mod folios;
 mod hardware;
 mod logging;
 mod models;

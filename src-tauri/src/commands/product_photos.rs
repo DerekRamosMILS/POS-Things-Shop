@@ -378,6 +378,27 @@ mod tests {
     }
 
     #[test]
+    fn restaurar_un_respaldo_no_se_lleva_las_fotos_recientes() {
+        // Al volver a un respaldo, lo fotografiado después se queda sin fila
+        // que lo nombre. Borrarlo en ese momento sería irreversible.
+        let db = tienda();
+        let img = agregar_foto(&db, &foto(1)).unwrap();
+        let (archivo, miniatura): (String, String) = db.query_row(
+            "SELECT file_name, thumb_name FROM product_images WHERE id = ?1",
+            params![img.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+
+        // La restauración deja la base como estaba: sin esa fila.
+        db.execute("DELETE FROM product_images", []).unwrap();
+        crate::photos::limpiar_huerfanas(&db);
+
+        assert!(crate::photos::safe_path(&archivo).unwrap().exists(),
+                "la foto reciente debe seguir ahí");
+        assert!(crate::photos::safe_path(&miniatura).unwrap().exists());
+
+        photos::borrar(&archivo, &miniatura);
+    }
+
+    #[test]
     fn no_se_aceptan_fotos_de_un_producto_inexistente() {
         let db = tienda();
         assert!(agregar_foto(&db, &foto(999)).is_err());

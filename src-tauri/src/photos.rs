@@ -115,10 +115,21 @@ pub fn borrar(file_name: &str, thumb_name: &str) {
     }
 }
 
-/// Elimina de la carpeta las fotos que ya ninguna fila referencia.
+/// Días que una foto sin dueño se conserva antes de borrarse.
+///
+/// Restaurar un respaldo devuelve la base a como estaba, y las fotos tomadas
+/// después dejan de tener fila que las nombre. Borrarlas en ese momento es
+/// irreversible: la restauración se llevaría por delante justo la mercancía más
+/// reciente. Con la espera, quedan ahí el tiempo suficiente para volver a un
+/// respaldo más nuevo o para recuperarlas a mano.
+const DIAS_DE_GRACIA: u64 = 30;
+
+/// Elimina de la carpeta las fotos que ya ninguna fila referencia y llevan
+/// tiempo sin dueño.
 ///
 /// Un producto borrado se lleva sus filas por cascada, pero los archivos se
-/// quedarían ocupando disco para siempre.
+/// quedarían ocupando disco para siempre. Las recién quedadas sin dueño se
+/// respetan: ver `DIAS_DE_GRACIA`.
 pub fn limpiar_huerfanas(db: &rusqlite::Connection) -> usize {
     let referenciadas: std::collections::HashSet<String> = match db
         .prepare("SELECT file_name FROM product_images UNION SELECT thumb_name FROM product_images")
@@ -130,12 +141,22 @@ pub fn limpiar_huerfanas(db: &rusqlite::Connection) -> usize {
         Err(_) => return 0,
     };
 
+    let gracia = std::time::Duration::from_secs(DIAS_DE_GRACIA * 24 * 60 * 60);
     let Ok(entradas) = fs::read_dir(photos_dir()) else { return 0 };
     let mut borradas = 0;
     for entrada in entradas.flatten() {
         let nombre = entrada.file_name().to_string_lossy().to_string();
-        let huerfana = nombre.ends_with(".jpg") && !referenciadas.contains(&nombre);
-        if huerfana && fs::remove_file(entrada.path()).is_ok() {
+        if !nombre.ends_with(".jpg") || referenciadas.contains(&nombre) {
+            continue;
+        }
+        // Ante la duda sobre la antigüedad, se conserva: perder una foto es
+        // peor que dejar unos kilobytes ocupados.
+        let vieja = entrada
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|e| e > gracia).unwrap_or(false))
+            .unwrap_or(false);
+        if vieja && fs::remove_file(entrada.path()).is_ok() {
             borradas += 1;
         }
     }

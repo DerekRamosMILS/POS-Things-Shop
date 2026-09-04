@@ -1,6 +1,5 @@
 use rusqlite::params;
 use tauri::State;
-use chrono::Local;
 
 use crate::db::connection::DbState;
 use crate::models::sale::{CreateSaleDto, PaymentSplitDto, Sale, SaleFilters, SaleItem};
@@ -28,48 +27,6 @@ fn config_number(db: &rusqlite::Connection, key: &str, default: f64) -> f64 {
     .ok()
     .and_then(|s| s.trim().parse::<f64>().ok())
     .unwrap_or(default)
-}
-
-/// Terminal desde la que se cobra. Con una sola caja siempre es "01".
-fn terminal_id(db: &rusqlite::Connection) -> String {
-    db.query_row(
-        "SELECT value FROM system_config WHERE key = 'terminal_id'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .map(|v| v.trim().to_string())
-    .filter(|v| !v.is_empty())
-    .unwrap_or_else(|| "01".to_string())
-}
-
-/// Siguiente folio del día.
-///
-/// Se calcula desde el consecutivo más alto ya emitido, no contando renglones:
-/// contar produce folios repetidos en cuanto falta una fila, y `folio` es único,
-/// así que la venta fallaría al cobrar. Con más de una terminal el folio lleva
-/// además su identificador, para que dos cajas no emitan el mismo número.
-fn next_folio(db: &rusqlite::Connection) -> Result<String, String> {
-    let today = Local::now().format("%Y%m%d").to_string();
-    let terminal = terminal_id(db);
-
-    let prefix = if terminal == "01" {
-        format!("V-{}-", today)
-    } else {
-        format!("V{}-{}-", terminal, today)
-    };
-
-    // El consecutivo son los caracteres que siguen al prefijo.
-    let last: i64 = db
-        .query_row(
-            "SELECT COALESCE(MAX(CAST(substr(folio, ?2) AS INTEGER)), 0)
-             FROM sales WHERE folio LIKE ?1",
-            params![format!("{}%", prefix), prefix.len() as i64 + 1],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-
-    Ok(format!("{}{:03}", prefix, last + 1))
 }
 
 /// Cash register column that accumulates a given payment method.
@@ -256,7 +213,7 @@ pub fn registrar_venta(
             }
         }
 
-        let folio = next_folio(db)?;
+        let folio = crate::folios::siguiente(db, crate::folios::Serie::Ventas)?;
 
         // Resolve every line from the DB (authoritative price + cost snapshot).
         struct Line {
@@ -382,7 +339,7 @@ pub fn registrar_venta(
                 folio, user_id, register_id, subtotal.to_pesos(),
                 discount_total.to_pesos(), tax.to_pesos(), total.to_pesos(), payment_method,
                 amount_paid.to_pesos(), change_amount.to_pesos(), data.notes, data.customer_id,
-                data.client_request_id, data.promotion_id, terminal_id(db)
+                data.client_request_id, data.promotion_id, crate::folios::terminal_id(db)
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -994,13 +951,13 @@ mod tests {
     }
 
     fn hoy() -> String {
-        Local::now().format("%Y%m%d").to_string()
+        chrono::Local::now().format("%Y%m%d").to_string()
     }
 
     #[test]
     fn the_first_sale_of_the_day_starts_at_one() {
         let conn = db_ventas();
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-001", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-001", hoy()));
     }
 
     #[test]
@@ -1008,7 +965,7 @@ mod tests {
         let conn = db_ventas();
         insertar_folio(&conn, &format!("V-{}-001", hoy()));
         insertar_folio(&conn, &format!("V-{}-002", hoy()));
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-003", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-003", hoy()));
     }
 
     #[test]
@@ -1021,14 +978,14 @@ mod tests {
         insertar_folio(&conn, &format!("V-{}-003", hoy()));
         conn.execute("DELETE FROM sales WHERE folio LIKE '%-002'", []).unwrap();
 
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-004", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-004", hoy()));
     }
 
     #[test]
     fn folios_from_other_days_do_not_interfere() {
         let conn = db_ventas();
         insertar_folio(&conn, "V-20200101-999");
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-001", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-001", hoy()));
     }
 
     #[test]
@@ -1039,14 +996,14 @@ mod tests {
         conn.execute("UPDATE system_config SET value = '02' WHERE key = 'terminal_id'", []).unwrap();
 
         // La caja 2 no continúa la serie de la caja 1: emite la suya.
-        assert_eq!(next_folio(&conn).unwrap(), format!("V02-{}-001", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V02-{}-001", hoy()));
     }
 
     #[test]
     fn the_default_terminal_keeps_the_plain_folio_format() {
         let conn = db_ventas();
-        assert!(next_folio(&conn).unwrap().starts_with("V-"));
-        assert_eq!(terminal_id(&conn), "01");
+        assert!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap().starts_with("V-"));
+        assert_eq!(crate::folios::terminal_id(&conn), "01");
     }
 
     #[test]

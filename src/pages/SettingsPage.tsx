@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
@@ -106,19 +106,16 @@ export default function SettingsPage() {
         catch (err) { showToast(String(err), 'error'); }
     };
 
-    /// Copy the live database somewhere the operator chooses (USB, network share).
+    /// Copia completa —base y fotos— a donde el encargado elija: USB, disco, red.
     const handleExport = async () => {
         setExporting(true);
         try {
-            const stamp = new Date().toISOString().slice(0, 10);
-            const target = await save({
-                title: 'Exportar base de datos',
-                defaultPath: `things-shop-${stamp}.db`,
-                filters: [{ name: 'Base de datos SQLite', extensions: ['db'] }],
+            const target = await open({
+                title: 'Elige dónde guardar la copia',
+                directory: true,
             });
-            if (!target) return;
-            await api.exportDatabase(target);
-            showToast('Base de datos exportada');
+            if (!target || Array.isArray(target)) return;
+            showToast(await api.exportDatabase(target));
         } catch (err) { showToast(String(err), 'error'); }
         finally { setExporting(false); }
     };
@@ -279,13 +276,18 @@ export default function SettingsPage() {
                     </p>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button onClick={handleExport} disabled={exporting} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
-                            {exporting ? <IcoLoader /> : <IcoDownload />} Exportar a archivo
+                            {exporting ? <IcoLoader /> : <IcoDownload />} Copiar a una USB
                         </button>
                         <button onClick={handleBackup} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
                             <IcoDownload /> Crear Respaldo
                         </button>
                     </div>
                 </div>
+                <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 16, lineHeight: 1.5 }}>
+                    Los respaldos se guardan en esta computadora. Copiar a una USB se lleva
+                    también las fotos, que es lo que hay que sacar de aquí de vez en cuando
+                    por si la computadora falla.
+                </p>
                 {backupList.length === 0 ? (
                     <p style={{ textAlign: 'center', padding: '32px 0', fontSize: 13, color: 'var(--t3)' }}>Sin respaldos disponibles</p>
                 ) : (
