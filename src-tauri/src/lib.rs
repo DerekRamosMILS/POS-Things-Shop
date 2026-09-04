@@ -121,6 +121,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Products
             products::get_products,
+            products::get_product,
             products::get_product_by_barcode,
             products::get_next_sku,
             products::create_product,

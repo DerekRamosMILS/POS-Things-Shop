@@ -11,10 +11,6 @@ use crate::models::layaway::{
     CreateLayawayDto, Layaway, LayawayItem, LayawayPayment,
 };
 
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}
-
 fn variant_label(size: &Option<String>, color: &Option<String>) -> String {
     let mut parts: Vec<&str> = Vec::new();
     if let Some(s) = size.as_deref() { if !s.trim().is_empty() { parts.push(s); } }
@@ -123,9 +119,9 @@ pub fn registrar_apartado(
     let result = (|| -> Result<Layaway, String> {
         let folio = crate::folios::siguiente(db, crate::folios::Serie::Apartados)?;
 
-        struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: f64, variant_id: Option<i64>, variant_label: Option<String> }
+        struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: Cents, variant_id: Option<i64>, variant_label: Option<String> }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
-        let mut total = 0.0;
+        let mut total = Cents::ZERO;
 
         // Lo que los renglones anteriores de este mismo apartado ya reservaron:
         // sin esto, dos tallas del mismo vestido se miden las dos contra la
@@ -168,19 +164,17 @@ pub fn registrar_apartado(
                 *apartado_variante.entry(vid).or_insert(0) += item.quantity;
             }
 
-            let subtotal = round2(price * item.quantity as f64);
-            total += subtotal;
+            let subtotal = Cents::from_pesos(price).times(item.quantity as i64);
+            total = total + subtotal;
             lines.push(Line { product_id: item.product_id, name, sku, quantity: item.quantity, unit_price: price, unit_cost: cost, subtotal, variant_id, variant_label });
         }
-        total = round2(total);
-
-        if data.initial_payment > total {
+        if Cents::from_pesos(data.initial_payment) > total {
             return Err("El anticipo no puede superar el total".to_string());
         }
 
         db.execute(
             "INSERT INTO layaways (folio, customer_id, user_id, total, paid, notes, due_date) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![folio, data.customer_id, user_id, total, data.initial_payment, data.notes, data.due_date],
+            params![folio, data.customer_id, user_id, total.to_pesos(), data.initial_payment, data.notes, data.due_date],
         ).map_err(|e| e.to_string())?;
         let layaway_id = db.last_insert_rowid();
 
@@ -188,7 +182,7 @@ pub fn registrar_apartado(
             db.execute(
                 "INSERT INTO layaway_items (layaway_id, product_id, product_name, product_sku, quantity, unit_price, unit_cost, subtotal, variant_id, variant_label)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![layaway_id, line.product_id, line.name, line.sku, line.quantity, line.unit_price, line.unit_cost, line.subtotal, line.variant_id, line.variant_label],
+                params![layaway_id, line.product_id, line.name, line.sku, line.quantity, line.unit_price, line.unit_cost, line.subtotal.to_pesos(), line.variant_id, line.variant_label],
             ).map_err(|e| e.to_string())?;
 
             // Reserve stock (moved out of available inventory).
@@ -362,7 +356,7 @@ pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<L
     if status != "active" {
         return Err("El apartado no está activo".to_string());
     }
-    if round2(paid) + 0.001 < round2(total) {
+    if Cents::from_pesos(paid) < Cents::from_pesos(total) {
         return Err("El apartado aún tiene saldo pendiente".to_string());
     }
 
@@ -536,6 +530,30 @@ mod tests {
         ).unwrap();
         db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
         db
+    }
+
+    #[test]
+    fn muchos_abonos_parciales_cierran_exactamente() {
+        // Sumar en coma flotante dejaba un saldo de un centavo imposible de
+        // pagar: el apartado quedaba pagado y sin poderse entregar.
+        let db = tienda();
+        abrir_caja(&db);
+        let producto = producto(&db, "TER", 33.33, 30);
+
+        let ap = registrar_apartado(&db, 1, apartado(producto, 3, 0.0, "cash")).unwrap();
+        let total = ap.total;
+
+        // Diez abonos de una décima parte, cada uno redondeado a dos decimales.
+        let parte = (total / 10.0 * 100.0).round() / 100.0;
+        let mut pagado = 0.0;
+        for _ in 0..9 {
+            abonar_apartado(&db, 1, ap.id, parte, "cash").unwrap();
+            pagado += parte;
+        }
+        let resto = ((total - pagado) * 100.0).round() / 100.0;
+        abonar_apartado(&db, 1, ap.id, resto, "cash").unwrap();
+
+        entregar_apartado(&db, ap.id).expect("pagado completo debe poder entregarse");
     }
 
     #[test]

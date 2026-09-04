@@ -95,6 +95,26 @@ pub fn get_products(
     Ok(products)
 }
 
+/// Un producto por su id.
+///
+/// El punto de venta carga el catálogo al entrar; lo que se dé de alta después
+/// —una prenda capturada desde el celular, por ejemplo— no está en esa lista.
+/// Sin esto, escanear su código decía que el producto no existe.
+#[tauri::command]
+pub fn get_product(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    id: i64,
+) -> Result<Option<Product>, String> {
+    require_auth(&sessions, &token)?;
+    let db = state.conn();
+    match get_product_by_id(&db, id) {
+        Ok(p) => Ok(Some(p)),
+        Err(_) => Ok(None),
+    }
+}
+
 #[tauri::command]
 pub fn get_product_by_barcode(
     state: State<DbState>,

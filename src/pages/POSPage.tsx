@@ -380,8 +380,17 @@ export default function POSPage() {
         try {
             const variant = await api.getVariantByBarcode(code);
             if (variant) {
-                const product = allProducts.find(p => p.id === variant.product_id);
-                if (product) { addVariantToCart(product, variant); setSearchQuery(''); setSearchResults([]); return; }
+                // El catálogo en pantalla se cargó al entrar. Una prenda dada de
+                // alta después —desde el celular, por ejemplo— no está en esa
+                // lista, y buscarla solo ahí hacía que el escáner dijera que no
+                // existe. Si no aparece, se pregunta a la base.
+                const product = allProducts.find(p => p.id === variant.product_id)
+                    ?? await api.getProductById(variant.product_id);
+                if (product) {
+                    addVariantToCart(product, variant);
+                    setSearchQuery(''); setSearchResults([]);
+                    return;
+                }
             }
             const product = await api.getProductByBarcode(code);
             if (product) { handleAddItem(product); setSearchQuery(''); setSearchResults([]); }

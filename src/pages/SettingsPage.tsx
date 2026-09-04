@@ -15,7 +15,9 @@ const NUMERIC_KEYS = ['tax_rate', 'low_stock_threshold', 'max_backups', 'session
     'log_retention_days', 'scanner_max_gap_ms', 'scanner_min_length', 'printer_width'];
 const MULTILINE_KEYS = ['ticket_footer'];
 // Kept out of the editable grid: it is plumbing, not a shop setting.
-const HIDDEN_KEYS = ['demo_seeded', 'update_endpoint'];
+// Fuera del formulario: son piezas internas, no ajustes de la tienda. Verlas
+// como cajitas de texto sin explicación solo invita a romper algo.
+const HIDDEN_KEYS = ['demo_seeded', 'update_endpoint', 'sku_counter', 'terminal_id'];
 // Estas se editan en su propia tarjeta, no en la reja genérica de la tienda.
 const HARDWARE_KEYS = [
     'printer_name', 'printer_width', 'printer_auto_print',
@@ -49,7 +51,7 @@ export default function SettingsPage() {
         if (!user) return;
         const ok = await confirm({
             title: 'Cargar datos de prueba',
-            message: 'Se agregarán productos, clientes, proveedores y ventas de ejemplo para probar el sistema. Solo se puede hacer una vez. ¿Continuar?',
+            message: 'Se agregarán productos, clientes, proveedores y ventas de ejemplo para practicar con el sistema. Las ventas de ejemplo cuentan en los reportes, así que esto solo sirve antes de empezar a vender de verdad. ¿Continuar?',
             confirmLabel: 'Cargar datos',
         });
         if (!ok) return;

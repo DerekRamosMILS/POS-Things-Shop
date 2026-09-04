@@ -115,6 +115,9 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return filtered as unknown as T;
         }
 
+        case 'get_product':
+            return (webProducts.find(p => p.id === (args?.id as number)) ?? null) as unknown as T;
+
         case 'get_product_by_barcode': {
             const barcode = args?.barcode as string;
             const found = webProducts.find(p => p.barcode === barcode) ?? null;
@@ -458,6 +461,7 @@ const invoke = <T>(command: string, args?: InvokeArgs): Promise<T> => {
 
 // Products
 export const getProducts = (filters?: ProductFilters) => invoke<Product[]>('get_products', { filters });
+export const getProductById = (id: number) => invoke<Product | null>('get_product', { id });
 export const getProductByBarcode = (barcode: string) => invoke<Product | null>('get_product_by_barcode', { barcode });
 export const createProduct = (data: CreateProductDto) => invoke<Product>('create_product', { data });
 export const updateProduct = (data: UpdateProductDto) => invoke<Product>('update_product', { data });
