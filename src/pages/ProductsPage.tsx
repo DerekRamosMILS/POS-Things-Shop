@@ -14,7 +14,15 @@ import CaptureSettings from '../components/CaptureSettings';
 // conservarse a resolución de catálogo. Se envían dos tamaños: el bueno y una
 // miniatura para los listados. El redimensionado ocurre aquí para que el
 // backend no necesite una biblioteca de imágenes.
-async function compressImage(file: File, maxDim = 1600, quality = 0.85): Promise<string> {
+//
+// 1280 px al 75% ronda los 150 KB. Las fotos viven dentro de la base y cada
+// respaldo las copia enteras, así que la resolución es un compromiso: alcanza
+// de sobra para verla en pantalla y para un catálogo, sin que dos mil prendas
+// conviertan cada respaldo en medio gigabyte.
+/// Tope del backend; aquí se respeta para no chocar contra su error.
+const MAX_FOTOS_POR_PRODUCTO = 8;
+
+async function compressImage(file: File, maxDim = 1280, quality = 0.75): Promise<string> {
     const dataUrl: string = await new Promise((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(r.result as string);
@@ -320,13 +328,23 @@ export default function ProductsPage() {
             // La foto se guarda como archivo. Reemplazar significa quitar las
             // anteriores: el formulario maneja una sola imagen principal.
             if (photoChanged) {
-                const previas = await api.getProductImageList(productId);
-                for (const img of previas) await api.deleteProductImage(img.id);
+                // Primero entra la nueva y después se quitan las viejas. Al
+                // revés, si la subida fallaba el producto se quedaba sin
+                // ninguna foto y la anterior ya no existía.
+                let previas = await api.getProductImageList(productId);
                 if (photoPreview && photoThumb) {
+                    // Con el cupo lleno hay que hacer sitio; se quita la última,
+                    // nunca la principal, para que si algo falla siga habiendo foto.
+                    while (previas.length >= MAX_FOTOS_POR_PRODUCTO) {
+                        const ultima = previas[previas.length - 1];
+                        await api.deleteProductImage(ultima.id);
+                        previas = previas.slice(0, -1);
+                    }
                     await api.addProductImage({
                         product_id: productId, photo: photoPreview, thumbnail: photoThumb,
                     });
                 }
+                for (const img of previas) await api.deleteProductImage(img.id);
                 invalidateProductImage(productId);
             }
             // Save variants (or clear them if variants were turned off)

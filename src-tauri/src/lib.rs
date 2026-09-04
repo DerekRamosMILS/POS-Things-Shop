@@ -108,7 +108,7 @@ pub fn run() {
 
             purge_old_logs(&conn);
             product_photos::migrar_fotos_incrustadas(&conn);
-            crate::photos::limpiar_huerfanas(&conn);
+            product_photos::incorporar_fotos_en_archivos(&conn);
 
             // Rehydrate still-valid sessions so logins survive restarts.
             let session_map = session::load_sessions(&conn);

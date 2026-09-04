@@ -128,7 +128,7 @@ pub fn build_report(db: &Connection) -> String {
         .unwrap_or(0);
     let _ = writeln!(out, "Respaldos guardados: {}", backups);
     let fotos: i64 = scalar(db, "SELECT COUNT(*) FROM product_images").parse().unwrap_or(0);
-    let _ = writeln!(out, "Fotos de producto: {} ({})", fotos, human_size(crate::photos::espacio_usado()));
+    let _ = writeln!(out, "Fotos de producto: {} ({})", fotos, human_size(crate::photos::espacio_usado(db)));
     let _ = writeln!(out);
 
     // ── Configuración ──

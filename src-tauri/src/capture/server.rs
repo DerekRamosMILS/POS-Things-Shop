@@ -641,16 +641,6 @@ mod tests {
         }
     }
 
-    fn limpiar(db: &rusqlite::Connection) {
-        let nombres: Vec<(String, String)> = db
-            .prepare("SELECT file_name, thumb_name FROM product_images").unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
-            .collect::<Result<Vec<_>, _>>().unwrap();
-        for (f, t) in nombres {
-            crate::photos::borrar(&f, &t);
-        }
-    }
-
     #[test]
     fn capturar_un_producto_le_asigna_su_codigo_y_sus_fotos() {
         let conn = db();
@@ -667,7 +657,6 @@ mod tests {
 
         let fotos: i64 = conn.query_row("SELECT COUNT(*) FROM product_images", [], |r| r.get(0)).unwrap();
         assert_eq!(fotos, 2);
-        limpiar(&conn);
     }
 
     #[test]
@@ -678,7 +667,6 @@ mod tests {
         let activo: i32 = conn.query_row(
             "SELECT is_active FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
         assert_eq!(activo, 0);
-        limpiar(&conn);
     }
 
     #[test]

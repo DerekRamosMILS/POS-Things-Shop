@@ -420,7 +420,7 @@ pub const HTML: &str = r####"
     try {
       for (var i = 0; i < archivos.length; i++) {
         if (fotos.length >= MAX_FOTOS) { aviso('Máximo ' + MAX_FOTOS + ' fotos por producto.', 'bad'); break; }
-        var grande = await reducir(archivos[i], 1600, 0.85);
+        var grande = await reducir(archivos[i], 1280, 0.75);
         var chica = await reducir(archivos[i], 320, 0.7);
         fotos.push({ photo: grande, thumbnail: chica });
         pintarGaleria();

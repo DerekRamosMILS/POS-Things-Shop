@@ -61,11 +61,11 @@ pub fn create_backup(state: State<DbState>, sessions: State<SessionState>, token
     perform_backup(&db)
 }
 
-/// Copia completa para llevarse en una USB: la base y las fotos.
+/// Copia completa para llevarse en una USB.
 ///
-/// Las fotos dejaron de vivir dentro de la base, así que copiar solo el archivo
-/// `.db` producía una copia que al restaurarse traía todo el catálogo sin una
-/// sola imagen. Se escriben las dos cosas en una carpeta con fecha.
+/// Las fotos viven dentro de la base, así que el `.db` ya las lleva. Se sigue
+/// copiando la carpeta `fotos/` mientras queden archivos de la versión anterior
+/// sin incorporar: no cuesta nada y es lo último que se querría perder.
 #[tauri::command]
 pub fn export_database(state: State<DbState>, sessions: State<SessionState>, token: String, path: String) -> Result<String, String> {
     require_admin(&sessions, &token)?;
