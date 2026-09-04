@@ -231,9 +231,11 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'create_user':
         case 'update_user':
         case 'change_password':
+        case 'delete_promotion':
+            return 'Promoción eliminada' as unknown as T;
+
         case 'update_promotion':
         case 'create_promotion':
-        case 'delete_promotion':
         case 'mark_notification_read':
         case 'create_reminder':
         case 'update_expense':
@@ -426,9 +428,10 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return [] as unknown as T;
         case 'create_return':
             return 0 as unknown as T;
+        case 'cancel_layaway':
+            return 'Apartado cancelado' as unknown as T;
         case 'update_customer':
         case 'delete_customer':
-        case 'cancel_layaway':
             return undefined as unknown as T;
         case 'create_customer':
         case 'create_layaway':
@@ -528,7 +531,7 @@ export const deleteExpense = (id: number) => invoke<void>('delete_expense', { id
 export const getPromotions = () => invoke<Promotion[]>('get_promotions');
 export const createPromotion = (data: CreatePromotionDto) => invoke<Promotion>('create_promotion', { data });
 export const updatePromotion = (data: Promotion) => invoke<void>('update_promotion', { data });
-export const deletePromotion = (id: number) => invoke<void>('delete_promotion', { id });
+export const deletePromotion = (id: number) => invoke<string>('delete_promotion', { id });
 
 // Reports
 export const getDashboardStats = () => invoke<DashboardStats>('get_dashboard_stats');
@@ -613,5 +616,5 @@ export const getLayawayDetail = (layawayId: number) => invoke<Layaway>('get_laya
 export const addLayawayPayment = (layawayId: number, amount: number, paymentMethod: string) =>
     invoke<Layaway>('add_layaway_payment', { layawayId, amount, paymentMethod });
 export const completeLayaway = (layawayId: number) => invoke<Layaway>('complete_layaway', { layawayId });
-export const cancelLayaway = (layawayId: number) => invoke<void>('cancel_layaway', { layawayId });
+export const cancelLayaway = (layawayId: number) => invoke<string>('cancel_layaway', { layawayId });
 

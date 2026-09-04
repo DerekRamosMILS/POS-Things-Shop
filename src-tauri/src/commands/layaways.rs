@@ -321,11 +321,24 @@ pub fn abonar_apartado(
         ));
     }
 
-    post_layaway_payment(db, layaway_id, amount, payment_method, user_id)?;
-    db.execute(
-        "UPDATE layaways SET paid = paid + ?1 WHERE id = ?2",
-        params![amount, layaway_id],
-    ).map_err(|e| e.to_string())?;
+    // El abono toca tres tablas: el pago, el corte y el saldo del apartado. Sin
+    // transacción, un fallo a la mitad dejaba el dinero contado en la caja y el
+    // saldo del cliente sin bajar.
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        post_layaway_payment(db, layaway_id, amount, payment_method, user_id)?;
+        db.execute(
+            "UPDATE layaways SET paid = paid + ?1 WHERE id = ?2",
+            params![amount, layaway_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
 
     get_layaway_internal(db, layaway_id)
 }
@@ -362,14 +375,20 @@ pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<L
 }
 
 #[tauri::command]
-pub fn cancel_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<(), String> {
+pub fn cancel_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<String, String> {
     let user_id = require_admin(&sessions, &token)?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
     cancelar_apartado(&db, user_id, layaway_id)
 }
 
 /// Núcleo de la cancelación, con la conexión explícita.
-pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i64) -> Result<(), String> {
+pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i64) -> Result<String, String> {
+    // Lo abonado no se mueve solo: si se le regresa a la clienta, ese efectivo
+    // sale del cajón y el corte tiene que enterarse. El sistema no puede saber
+    // qué se acordó, así que lo dice en voz alta en vez de callarlo.
+    let abonado: f64 = db
+        .query_row("SELECT paid FROM layaways WHERE id = ?1", params![layaway_id], |r| r.get(0))
+        .unwrap_or(0.0);
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
@@ -429,7 +448,22 @@ pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i6
     match result {
         Ok(()) => {
             db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
-            Ok(())
+            if abonado > 0.0 {
+                db.execute(
+                    "INSERT INTO app_logs (level, module, message, user_id)
+                     VALUES ('warn', 'apartados', ?1, ?2)",
+                    params![
+                        format!("Apartado {} cancelado con {:.2} abonados", layaway_id, abonado),
+                        user_id
+                    ],
+                ).ok();
+                Ok(format!(
+                    "Apartado cancelado y mercancía devuelta al inventario. Tenía {:.2} abonados: si se los regresas en efectivo, anótalo como gasto para que el corte cuadre.",
+                    abonado
+                ))
+            } else {
+                Ok("Apartado cancelado y mercancía devuelta al inventario.".to_string())
+            }
         }
         Err(e) => {
             db.execute_batch("ROLLBACK;").ok();

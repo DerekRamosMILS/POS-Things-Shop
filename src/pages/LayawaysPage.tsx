@@ -79,13 +79,21 @@ export default function LayawaysPage() {
 
     const handleCancel = async () => {
         if (!detail || !user) return;
-        const ok = await confirm({ title: 'Cancelar apartado', message: 'Se regresará el stock reservado al inventario. ¿Continuar?', variant: 'danger', confirmLabel: 'Cancelar apartado' });
+        const abonado = detail.paid;
+        const ok = await confirm({
+            title: 'Cancelar apartado',
+            message: abonado > 0
+                ? `La mercancía vuelve al inventario. Ojo: esta clienta ya abonó ${formatCurrency(abonado)}; si le regresas el dinero, anótalo después como gasto para que el corte cuadre. ¿Continuar?`
+                : 'Se regresará el stock reservado al inventario. ¿Continuar?',
+            variant: 'danger',
+            confirmLabel: 'Cancelar apartado',
+        });
         if (!ok) return;
         setProcessing(true);
         try {
-            await api.cancelLayaway(detail.id);
+            const mensaje = await api.cancelLayaway(detail.id);
             setDetail(null); load();
-            showToast('Apartado cancelado', 'success');
+            showToast(mensaje, 'success');
         } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
     };
 

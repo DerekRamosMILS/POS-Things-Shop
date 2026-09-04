@@ -59,9 +59,15 @@ export const useCartStore = create<CartStore>((set, get) => ({
                 return { items: state.items.filter((i) => cartLineId(i) !== lineId) };
             }
             return {
-                items: state.items.map((i) =>
-                    cartLineId(i) === lineId ? { ...i, quantity: Math.min(quantity, stockOf(i)) } : i
-                ),
+                items: state.items.map((i) => {
+                    if (cartLineId(i) !== lineId) return i;
+                    const q = Math.min(quantity, stockOf(i));
+                    // El descuento se capturó contra la cantidad anterior. Al
+                    // bajarla podía acabar valiendo más que la línea entera y
+                    // el total en pantalla se iba a negativo, aunque el
+                    // servidor luego lo recortara al cobrar.
+                    return { ...i, quantity: q, discount: Math.min(i.discount, i.product.sale_price * q) };
+                }),
             };
         });
     },

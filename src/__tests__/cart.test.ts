@@ -79,3 +79,31 @@ describe('carrito', () => {
         expect(useCartStore.getState().getTotal()).toBe(0);
     });
 });
+
+describe('descuento y cantidad', () => {
+    beforeEach(() => useCartStore.getState().clear());
+
+    it('al bajar la cantidad el descuento no puede valer más que la línea', () => {
+        const { addItem, updateQuantity, applyDiscount } = useCartStore.getState();
+        const p = product({ sale_price: 100, stock: 10 });
+        addItem(p);
+        updateQuantity('p1', 3);
+        applyDiscount('p1', 250);
+
+        updateQuantity('p1', 1);
+
+        const linea = useCartStore.getState().items[0];
+        expect(linea.discount).toBe(100);
+        expect(useCartStore.getState().getTotal()).toBe(0);
+    });
+
+    it('subir la cantidad deja el descuento como estaba', () => {
+        const { addItem, updateQuantity, applyDiscount } = useCartStore.getState();
+        addItem(product({ sale_price: 100, stock: 10 }));
+        applyDiscount('p1', 40);
+        updateQuantity('p1', 4);
+
+        expect(useCartStore.getState().items[0].discount).toBe(40);
+        expect(useCartStore.getState().getTotal()).toBe(360);
+    });
+});
