@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rusqlite::params;
 use tauri::State;
 
@@ -226,12 +228,17 @@ pub fn registrar_venta(
             unit_cost: Cents,
             discount: Cents,
             line_subtotal: Cents,
-            prev_stock: i32,
             variant_id: Option<i64>,
             variant_label: Option<String>,
         }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
         let mut subtotal = Cents::ZERO; // bruto, antes de cualquier descuento
+
+        // Lo que los renglones anteriores de esta misma venta ya apartaron. Sin
+        // esto, dos renglones del mismo producto se miden los dos contra la
+        // existencia completa y entre ambos venden más de lo que hay.
+        let mut apartado_producto: HashMap<i64, i32> = HashMap::new();
+        let mut apartado_variante: HashMap<i64, i32> = HashMap::new();
 
         for item in &data.items {
             if item.quantity <= 0 {
@@ -254,9 +261,11 @@ pub fn registrar_venta(
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|_| "La variante seleccionada no existe".to_string())?;
-                (Some(vid), Some(variant_label(&size, &color)), vstock)
+                let ya = apartado_variante.get(&vid).copied().unwrap_or(0);
+                (Some(vid), Some(variant_label(&size, &color)), vstock - ya)
             } else {
-                (None, None, product_stock)
+                let ya = apartado_producto.get(&item.product_id).copied().unwrap_or(0);
+                (None, None, product_stock - ya)
             };
 
             if available < item.quantity {
@@ -265,6 +274,11 @@ pub fn registrar_venta(
                     "Stock insuficiente para '{}{}'. Disponible: {}, Solicitado: {}",
                     name, label, available, item.quantity
                 ));
+            }
+
+            *apartado_producto.entry(item.product_id).or_insert(0) += item.quantity;
+            if let Some(vid) = variant_id {
+                *apartado_variante.entry(vid).or_insert(0) += item.quantity;
             }
 
             // Un descuento de línea nunca puede superar lo que vale la línea.
@@ -285,7 +299,6 @@ pub fn registrar_venta(
                 unit_cost: Cents::from_pesos(cost),
                 discount,
                 line_subtotal,
-                prev_stock: product_stock,
                 variant_id,
                 variant_label,
             });
@@ -391,12 +404,22 @@ pub fn registrar_venta(
                 ],
             ).map_err(|e| e.to_string())?;
 
-            let new_stock = line.prev_stock - line.quantity;
+            // La existencia se lee aquí y se descuenta de forma relativa. Con
+            // una foto tomada al armar los renglones, dos tallas del mismo
+            // vestido partían las dos del mismo número y la segunda deshacía el
+            // descuento de la primera.
+            let prev_stock: i32 = db
+                .query_row(
+                    "SELECT stock FROM products WHERE id = ?1",
+                    params![line.product_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let new_stock = prev_stock - line.quantity;
 
-            // Product-level aggregate stock always decreases.
             db.execute(
-                "UPDATE products SET stock = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
-                params![new_stock, line.product_id],
+                "UPDATE products SET stock = stock - ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+                params![line.quantity, line.product_id],
             ).map_err(|e| e.to_string())?;
 
             // Variant-level stock, when applicable.
@@ -412,7 +435,7 @@ pub fn registrar_venta(
                 "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
                  VALUES (?1, 'sale', ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    line.product_id, -line.quantity, line.prev_stock,
+                    line.product_id, -line.quantity, prev_stock,
                     new_stock, sale_id, reason, user_id
                 ],
             ).map_err(|e| e.to_string())?;
@@ -1096,6 +1119,42 @@ mod integracion {
                 }),
             ).unwrap()
         }
+    }
+
+    #[test]
+    fn dos_tallas_del_mismo_modelo_descuentan_las_dos() {
+        // El caso normal de una tienda de ropa: la clienta se lleva el mismo
+        // vestido en mediana y en grande. Son dos renglones del mismo producto.
+        let t = Tienda::nueva().con_caja(500.0);
+        let vestido = t.producto("VES", 499.0, 200.0, 0);
+        t.db.execute(
+            "INSERT INTO product_variants (id, product_id, size, stock) VALUES
+             (1, ?1, 'M', 5), (2, ?1, 'G', 5)", params![vestido]).unwrap();
+        t.db.execute("UPDATE products SET has_variants = 1, stock = 10 WHERE id = ?1",
+                     params![vestido]).unwrap();
+
+        let mut data = venta(vec![]);
+        data.items = vec![
+            CreateSaleItemDto { product_id: vestido, quantity: 2, unit_price: 0.0, discount: 0.0, variant_id: Some(1) },
+            CreateSaleItemDto { product_id: vestido, quantity: 3, unit_price: 0.0, discount: 0.0, variant_id: Some(2) },
+        ];
+        t.cobrar(data).unwrap();
+
+        let m: i32 = t.db.query_row("SELECT stock FROM product_variants WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let g: i32 = t.db.query_row("SELECT stock FROM product_variants WHERE id = 2", [], |r| r.get(0)).unwrap();
+        assert_eq!((m, g), (3, 2), "cada talla descuenta lo suyo");
+        assert_eq!(t.stock(vestido), 5, "el total del producto es la suma de sus tallas");
+    }
+
+    #[test]
+    fn el_mismo_producto_en_dos_renglones_no_puede_rebasar_la_existencia() {
+        let t = Tienda::nueva().con_caja(500.0);
+        let blusa = t.producto("BLU", 299.0, 100.0, 5);
+
+        let error = t.cobrar(venta(vec![(blusa, 3), (blusa, 3)]));
+
+        assert!(error.is_err(), "seis piezas de cinco no deberían venderse");
+        assert_eq!(t.stock(blusa), 5, "una venta rechazada no toca el inventario");
     }
 
     fn venta(items: Vec<(i64, i32)>) -> CreateSaleDto {

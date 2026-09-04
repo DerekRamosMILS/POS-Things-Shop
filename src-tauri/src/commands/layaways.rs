@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rusqlite::params;
 use tauri::State;
 
@@ -121,9 +123,15 @@ pub fn registrar_apartado(
     let result = (|| -> Result<Layaway, String> {
         let folio = crate::folios::siguiente(db, crate::folios::Serie::Apartados)?;
 
-        struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: f64, prev_stock: i32, variant_id: Option<i64>, variant_label: Option<String> }
+        struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: f64, variant_id: Option<i64>, variant_label: Option<String> }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
         let mut total = 0.0;
+
+        // Lo que los renglones anteriores de este mismo apartado ya reservaron:
+        // sin esto, dos tallas del mismo vestido se miden las dos contra la
+        // existencia completa.
+        let mut apartado_producto: HashMap<i64, i32> = HashMap::new();
+        let mut apartado_variante: HashMap<i64, i32> = HashMap::new();
 
         for item in &data.items {
             if item.quantity <= 0 {
@@ -143,18 +151,26 @@ pub fn registrar_apartado(
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|_| "La variante seleccionada no existe".to_string())?;
-                (Some(vid), Some(variant_label(&size, &color)), vstock)
+                let ya = apartado_variante.get(&vid).copied().unwrap_or(0);
+                (Some(vid), Some(variant_label(&size, &color)), vstock - ya)
             } else {
-                (None, None, product_stock)
+                let ya = apartado_producto.get(&item.product_id).copied().unwrap_or(0);
+                (None, None, product_stock - ya)
             };
 
             if available < item.quantity {
                 let label = variant_label.clone().map(|l| format!(" ({})", l)).unwrap_or_default();
                 return Err(format!("Stock insuficiente para '{}{}'. Disponible: {}", name, label, available));
             }
+
+            *apartado_producto.entry(item.product_id).or_insert(0) += item.quantity;
+            if let Some(vid) = variant_id {
+                *apartado_variante.entry(vid).or_insert(0) += item.quantity;
+            }
+
             let subtotal = round2(price * item.quantity as f64);
             total += subtotal;
-            lines.push(Line { product_id: item.product_id, name, sku, quantity: item.quantity, unit_price: price, unit_cost: cost, subtotal, prev_stock: product_stock, variant_id, variant_label });
+            lines.push(Line { product_id: item.product_id, name, sku, quantity: item.quantity, unit_price: price, unit_cost: cost, subtotal, variant_id, variant_label });
         }
         total = round2(total);
 
@@ -176,10 +192,18 @@ pub fn registrar_apartado(
             ).map_err(|e| e.to_string())?;
 
             // Reserve stock (moved out of available inventory).
-            let new_stock = line.prev_stock - line.quantity;
+            //
+            // Se lee aquí y se descuenta de forma relativa: con una foto tomada
+            // al armar los renglones, dos tallas del mismo vestido partían las
+            // dos del mismo número y la segunda deshacía la reserva de la
+            // primera.
+            let prev_stock: i32 = db
+                .query_row("SELECT stock FROM products WHERE id = ?1", params![line.product_id], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            let new_stock = prev_stock - line.quantity;
             db.execute(
-                "UPDATE products SET stock = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
-                params![new_stock, line.product_id],
+                "UPDATE products SET stock = stock - ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+                params![line.quantity, line.product_id],
             ).map_err(|e| e.to_string())?;
             if let Some(vid) = line.variant_id {
                 db.execute(
@@ -191,7 +215,7 @@ pub fn registrar_apartado(
             db.execute(
                 "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
                  VALUES (?1, 'adjustment', ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![line.product_id, -line.quantity, line.prev_stock, new_stock, layaway_id, reason, user_id],
+                params![line.product_id, -line.quantity, prev_stock, new_stock, layaway_id, reason, user_id],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -478,6 +502,60 @@ mod tests {
         ).unwrap();
         db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
         db
+    }
+
+    #[test]
+    fn apartar_dos_tallas_del_mismo_modelo_reserva_las_dos() {
+        // Igual que en una venta: dos renglones del mismo producto partían los
+        // dos de la misma foto del inventario y el segundo deshacía al primero.
+        let db = tienda();
+        abrir_caja(&db);
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, has_variants)
+             VALUES (7, 'VES', 'Vestido', 200.0, 499.0, 10, 1)", []).unwrap();
+        db.execute(
+            "INSERT INTO product_variants (id, product_id, size, stock) VALUES (1, 7, 'M', 5), (2, 7, 'G', 5)",
+            []).unwrap();
+
+        registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![
+                CreateLayawayItemDto { product_id: 7, quantity: 2, unit_price: 0.0, variant_id: Some(1) },
+                CreateLayawayItemDto { product_id: 7, quantity: 3, unit_price: 0.0, variant_id: Some(2) },
+            ],
+            initial_payment: 0.0,
+            payment_method: "cash".into(),
+            notes: None,
+            due_date: None,
+        }).unwrap();
+
+        let total: i32 = db.query_row("SELECT stock FROM products WHERE id = 7", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 5, "el total del producto es la suma de sus tallas");
+    }
+
+    #[test]
+    fn no_se_aparta_mas_de_lo_que_hay_entre_varios_renglones() {
+        let db = tienda();
+        abrir_caja(&db);
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (8, 'BLU', 'Blusa', 100.0, 299.0, 5)", []).unwrap();
+
+        let error = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![
+                CreateLayawayItemDto { product_id: 8, quantity: 3, unit_price: 0.0, variant_id: None },
+                CreateLayawayItemDto { product_id: 8, quantity: 3, unit_price: 0.0, variant_id: None },
+            ],
+            initial_payment: 0.0,
+            payment_method: "cash".into(),
+            notes: None,
+            due_date: None,
+        });
+
+        assert!(error.is_err(), "seis piezas de cinco no deberían apartarse");
+        let quedan: i32 = db.query_row("SELECT stock FROM products WHERE id = 8", [], |r| r.get(0)).unwrap();
+        assert_eq!(quedan, 5, "un apartado rechazado no toca el inventario");
     }
 
     fn abrir_caja(db: &rusqlite::Connection) {
