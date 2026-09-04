@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import { almacenSeguro } from './almacen';
 import type { CartItem, CartVariant, Product } from '../types';
 
 // A cart line is identified by product + variant, so the same product can appear
@@ -27,7 +29,11 @@ interface CartStore {
     getItemCount: () => number;
 }
 
-export const useCartStore = create<CartStore>((set, get) => ({
+// El carrito se guarda igual que las órdenes en espera. Si la aplicación se
+// cierra —un corte de luz, un cierre por error— con la venta a medias, volver a
+// abrirla la encuentra tal cual en vez de obligar a rearmarla con la fila
+// esperando.
+export const useCartStore = create<CartStore>()(persist((set, get) => ({
     items: [],
 
     addItem: (product: Product, variant?: CartVariant | null) => {
@@ -90,4 +96,4 @@ export const useCartStore = create<CartStore>((set, get) => ({
     getTotal: () => get().getSubtotal() - get().getDiscountTotal(),
 
     getItemCount: () => get().items.reduce((sum, item) => sum + item.quantity, 0),
-}));
+}), { name: 'things-shop-cart', storage: almacenSeguro }));

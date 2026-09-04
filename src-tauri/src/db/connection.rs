@@ -146,12 +146,24 @@ pub fn apply_pending_restore(db_path: &std::path::Path) {
         let sidecar = PathBuf::from(format!("{}{}", db_path.to_string_lossy(), ext));
         let _ = fs::remove_file(sidecar);
     }
-    match fs::copy(&pending, db_path) {
+    // Se copia a un archivo aparte y se renombra encima. Renombrar es atómico
+    // dentro del mismo disco: o queda la base vieja entera o la nueva entera,
+    // nunca una copia a medias porque se acabó el espacio o se fue la luz.
+    let temporal = PathBuf::from(format!("{}.restaurando", db_path.to_string_lossy()));
+    if let Err(e) = fs::copy(&pending, &temporal) {
+        log::error!("Failed to apply pending restore: {}", e);
+        let _ = fs::remove_file(&temporal);
+        return;
+    }
+    match fs::rename(&temporal, db_path) {
         Ok(_) => {
             let _ = fs::remove_file(&pending);
             log::info!("Restored database from staged backup");
         }
-        Err(e) => log::error!("Failed to apply pending restore: {}", e),
+        Err(e) => {
+            log::error!("Failed to apply pending restore: {}", e);
+            let _ = fs::remove_file(&temporal);
+        }
     }
 }
 

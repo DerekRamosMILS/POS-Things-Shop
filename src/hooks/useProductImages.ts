@@ -11,12 +11,27 @@ import * as api from '../api';
  */
 
 const cache = new Map<number, string | null>();
+/// Tope de miniaturas recordadas. Cada una son unos 16 KB de texto; sin tope,
+/// pasear por un catálogo grande las va acumulando todas hasta cerrar la app.
+/// Se olvidan las más viejas, que es exactamente lo que ya no se está viendo.
+const MAX_EN_MEMORIA = 400;
 let pending = new Set<number>();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const listeners = new Set<() => void>();
 
 /** Tope alineado con el que impone el backend. */
 const BATCH_LIMIT = 60;
+
+/** Guarda una miniatura y olvida las más viejas si ya son demasiadas. */
+function recordar(id: number, url: string | null) {
+    cache.delete(id);
+    cache.set(id, url);
+    while (cache.size > MAX_EN_MEMORIA) {
+        const masVieja = cache.keys().next();
+        if (masVieja.done) break;
+        cache.delete(masVieja.value);
+    }
+}
 
 async function flush() {
     flushTimer = null;
@@ -29,10 +44,10 @@ async function flush() {
         const rows = await api.getProductImages(ids);
         const found = new Map(rows);
         // Recordar también los que no tienen foto evita volver a preguntarlas.
-        for (const id of ids) cache.set(id, found.get(id) ?? null);
+        for (const id of ids) recordar(id, found.get(id) ?? null);
     } catch {
         // Una foto que no carga no debe romper la venta: se queda con iniciales.
-        for (const id of ids) cache.set(id, null);
+        for (const id of ids) recordar(id, null);
     }
 
     listeners.forEach(fn => fn());

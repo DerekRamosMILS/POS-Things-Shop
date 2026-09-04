@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { almacenSeguro } from './almacen';
 import type { CartItem, Promotion } from '../types';
 
 export type ServiceType = 'direct' | 'layaway';
@@ -25,6 +26,6 @@ export const useHoldsStore = create<HoldsStore>()(
             holds: [null, null, null],
             setHolds: (holds) => set({ holds }),
         }),
-        { name: 'things-shop-holds' }
+        { name: 'things-shop-holds', storage: almacenSeguro }
     )
 );

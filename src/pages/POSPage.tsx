@@ -557,6 +557,9 @@ export default function POSPage() {
                 });
             }
             // Reflect the sold units in the on-screen catalog immediately.
+            // Las tallas se recargan de la base la próxima vez que se abra el
+            // selector: descontarlas aquí a mano se desincronizaba en cuanto
+            // otra caja o el celular tocaban el mismo producto.
             const soldMap = new Map<number, number>();
             saleItems.forEach(i => soldMap.set(i.product.id, (soldMap.get(i.product.id) || 0) + i.quantity));
             const applySold = (list: Product[]) => list.map(p => soldMap.has(p.id) ? { ...p, stock: Math.max(0, p.stock - (soldMap.get(p.id) || 0)) } : p);
