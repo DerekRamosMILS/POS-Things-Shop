@@ -57,7 +57,7 @@ pub fn backup_into(
 #[tauri::command]
 pub fn create_backup(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     perform_backup(&db)
 }
 
@@ -69,7 +69,7 @@ pub fn create_backup(state: State<DbState>, sessions: State<SessionState>, token
 #[tauri::command]
 pub fn export_database(state: State<DbState>, sessions: State<SessionState>, token: String, path: String) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     exportar_a(&db, &get_db_path(), &crate::photos::photos_dir(), std::path::Path::new(&path))
 }
@@ -134,7 +134,7 @@ pub fn restore_backup(state: State<DbState>, sessions: State<SessionState>, toke
 
     // Flush current WAL so the pending copy is complete/consistent.
     {
-        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let db = state.conn();
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
     }
 

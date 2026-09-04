@@ -37,7 +37,7 @@ fn validar(
 #[tauri::command]
 pub fn get_promotions(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Promotion>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare(
         "SELECT id, name, description, discount_type, discount_value, start_date, end_date, is_active, applies_to, target_id, created_at
@@ -69,7 +69,7 @@ pub fn get_promotions(state: State<DbState>, sessions: State<SessionState>, toke
 pub fn create_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreatePromotionDto) -> Result<Promotion, String> {
     require_admin(&sessions, &token)?;
     validar(&data.name, &data.discount_type, data.discount_value, &data.start_date, &data.end_date)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "INSERT INTO promotions (name, description, discount_type, discount_value, start_date, end_date, is_active, applies_to, target_id)
@@ -101,7 +101,7 @@ pub fn create_promotion(state: State<DbState>, sessions: State<SessionState>, to
 pub fn update_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, data: Promotion) -> Result<(), String> {
     require_admin(&sessions, &token)?;
     validar(&data.name, &data.discount_type, data.discount_value, &data.start_date, &data.end_date)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "UPDATE promotions SET name = ?1, description = ?2, discount_type = ?3, discount_value = ?4,
@@ -117,7 +117,7 @@ pub fn update_promotion(state: State<DbState>, sessions: State<SessionState>, to
 #[tauri::command]
 pub fn delete_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     // Las ventas guardan con qué promoción se cobraron. Borrarla rompía la
     // llave foránea y salía un error de base de datos que nadie entiende; y si

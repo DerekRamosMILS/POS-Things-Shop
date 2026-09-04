@@ -100,7 +100,7 @@ pub fn add_product_image(
     data: NuevaFotoDto,
 ) -> Result<ProductImage, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     agregar_foto(&db, &data)
 }
 
@@ -113,7 +113,7 @@ pub fn get_product_image_list(
     product_id: i64,
 ) -> Result<Vec<ProductImage>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db
         .prepare(
@@ -147,7 +147,7 @@ pub fn get_product_photo(
     image_id: i64,
 ) -> Result<String, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let file_name: String = db
         .query_row(
@@ -168,7 +168,7 @@ pub fn delete_product_image(
     image_id: i64,
 ) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let (product_id, file_name, thumb_name): (i64, String, String) = db
         .query_row(
@@ -197,7 +197,7 @@ pub fn reorder_product_images(
     image_ids: Vec<i64>,
 ) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     for (posicion, id) in image_ids.iter().enumerate() {
         db.execute(
@@ -246,7 +246,7 @@ pub fn get_product_images(
         return Err("Demasiadas imágenes en una sola petición".to_string());
     }
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let marcadores = vec!["?"; product_ids.len()].join(",");
 
     // Solo la principal de cada producto: los listados muestran una.

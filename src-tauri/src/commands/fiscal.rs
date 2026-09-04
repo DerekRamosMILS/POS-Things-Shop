@@ -158,7 +158,7 @@ pub fn exportar_pendientes_factura(
     hasta: Option<String>,
 ) -> Result<usize, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut out = String::from(
         "folio,fecha,rfc,razon_social,regimen_fiscal,cp_fiscal,uso_cfdi,\
@@ -234,7 +234,7 @@ pub fn marcar_facturada(
         return Err("El folio fiscal (UUID) no tiene el formato correcto".to_string());
     }
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let changed = db
         .execute(
             "UPDATE sales SET uuid_fiscal = ?1, facturada_at = datetime('now','localtime')

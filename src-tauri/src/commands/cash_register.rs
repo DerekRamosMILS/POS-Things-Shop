@@ -68,7 +68,7 @@ pub fn open_register_id(db: &rusqlite::Connection) -> Option<i64> {
 pub fn open_register(state: State<DbState>, sessions: State<SessionState>, token: String, data: OpenRegisterDto) -> Result<CashRegister, String> {
     // The cashier on record is the authenticated user, never a client-sent id.
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     if data.opening_amount < 0.0 {
         return Err("El fondo de apertura no puede ser negativo".to_string());
@@ -102,7 +102,7 @@ pub fn open_register(state: State<DbState>, sessions: State<SessionState>, token
 #[tauri::command]
 pub fn close_register(state: State<DbState>, sessions: State<SessionState>, token: String, data: CloseRegisterDto) -> Result<CashRegister, String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     cerrar_caja(&db, user_id, data)
 }
 
@@ -112,6 +112,10 @@ pub fn cerrar_caja(
     user_id: i64,
     data: CloseRegisterDto,
 ) -> Result<CashRegister, String> {
+    if !data.closing_amount.is_finite() || data.closing_amount < 0.0 {
+        return Err("El efectivo contado no puede ser negativo".to_string());
+    }
+
     let register = get_open_register_internal(db)?;
 
     let expected = expected_cash(&register);
@@ -135,13 +139,60 @@ pub fn cerrar_caja(
         ],
     ).ok();
 
+    respaldar_al_cerrar(db);
+
     get_register_by_id(db, register.id)
+}
+
+/// Respalda la base al cerrar el turno, si el ajuste lo pide.
+///
+/// Existía el interruptor en Ajustes y no lo leía nadie: la tienda creía tener
+/// respaldos automáticos y no tenía ninguno. El cierre de turno es el momento
+/// natural —una vez al día, sin nadie formado— y es la única rutina por la que
+/// se pasa todos los días sin falta.
+///
+/// Que falle el respaldo no puede impedir cerrar la caja: queda en la bitácora.
+fn respaldar_al_cerrar(db: &rusqlite::Connection) {
+    let activado = db
+        .query_row(
+            "SELECT value FROM system_config WHERE key = 'auto_backup'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|v| matches!(v.trim(), "1" | "true" | "si" | "sí"))
+        .unwrap_or(true);
+
+    if !activado {
+        return;
+    }
+
+    // Una base en memoria —las pruebas— no tiene archivo que copiar.
+    if db.path().map(|p| p.is_empty()).unwrap_or(true) {
+        return;
+    }
+
+    match crate::commands::backup::perform_backup(db) {
+        Ok(nombre) => {
+            log::info!("Respaldo automático al cerrar turno: {}", nombre);
+            db.execute(
+                "INSERT INTO app_logs (level, module, message) VALUES ('info', 'respaldo', ?1)",
+                params![format!("Respaldo automático al cerrar turno: {}", nombre)],
+            ).ok();
+        }
+        Err(e) => {
+            log::error!("No se pudo respaldar al cerrar el turno: {}", e);
+            db.execute(
+                "INSERT INTO app_logs (level, module, message) VALUES ('error', 'respaldo', ?1)",
+                params![format!("Falló el respaldo automático al cerrar turno: {}", e)],
+            ).ok();
+        }
+    }
 }
 
 #[tauri::command]
 pub fn get_open_register(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Option<CashRegister>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     match get_open_register_internal(&db) {
         Ok(reg) => Ok(Some(reg)),
@@ -152,7 +203,7 @@ pub fn get_open_register(state: State<DbState>, sessions: State<SessionState>, t
 #[tauri::command]
 pub fn get_register_history(state: State<DbState>, sessions: State<SessionState>, token: String, limit: Option<i32>) -> Result<Vec<CashRegister>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let limit = limit.unwrap_or(30);
 
     let mut stmt = db.prepare(&format!(

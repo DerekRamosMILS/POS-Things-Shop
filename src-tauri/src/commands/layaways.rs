@@ -100,7 +100,7 @@ fn post_layaway_payment(
 #[tauri::command]
 pub fn create_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateLayawayDto) -> Result<Layaway, String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_apartado(&db, user_id, data)
 }
 
@@ -246,7 +246,7 @@ pub fn registrar_apartado(
 #[tauri::command]
 pub fn get_layaways(state: State<DbState>, sessions: State<SessionState>, token: String, status: Option<String>) -> Result<Vec<Layaway>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let (sql, has_filter) = match status {
         Some(_) => (format!("{} WHERE l.status = ?1 ORDER BY l.created_at DESC", SEL), true),
@@ -269,7 +269,7 @@ pub fn get_layaways(state: State<DbState>, sessions: State<SessionState>, token:
 #[tauri::command]
 pub fn get_layaway_detail(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<Layaway, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     get_layaway_internal(&db, layaway_id)
 }
 
@@ -283,7 +283,7 @@ pub fn add_layaway_payment(
     payment_method: String,
 ) -> Result<Layaway, String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     abonar_apartado(&db, user_id, layaway_id, amount, &payment_method)
 }
 
@@ -346,7 +346,7 @@ pub fn abonar_apartado(
 #[tauri::command]
 pub fn complete_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<Layaway, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     entregar_apartado(&db, layaway_id)
 }
 
@@ -377,7 +377,7 @@ pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<L
 #[tauri::command]
 pub fn cancel_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<String, String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     cancelar_apartado(&db, user_id, layaway_id)
 }
 

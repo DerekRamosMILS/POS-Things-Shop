@@ -8,7 +8,7 @@ use crate::session::{require_admin, require_auth, SessionState};
 #[tauri::command]
 pub fn get_suppliers(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Supplier>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare(
         "SELECT * FROM suppliers ORDER BY name ASC"
@@ -39,7 +39,7 @@ pub fn get_suppliers(state: State<DbState>, sessions: State<SessionState>, token
 #[tauri::command]
 pub fn create_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateSupplierDto) -> Result<Supplier, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "INSERT INTO suppliers (name, contact_name, phone, email, address, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -70,7 +70,7 @@ pub fn create_supplier(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn update_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateSupplierDto) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "UPDATE suppliers SET name=?1, contact_name=?2, phone=?3, email=?4, address=?5, notes=?6, is_active=?7, updated_at=datetime('now','localtime') WHERE id=?8",
@@ -83,7 +83,7 @@ pub fn update_supplier(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn delete_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "UPDATE suppliers SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1",

@@ -36,7 +36,7 @@ fn row_to_customer(row: &rusqlite::Row) -> rusqlite::Result<Customer> {
 #[tauri::command]
 pub fn get_customers(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Customer>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let mut stmt = db.prepare(&format!("{} ORDER BY c.name ASC", SEL)).map_err(|e| e.to_string())?;
     let out = stmt
         .query_map([], row_to_customer)
@@ -49,7 +49,7 @@ pub fn get_customers(state: State<DbState>, sessions: State<SessionState>, token
 #[tauri::command]
 pub fn create_customer(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateCustomerDto) -> Result<Customer, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     if data.name.trim().is_empty() {
         return Err("El nombre es requerido".to_string());
     }
@@ -72,7 +72,7 @@ pub fn create_customer(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn update_customer(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateCustomerDto) -> Result<(), String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     validar_datos_fiscales(&data.rfc, &data.regimen_fiscal, &data.cp_fiscal, &data.uso_cfdi)?;
 
     db.execute(
@@ -92,7 +92,7 @@ pub fn update_customer(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn delete_customer(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     db.execute(
         "UPDATE customers SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1",
         params![id],

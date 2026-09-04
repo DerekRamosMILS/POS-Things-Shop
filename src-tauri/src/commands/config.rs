@@ -8,7 +8,7 @@ use crate::session::{require_admin, require_auth, SessionState};
 #[tauri::command]
 pub fn get_all_config(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<SystemConfig>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare("SELECT key, value, description FROM system_config ORDER BY key")
         .map_err(|e| e.to_string())?;
@@ -31,7 +31,7 @@ pub fn get_all_config(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn get_config(state: State<DbState>, sessions: State<SessionState>, token: String, key: String) -> Result<String, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.query_row(
         "SELECT value FROM system_config WHERE key = ?1",
@@ -43,7 +43,7 @@ pub fn get_config(state: State<DbState>, sessions: State<SessionState>, token: S
 #[tauri::command]
 pub fn set_config(state: State<DbState>, sessions: State<SessionState>, token: String, key: String, value: String) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES (?1, ?2, datetime('now','localtime'))",

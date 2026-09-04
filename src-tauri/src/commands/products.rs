@@ -57,7 +57,7 @@ pub fn get_products(
     filters: Option<ProductFilters>,
 ) -> Result<Vec<Product>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let filters = filters.unwrap_or_default();
 
     let mut sql = format!("{} WHERE 1=1", SEL);
@@ -103,7 +103,7 @@ pub fn get_product_by_barcode(
     barcode: String,
 ) -> Result<Option<Product>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let sql = format!("{} WHERE p.barcode = ?1 AND p.is_active = 1", SEL);
     let result = db.query_row(&sql, params![barcode], row_to_product);
@@ -176,14 +176,14 @@ pub fn get_next_sku(
     token: String,
 ) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     siguiente_sku(&db)
 }
 
 #[tauri::command]
 pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, purchase_price, sale_price, stock, min_stock)
@@ -216,7 +216,7 @@ pub fn create_product(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn update_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateProductDto) -> Result<Product, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let old_price: f64 = db
         .query_row("SELECT sale_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
@@ -247,7 +247,7 @@ pub fn update_product(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn delete_product(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     db.execute(
         "UPDATE products SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1",
         params![id],
@@ -273,7 +273,7 @@ pub struct PriceHistoryEntry {
 #[tauri::command]
 pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64) -> Result<Vec<PriceHistoryEntry>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let mut stmt = db.prepare(
         "SELECT ph.id, ph.old_price, ph.new_price, u.full_name, ph.created_at
          FROM price_history ph

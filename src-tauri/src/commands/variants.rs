@@ -23,7 +23,7 @@ const SEL: &str = "SELECT id, product_id, size, color, sku, barcode, stock, is_a
 #[tauri::command]
 pub fn get_variants(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64) -> Result<Vec<ProductVariant>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let mut stmt = db
         .prepare(&format!("{} WHERE product_id = ?1 AND is_active = 1 ORDER BY id ASC", SEL))
         .map_err(|e| e.to_string())?;
@@ -38,7 +38,7 @@ pub fn get_variants(state: State<DbState>, sessions: State<SessionState>, token:
 #[tauri::command]
 pub fn get_variant_by_barcode(state: State<DbState>, sessions: State<SessionState>, token: String, barcode: String) -> Result<Option<ProductVariant>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let result = db.query_row(
         &format!("{} WHERE barcode = ?1 AND is_active = 1", SEL),
         params![barcode],
@@ -57,7 +57,7 @@ pub fn get_variant_by_barcode(state: State<DbState>, sessions: State<SessionStat
 #[tauri::command]
 pub fn save_variants(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64, variants: Vec<SaveVariantDto>) -> Result<Vec<ProductVariant>, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 

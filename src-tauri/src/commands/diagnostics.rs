@@ -161,7 +161,7 @@ pub fn generate_diagnostic_report(
     path: String,
 ) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let report = build_report(&db);
     fs::write(&path, report).map_err(|e| format!("No se pudo guardar el reporte: {}", e))?;

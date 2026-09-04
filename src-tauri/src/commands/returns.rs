@@ -38,7 +38,7 @@ fn default_refund_method() -> String {
 #[tauri::command]
 pub fn create_return(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateReturnDto) -> Result<f64, String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_devolucion(&db, user_id, data)
 }
 

@@ -14,7 +14,7 @@ pub fn get_inventory_movements(
     limit: Option<i32>,
 ) -> Result<Vec<InventoryMovement>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let limit = limit.unwrap_or(200);
 
@@ -81,7 +81,7 @@ pub fn adjust_stock(
     data: AdjustStockDto,
 ) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     ajustar_stock(&db, user_id, data)
 }
 
@@ -153,7 +153,7 @@ pub fn register_purchase(
     data: RegisterPurchaseDto,
 ) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_compra(&db, user_id, data)
 }
 
@@ -230,7 +230,7 @@ pub fn get_low_stock_products(
     token: String,
 ) -> Result<Vec<crate::models::product::Product>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare(
         "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,

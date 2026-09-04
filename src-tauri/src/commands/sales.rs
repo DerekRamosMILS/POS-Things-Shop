@@ -168,7 +168,7 @@ pub fn create_sale(
 ) -> Result<Sale, String> {
     // The seller on record is the authenticated user, never a client-sent id.
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_venta(&db, user_id, cash_register_id, data)
 }
 
@@ -486,7 +486,7 @@ pub fn registrar_venta(
 #[tauri::command]
 pub fn cancel_sale(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     cancelar_venta(&db, user_id, sale_id)
 }
 
@@ -620,7 +620,7 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
 #[tauri::command]
 pub fn get_sales(state: State<DbState>, sessions: State<SessionState>, token: String, filters: Option<SaleFilters>) -> Result<Vec<Sale>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let filters = filters.unwrap_or_default();
 
     let mut sql = String::from(
@@ -698,7 +698,7 @@ pub fn get_sales(state: State<DbState>, sessions: State<SessionState>, token: St
 #[tauri::command]
 pub fn get_sale_detail(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<Sale, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     get_sale_by_id(&db, sale_id)
 }
 

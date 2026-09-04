@@ -54,7 +54,7 @@ const PROFIT_EXPR: &str =
 #[tauri::command]
 pub fn get_dashboard_stats(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<DashboardStats, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let today_sales: f64 = db.query_row(
         "SELECT COALESCE(SUM(total), 0) FROM sales WHERE date(created_at) = date('now','localtime') AND status = 'completed'",
@@ -112,7 +112,7 @@ pub fn get_dashboard_stats(state: State<DbState>, sessions: State<SessionState>,
 #[tauri::command]
 pub fn get_daily_sales_report(state: State<DbState>, sessions: State<SessionState>, token: String, days: Option<i32>) -> Result<Vec<DailySalesReport>, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let days = days.unwrap_or(30);
     let since = format!("-{}", days);
 
@@ -214,7 +214,7 @@ pub fn get_daily_sales_report(state: State<DbState>, sessions: State<SessionStat
 #[tauri::command]
 pub fn get_top_products(state: State<DbState>, sessions: State<SessionState>, token: String, days: Option<i32>, limit: Option<i32>) -> Result<Vec<TopProduct>, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let days = days.unwrap_or(30);
     let limit = limit.unwrap_or(10);
 
@@ -250,7 +250,7 @@ pub fn get_top_products(state: State<DbState>, sessions: State<SessionState>, to
 #[tauri::command]
 pub fn get_cashier_report(state: State<DbState>, sessions: State<SessionState>, token: String, days: Option<i32>) -> Result<Vec<CashierReport>, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let days = days.unwrap_or(30);
     let since = format!("-{}", days);
 

@@ -15,7 +15,7 @@ pub fn create_expense(
     data: CreateExpenseDto,
 ) -> Result<Expense, String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_gasto(&db, user_id, cash_register_id, data)
 }
 
@@ -89,7 +89,7 @@ pub fn registrar_gasto(
 #[tauri::command]
 pub fn get_expenses(state: State<DbState>, sessions: State<SessionState>, token: String, cash_register_id: Option<i64>) -> Result<Vec<Expense>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(cr_id) = cash_register_id {
         (
@@ -137,7 +137,7 @@ pub fn update_expense(state: State<DbState>, sessions: State<SessionState>, toke
     if !data.amount.is_finite() || data.amount <= 0.0 {
         return Err("El gasto tiene que ser mayor a cero".to_string());
     }
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     // Current amount + owning register
     let (old_amount, cr_id): (f64, Option<i64>) = db.query_row(
@@ -172,7 +172,7 @@ pub fn update_expense(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn delete_expense(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let (amount, cr_id): (f64, Option<i64>) = db.query_row(
         "SELECT amount, cash_register_id FROM expenses WHERE id = ?1",

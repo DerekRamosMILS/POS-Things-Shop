@@ -88,7 +88,7 @@ fn clear_failures(db: &rusqlite::Connection, username: &str) {
 
 #[tauri::command]
 pub fn login(state: State<DbState>, sessions: State<SessionState>, data: LoginDto) -> Result<LoginResponse, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let remaining = lockout_remaining(&db, &data.username);
     if remaining > 0 {
@@ -154,7 +154,8 @@ pub fn login(state: State<DbState>, sessions: State<SessionState>, data: LoginDt
 
 #[tauri::command]
 pub fn logout(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<(), String> {
-    if let Ok(db) = state.db.lock() {
+    {
+        let db = state.conn();
         db.execute("DELETE FROM sessions WHERE token = ?1", params![token]).ok();
     }
     revoke_session(&sessions, &token);
@@ -171,7 +172,7 @@ pub fn validate_session(sessions: State<SessionState>, token: String) -> Result<
 #[tauri::command]
 pub fn create_user(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateUserDto) -> Result<User, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let password_hash = hash_password(&data.password)?;
 
@@ -197,7 +198,7 @@ pub fn create_user(state: State<DbState>, sessions: State<SessionState>, token: 
 #[tauri::command]
 pub fn get_users(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<User>, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare(
         &format!("SELECT {} FROM users ORDER BY full_name ASC", USER_COLUMNS)
@@ -215,7 +216,7 @@ pub fn get_users(state: State<DbState>, sessions: State<SessionState>, token: St
 #[tauri::command]
 pub fn update_user(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateUserDto) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     // Never allow removing the last active administrator.
     let cur_role: String = db.query_row(
@@ -256,7 +257,7 @@ pub fn update_user(state: State<DbState>, sessions: State<SessionState>, token: 
 #[tauri::command]
 pub fn change_password(state: State<DbState>, sessions: State<SessionState>, token: String, data: ChangePasswordDto) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let password_hash = hash_password(&data.new_password)?;
 
@@ -278,7 +279,7 @@ pub fn change_password(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn change_own_password(state: State<DbState>, sessions: State<SessionState>, token: String, data: ChangeOwnPasswordDto) -> Result<(), String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let current_hash: String = db.query_row(
         "SELECT password_hash FROM users WHERE id = ?1",

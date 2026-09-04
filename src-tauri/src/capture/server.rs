@@ -357,10 +357,9 @@ async fn crear_producto(
         return fallo(StatusCode::BAD_REQUEST, "Demasiadas fotos".into());
     }
 
-    let db = match ctx.db.lock() {
-        Ok(db) => db,
-        Err(_) => return fallo(StatusCode::INTERNAL_SERVER_ERROR, "Base ocupada".into()),
-    };
+    // Se recupera de un candado envenenado igual que los comandos: un fallo
+    // anterior no debe dejar la captura muerta hasta reiniciar.
+    let db = crate::db::connection::recuperar(ctx.db.lock());
 
     match guardar_producto(&db, entrada) {
         Ok(sku) => (

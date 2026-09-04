@@ -15,6 +15,44 @@ impl DbState {
     pub fn new(conn: Connection) -> Self {
         DbState { db: Arc::new(Mutex::new(conn)) }
     }
+
+    /// La conexión, incluso si un comando anterior reventó mientras la tenía.
+    ///
+    /// Rust marca un candado como envenenado cuando el hilo que lo tenía entra
+    /// en pánico, y a partir de ahí todo intento de tomarlo falla. En una
+    /// aplicación de escritorio eso significa que un solo error deja la caja
+    /// muerta: la ventana sigue abierta, los botones responden y ningún comando
+    /// vuelve a funcionar hasta reiniciar, con la venta a medias perdida.
+    ///
+    /// Aquí se recupera. Lo que sí queda por limpiar es una transacción abierta
+    /// que el pánico dejó a medias: sin cerrarla, la siguiente operación
+    /// fallaría con "cannot start a transaction within a transaction". Se
+    /// deshace, que es lo correcto —esa transacción nunca llegó a completarse.
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        recuperar(self.db.lock())
+    }
+}
+
+/// Devuelve la conexión aunque el candado esté envenenado, dejándola usable.
+pub fn recuperar<'a>(
+    resultado: Result<
+        std::sync::MutexGuard<'a, Connection>,
+        std::sync::PoisonError<std::sync::MutexGuard<'a, Connection>>,
+    >,
+) -> std::sync::MutexGuard<'a, Connection> {
+    match resultado {
+        Ok(guard) => guard,
+        Err(envenenado) => {
+            log::error!(
+                "Un comando anterior falló dejando la base tomada; se recupera y se \
+                 deshace lo que quedara a medias"
+            );
+            let guard = envenenado.into_inner();
+            // Si no había transacción abierta, esto falla y no pasa nada.
+            let _ = guard.execute_batch("ROLLBACK;");
+            guard
+        }
+    }
 }
 
 /// Get the database directory path within the app's data directory
@@ -164,5 +202,67 @@ pub fn purge_old_logs(conn: &Connection) {
         Ok(n) if n > 0 => log::info!("Bitácora purgada: {} registros eliminados", n),
         Ok(_) => {}
         Err(e) => log::warn!("No se pudo purgar la bitácora: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests_candado {
+    use super::*;
+
+    #[test]
+    fn un_panic_no_deja_la_base_inservible() {
+        // Sin esto, un solo error dejaba la caja muerta hasta reiniciar: el
+        // candado quedaba envenenado y ningún comando volvía a funcionar.
+        let estado = DbState::new(Connection::open_in_memory().unwrap());
+        estado
+            .conn()
+            .execute_batch("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);")
+            .unwrap();
+
+        let db = Arc::clone(&estado.db);
+        let reventado = std::thread::spawn(move || {
+            let _guard = db.lock().unwrap();
+            panic!("algo falló con la base tomada");
+        })
+        .join();
+        assert!(reventado.is_err(), "el hilo debía entrar en pánico");
+
+        let cuantos: i64 = estado
+            .conn()
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .expect("la base debe seguir sirviendo");
+        assert_eq!(cuantos, 1);
+    }
+
+    #[test]
+    fn una_transaccion_a_medias_se_deshace_al_recuperar() {
+        let estado = DbState::new(Connection::open_in_memory().unwrap());
+        estado
+            .conn()
+            .execute_batch("CREATE TABLE t (id INTEGER);")
+            .unwrap();
+
+        let db = Arc::clone(&estado.db);
+        let _ = std::thread::spawn(move || {
+            let guard = db.lock().unwrap();
+            guard
+                .execute_batch("BEGIN TRANSACTION; INSERT INTO t VALUES (99);")
+                .unwrap();
+            panic!("se cayó a media transacción");
+        })
+        .join();
+
+        // La conexión vuelve utilizable y lo que quedó a medias no se guardó.
+        let cuantos: i64 = estado
+            .conn()
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cuantos, 0, "la transacción incompleta no debe quedar escrita");
+
+        // Y se puede abrir una nueva sin chocar con la anterior.
+        estado
+            .conn()
+            .execute_batch("BEGIN TRANSACTION; INSERT INTO t VALUES (1); COMMIT;")
+            .expect("debe poder abrirse una transacción nueva");
     }
 }
