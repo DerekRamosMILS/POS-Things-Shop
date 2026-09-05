@@ -244,6 +244,9 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'update_expense':
         case 'delete_expense':
         case 'set_config':
+        case 'dias_sin_copia_externa':
+            return null as unknown as T;
+
         case 'export_database':
             return undefined as unknown as T;
 
@@ -545,6 +548,7 @@ export const getCashierReport = (days?: number) => invoke<CashierReport[]>('get_
 
 // Backup
 export const createBackup = () => invoke<string>('create_backup');
+export const diasSinCopiaExterna = () => invoke<number | null>('dias_sin_copia_externa');
 export const exportDatabase = (path: string) => invoke<string>('export_database', { path });
 export const getBackupList = () => invoke<string[]>('get_backup_list');
 export const getLogPath = () => invoke<string>('get_log_path');

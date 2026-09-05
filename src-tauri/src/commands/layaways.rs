@@ -345,12 +345,17 @@ pub fn complete_layaway(state: State<DbState>, sessions: State<SessionState>, to
 }
 
 /// Núcleo de la entrega, con la conexión explícita.
+///
+/// Entregar es cuando la prenda deja la tienda, así que es cuando se registra
+/// la venta. El inventario ya se descontó al apartar y el dinero ya entró al
+/// corte abono por abono, así que aquí no se toca ninguno de los dos: solo se
+/// deja la venta para que el reporte y las utilidades cuenten lo que de verdad
+/// se vendió.
 pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<Layaway, String> {
-
-    let (status, total, paid): (String, f64, f64) = db.query_row(
-        "SELECT status, total, paid FROM layaways WHERE id = ?1",
+    let (status, total, paid, user_id): (String, f64, f64, i64) = db.query_row(
+        "SELECT status, total, paid, user_id FROM layaways WHERE id = ?1",
         params![layaway_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).map_err(|e| e.to_string())?;
 
     if status != "active" {
@@ -360,12 +365,109 @@ pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<L
         return Err("El apartado aún tiene saldo pendiente".to_string());
     }
 
-    db.execute(
-        "UPDATE layaways SET status = 'completed', completed_at = datetime('now','localtime') WHERE id = ?1",
-        params![layaway_id],
-    ).map_err(|e| e.to_string())?;
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        db.execute(
+            "UPDATE layaways SET status = 'completed', completed_at = datetime('now','localtime') WHERE id = ?1",
+            params![layaway_id],
+        ).map_err(|e| e.to_string())?;
+        registrar_venta_de_entrega(db, layaway_id, user_id, total)
+    })();
+
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
 
     get_layaway_internal(db, layaway_id)
+}
+
+/// Deja la venta que corresponde a un apartado entregado.
+///
+/// Ni inventario ni caja: los dos ya se movieron en su momento. Lo único que
+/// falta es la venta, con sus partidas y su costo, para que el reporte diario y
+/// la utilidad incluyan lo que salió por apartado.
+fn registrar_venta_de_entrega(
+    db: &rusqlite::Connection,
+    layaway_id: i64,
+    user_id: i64,
+    total: f64,
+) -> Result<(), String> {
+    let folio_apartado: String = db
+        .query_row("SELECT folio FROM layaways WHERE id = ?1", params![layaway_id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let customer_id: Option<i64> = db
+        .query_row("SELECT customer_id FROM layaways WHERE id = ?1", params![layaway_id], |r| r.get(0))
+        .unwrap_or(None);
+
+    // Cómo pagó: si usó más de una forma a lo largo de los abonos, es mixto.
+    let metodos: Vec<String> = db
+        .prepare("SELECT DISTINCT payment_method FROM layaway_payments WHERE layaway_id = ?1")
+        .and_then(|mut s| s.query_map(params![layaway_id], |r| r.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
+    let payment_method = match metodos.len() {
+        0 => "cash".to_string(),
+        1 => metodos[0].clone(),
+        _ => "mixed".to_string(),
+    };
+
+    let folio = crate::folios::siguiente(db, crate::folios::Serie::Ventas)?;
+
+    db.execute(
+        "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total,
+                            payment_method, amount_paid, change_amount, notes, customer_id,
+                            layaway_id, terminal_id)
+         VALUES (?1, ?2, NULL, ?3, 0, 0, ?3, ?4, ?3, 0, ?5, ?6, ?7, ?8)",
+        params![
+            folio,
+            user_id,
+            total,
+            payment_method,
+            format!("Entrega del apartado {}", folio_apartado),
+            customer_id,
+            layaway_id,
+            crate::folios::terminal_id(db)
+        ],
+    ).map_err(|e| e.to_string())?;
+    let sale_id = db.last_insert_rowid();
+
+    // El desglose por forma de pago sale de los abonos, tal como se recibieron.
+    let abonos: Vec<(String, f64)> = db
+        .prepare(
+            "SELECT payment_method, SUM(amount) FROM layaway_payments
+             WHERE layaway_id = ?1 GROUP BY payment_method",
+        )
+        .and_then(|mut s| {
+            s.query_map(params![layaway_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })
+        .map_err(|e| e.to_string())?;
+    for (metodo, monto) in abonos {
+        db.execute(
+            "INSERT INTO sale_payments (sale_id, method, amount) VALUES (?1, ?2, ?3)",
+            params![sale_id, metodo, monto],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Las partidas se copian con su costo: sin él la utilidad saldría mal.
+    db.execute(
+        "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku, quantity,
+                                 unit_price, discount, subtotal, unit_cost, variant_id, variant_label)
+         SELECT ?1, product_id, product_name, product_sku, quantity,
+                unit_price, 0, subtotal, unit_cost, variant_id, variant_label
+         FROM layaway_items WHERE layaway_id = ?2",
+        params![sale_id, layaway_id],
+    ).map_err(|e| e.to_string())?;
+
+    db.execute(
+        "INSERT INTO app_logs (level, module, message, user_id) VALUES ('info', 'apartados', ?1, ?2)",
+        params![
+            format!("Apartado {} entregado y registrado como venta {}", folio_apartado, folio),
+            user_id
+        ],
+    ).ok();
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -530,6 +632,73 @@ mod tests {
         ).unwrap();
         db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
         db
+    }
+
+    #[test]
+    fn entregar_un_apartado_lo_deja_registrado_como_venta() {
+        // El reporte de ventas no veía los apartados: una tienda que aparta la
+        // mitad de lo que vende leía la mitad de lo que vendió.
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "VES", 500.0, 10);
+
+        let ap = registrar_apartado(&db, 1, apartado(p, 2, 400.0, "cash")).unwrap();
+        abonar_apartado(&db, 1, ap.id, 600.0, "card").unwrap();
+        entregar_apartado(&db, ap.id).unwrap();
+
+        let (total, metodo, partidas): (f64, String, i64) = db.query_row(
+            "SELECT s.total, s.payment_method,
+                    (SELECT COUNT(*) FROM sale_items WHERE sale_id = s.id)
+             FROM sales s WHERE s.layaway_id = ?1",
+            params![ap.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+
+        assert_eq!(total, 1000.0);
+        assert_eq!(metodo, "mixed", "pagó en efectivo y con tarjeta");
+        assert_eq!(partidas, 1);
+
+        let costo: f64 = db.query_row(
+            "SELECT unit_cost FROM sale_items WHERE sale_id = (SELECT id FROM sales WHERE layaway_id = ?1)",
+            params![ap.id], |r| r.get(0)).unwrap();
+        assert!(costo > 0.0, "sin costo la utilidad saldría mal");
+    }
+
+    #[test]
+    fn la_entrega_no_vuelve_a_tocar_el_inventario_ni_la_caja() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "BLU", 300.0, 10);
+
+        let ap = registrar_apartado(&db, 1, apartado(p, 3, 900.0, "cash")).unwrap();
+        let stock_apartado: i32 = db.query_row(
+            "SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        let efectivo_antes = caja_efectivo(&db);
+
+        entregar_apartado(&db, ap.id).unwrap();
+
+        let stock_despues: i32 = db.query_row(
+            "SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(stock_despues, stock_apartado, "el inventario se descontó al apartar");
+        assert_eq!(caja_efectivo(&db), efectivo_antes, "el dinero entró abono por abono");
+
+        let ventas_en_caja: f64 = db.query_row(
+            "SELECT total_sales FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas_en_caja, 0.0, "el corte no cuenta la entrega dos veces");
+    }
+
+    #[test]
+    fn la_venta_de_una_entrega_no_se_cancela_desde_ventas() {
+        // Cancelarla devolvería al inventario mercancía que esa venta nunca
+        // descontó. Lo que se cancela es el apartado.
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "PAN", 400.0, 10);
+        let ap = registrar_apartado(&db, 1, apartado(p, 1, 400.0, "cash")).unwrap();
+        entregar_apartado(&db, ap.id).unwrap();
+
+        let venta: i64 = db.query_row(
+            "SELECT id FROM sales WHERE layaway_id = ?1", params![ap.id], |r| r.get(0)).unwrap();
+
+        assert!(crate::commands::sales::cancelar_venta(&db, 1, venta).is_err());
     }
 
     #[test]

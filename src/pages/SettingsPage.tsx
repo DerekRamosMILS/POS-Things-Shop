@@ -33,6 +33,10 @@ const IcoLoader   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="
 
 export default function SettingsPage() {
     const [configs, setConfigs] = useState<SystemConfig[]>([]);
+    // Los respaldos de todos los días viven en este mismo disco. La copia que
+    // de verdad protege de que la computadora se muera es la de la USB, y es la
+    // que se olvida: conviene recordarlo cuando lleva tiempo sin hacerse.
+    const [diasSinCopia, setDiasSinCopia] = useState<number | null | undefined>(undefined);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [backupList, setBackupList] = useState<string[]>([]);
@@ -71,6 +75,7 @@ export default function SettingsPage() {
             const c = cAll.filter(cfg => !HIDDEN_KEYS.includes(cfg.key));
             api.getLogPath().then(setLogPath).catch(() => {});
             setConfigs(c); setBackupList(b);
+            api.diasSinCopiaExterna().then(setDiasSinCopia).catch(() => setDiasSinCopia(undefined));
             const vals: Record<string, string> = {};
             c.forEach(cfg => { vals[cfg.key] = cfg.value; });
             setValues(vals);
@@ -118,6 +123,7 @@ export default function SettingsPage() {
             });
             if (!target || Array.isArray(target)) return;
             showToast(await api.exportDatabase(target));
+            setDiasSinCopia(0);
         } catch (err) { showToast(String(err), 'error'); }
         finally { setExporting(false); }
     };
@@ -285,11 +291,23 @@ export default function SettingsPage() {
                         </button>
                     </div>
                 </div>
-                <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 16, lineHeight: 1.5 }}>
-                    Los respaldos se guardan en esta computadora. Copiar a una USB se lleva
-                    también las fotos, que es lo que hay que sacar de aquí de vez en cuando
-                    por si la computadora falla.
+                <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
+                    Cada vez que se cierra el turno se guarda un respaldo en esta computadora.
+                    Copiar a una USB se lleva la base con todas las fotos: eso es lo que hay
+                    que sacar de aquí de vez en cuando, por si la computadora falla.
                 </p>
+                {(diasSinCopia === null || (diasSinCopia !== undefined && diasSinCopia >= 7)) && (
+                    <div style={{
+                        padding: '12px 14px', borderRadius: 12, marginBottom: 16,
+                        background: 'rgba(245,168,66,0.10)', border: '1px solid rgba(245,168,66,0.30)',
+                    }}>
+                        <p style={{ fontSize: 12, color: 'var(--t2)', lineHeight: 1.5 }}>
+                            {diasSinCopia === null
+                                ? 'Todavía no se ha sacado ninguna copia a una USB. Si esta computadora falla, se pierde todo.'
+                                : `Van ${diasSinCopia} días desde la última copia a una USB.`}
+                        </p>
+                    </div>
+                )}
                 {backupList.length === 0 ? (
                     <p style={{ textAlign: 'center', padding: '32px 0', fontSize: 13, color: 'var(--t3)' }}>Sin respaldos disponibles</p>
                 ) : (

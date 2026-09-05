@@ -364,7 +364,7 @@ pub fn restablecer_admin(
 
 /// Ensure at least one admin user exists (called on startup). The seeded
 /// account is flagged so the app forces a password change on first login.
-pub fn ensure_admin_exists(db: &rusqlite::Connection) -> Result<(), String> {
+pub fn ensure_admin_exists(db: &rusqlite::Connection) -> Result<Option<String>, String> {
     let count: i64 = db.query_row(
         "SELECT COUNT(*) FROM users WHERE role = 'admin'",
         [],
@@ -372,7 +372,8 @@ pub fn ensure_admin_exists(db: &rusqlite::Connection) -> Result<(), String> {
     ).map_err(|e| e.to_string())?;
 
     if count == 0 {
-        let password_hash = hash_password("admin1234")?;
+        let clave = clave_inicial();
+        let password_hash = hash_password(&clave)?;
         db.execute(
             "INSERT INTO users (username, password_hash, full_name, role, must_change_password)
              VALUES ('admin', ?1, 'Administrador', 'admin', 1)",
@@ -380,9 +381,28 @@ pub fn ensure_admin_exists(db: &rusqlite::Connection) -> Result<(), String> {
         ).map_err(|e| e.to_string())?;
 
         log::info!("Usuario admin inicial creado; deberá cambiar la contraseña al entrar");
+        return Ok(Some(clave));
     }
 
-    Ok(())
+    Ok(None)
+}
+
+/// Contraseña de un solo uso para el primer arranque.
+///
+/// Antes era la misma en todas las instalaciones y estaba escrita en el código,
+/// que es público. La aplicación obliga a cambiarla al entrar, pero entre que se
+/// instala y que alguien entra, cualquiera que conozca el proyecto puede pasar.
+/// Se genera al azar y se enseña una sola vez.
+fn clave_inicial() -> String {
+    // Sin caracteres que se confundan al leerlos de una pantalla: 0/O, 1/l/I.
+    const ALFABETO: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let bytes = uuid::Uuid::new_v4();
+    bytes
+        .as_bytes()
+        .iter()
+        .take(10)
+        .map(|b| ALFABETO[*b as usize % ALFABETO.len()] as char)
+        .collect()
 }
 
 #[cfg(test)]
@@ -393,6 +413,28 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run_migrations(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn la_clave_inicial_no_es_la_misma_en_dos_instalaciones() {
+        // Era fija y estaba escrita en el código, que es público. Entre que se
+        // instala y que alguien entra a cambiarla, cualquiera podía pasar.
+        let a = clave_inicial();
+        let b = clave_inicial();
+        assert_ne!(a, b);
+        assert!(a.len() >= 10);
+        assert!(!a.contains('0') && !a.contains('O'), "sin caracteres que se confundan");
+        assert!(!a.contains('1') && !a.contains('l') && !a.contains('I'));
+    }
+
+    #[test]
+    fn el_primer_arranque_entrega_la_clave_y_los_siguientes_no() {
+        let conn = db();
+        let clave = ensure_admin_exists(&conn).unwrap();
+        assert!(clave.is_some(), "el primer arranque debe poder enseñarla");
+
+        assert!(ensure_admin_exists(&conn).unwrap().is_none(),
+                "con el admin ya creado no hay clave nueva que enseñar");
     }
 
     #[test]

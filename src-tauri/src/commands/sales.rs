@@ -507,6 +507,19 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
             return Err("Solo se pueden cancelar ventas completadas".to_string());
         }
 
+        // La venta de un apartado entregado no descontó inventario —eso pasó al
+        // apartar— así que cancelarla lo devolvería dos veces. Lo que se cancela
+        // en ese caso es el apartado, no la venta.
+        let de_apartado: Option<i64> = db
+            .query_row("SELECT layaway_id FROM sales WHERE id = ?1", params![sale_id], |r| r.get(0))
+            .unwrap_or(None);
+        if de_apartado.is_some() {
+            return Err(
+                "Esta venta es la entrega de un apartado. Si hay que deshacerla, hazlo desde Apartados."
+                    .to_string(),
+            );
+        }
+
         // Get sale items to restore stock
         let mut stmt = db.prepare(
             "SELECT product_id, quantity, variant_id FROM sale_items WHERE sale_id = ?1"

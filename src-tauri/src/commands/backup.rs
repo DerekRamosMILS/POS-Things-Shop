@@ -71,7 +71,35 @@ pub fn export_database(state: State<DbState>, sessions: State<SessionState>, tok
     require_admin(&sessions, &token)?;
     let db = state.conn();
 
-    exportar_a(&db, &get_db_path(), &crate::photos::photos_dir(), std::path::Path::new(&path))
+    let mensaje = exportar_a(&db, &get_db_path(), &crate::photos::photos_dir(), std::path::Path::new(&path))?;
+
+    // Se anota para poder avisar cuando lleve mucho sin hacerse: los respaldos
+    // de todos los días viven en este mismo disco, así que la copia que de
+    // verdad protege de que la computadora se muera es esta.
+    db.execute(
+        "INSERT OR REPLACE INTO system_config (key, value, description, updated_at)
+         VALUES ('ultima_copia_externa', date('now','localtime'),
+                 'Fecha de la última copia llevada fuera del equipo', datetime('now','localtime'))",
+        [],
+    ).ok();
+
+    Ok(mensaje)
+}
+
+/// Días desde la última copia llevada fuera del equipo, si alguna vez se hizo.
+#[tauri::command]
+pub fn dias_sin_copia_externa(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Option<i64>, String> {
+    require_admin(&sessions, &token)?;
+    let db = state.conn();
+
+    Ok(db
+        .query_row(
+            "SELECT CAST(julianday('now','localtime') - julianday(value) AS INTEGER)
+             FROM system_config WHERE key = 'ultima_copia_externa'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .ok())
 }
 
 /// Núcleo de la exportación, con rutas explícitas para poder probarlo.

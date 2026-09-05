@@ -96,14 +96,34 @@ pub fn run() {
                 }
             };
 
-            if let Err(e) = users::ensure_admin_exists(&conn) {
-                log::error!("Fallo al crear el administrador inicial: {}", e);
-                app.dialog()
-                    .message(format!("No se pudo crear el usuario administrador.\n\n{}", e))
-                    .kind(MessageDialogKind::Error)
-                    .title("Things Shop POS")
-                    .blocking_show();
-                std::process::exit(1);
+            match users::ensure_admin_exists(&conn) {
+                // Primer arranque: la contraseña se genera al azar y esta es la
+                // única vez que se puede ver. Se enseña antes de abrir la
+                // ventana para que nadie se la salte sin querer.
+                Ok(Some(clave)) => {
+                    app.dialog()
+                        .message(format!(
+                            "Esta es la primera vez que se abre Things Shop.\n\n\
+                             Usuario:  admin\n\
+                             Contraseña:  {}\n\n\
+                             Anótala antes de continuar: no se vuelve a mostrar. \
+                             Al entrar te va a pedir que la cambies por una tuya.",
+                            clave
+                        ))
+                        .kind(MessageDialogKind::Info)
+                        .title("Things Shop POS")
+                        .blocking_show();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::error!("Fallo al crear el administrador inicial: {}", e);
+                    app.dialog()
+                        .message(format!("No se pudo crear el usuario administrador.\n\n{}", e))
+                        .kind(MessageDialogKind::Error)
+                        .title("Things Shop POS")
+                        .blocking_show();
+                    std::process::exit(1);
+                }
             }
 
             purge_old_logs(&conn);
@@ -192,6 +212,7 @@ pub fn run() {
             // Backup
             backup::create_backup,
             backup::export_database,
+            backup::dias_sin_copia_externa,
             backup::get_log_path,
             diagnostics::generate_diagnostic_report,
             // Datos fiscales
