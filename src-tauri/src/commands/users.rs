@@ -387,22 +387,18 @@ pub fn ensure_admin_exists(db: &rusqlite::Connection) -> Result<Option<String>, 
     Ok(None)
 }
 
-/// Contraseña de un solo uso para el primer arranque.
+/// Contraseña del primer arranque.
 ///
-/// Antes era la misma en todas las instalaciones y estaba escrita en el código,
-/// que es público. La aplicación obliga a cambiarla al entrar, pero entre que se
-/// instala y que alguien entra, cualquiera que conozca el proyecto puede pasar.
-/// Se genera al azar y se enseña una sola vez.
+/// Es fija y conocida a propósito. Se probó generarla al azar, que es lo seguro,
+/// y el problema real de esta tienda es el contrario: si nadie la recuerda no
+/// hay a quién pedirle un correo de recuperación, porque todo vive en ese
+/// equipo. Se decidió que valga más poder entrar siempre.
+///
+/// Lo que la sostiene: la aplicación obliga a cambiarla en el primer ingreso,
+/// así que solo sirve para esa vez, y quien olvide la suya tiene
+/// `--restablecer-admin` para volver a entrar.
 fn clave_inicial() -> String {
-    // Sin caracteres que se confundan al leerlos de una pantalla: 0/O, 1/l/I.
-    const ALFABETO: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
-    let bytes = uuid::Uuid::new_v4();
-    bytes
-        .as_bytes()
-        .iter()
-        .take(10)
-        .map(|b| ALFABETO[*b as usize % ALFABETO.len()] as char)
-        .collect()
+    "admin1234".to_string()
 }
 
 #[cfg(test)]
@@ -416,15 +412,17 @@ mod tests {
     }
 
     #[test]
-    fn la_clave_inicial_no_es_la_misma_en_dos_instalaciones() {
-        // Era fija y estaba escrita en el código, que es público. Entre que se
-        // instala y que alguien entra a cambiarla, cualquiera podía pasar.
-        let a = clave_inicial();
-        let b = clave_inicial();
-        assert_ne!(a, b);
-        assert!(a.len() >= 10);
-        assert!(!a.contains('0') && !a.contains('O'), "sin caracteres que se confundan");
-        assert!(!a.contains('1') && !a.contains('l') && !a.contains('I'));
+    fn la_clave_inicial_solo_sirve_para_entrar_la_primera_vez() {
+        // Es fija y conocida a propósito: la tienda no tiene forma de recuperar
+        // una contraseña olvidada. Lo que la sostiene es que se cambia de
+        // inmediato, y esto es lo que hay que no romper.
+        let conn = db();
+        ensure_admin_exists(&conn).unwrap();
+
+        let obligado: i64 = conn.query_row(
+            "SELECT must_change_password FROM users WHERE username = 'admin'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(obligado, 1, "debe pedir una contraseña propia al entrar");
     }
 
     #[test]

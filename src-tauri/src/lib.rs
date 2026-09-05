@@ -97,16 +97,14 @@ pub fn run() {
             };
 
             match users::ensure_admin_exists(&conn) {
-                // Primer arranque: la contraseña se genera al azar y esta es la
-                // única vez que se puede ver. Se enseña antes de abrir la
-                // ventana para que nadie se la salte sin querer.
+                // Primer arranque: se dice con qué entrar, para no tener que
+                // buscarlo en ningún lado.
                 Ok(Some(clave)) => {
                     app.dialog()
                         .message(format!(
                             "Esta es la primera vez que se abre Things Shop.\n\n\
                              Usuario:  admin\n\
                              Contraseña:  {}\n\n\
-                             Anótala antes de continuar: no se vuelve a mostrar. \
                              Al entrar te va a pedir que la cambies por una tuya.",
                             clave
                         ))
