@@ -1,8 +1,13 @@
 //! Fotos de producto: alta, consulta, orden y borrado.
 //!
-//! Los listados solo piden miniaturas; la foto a resolución completa se carga
+//! Las fotos viven dentro de la base, en la misma fila que las nombra. Es más
+//! pesado que dejarlas en archivos, y a cambio son imposibles de perder: entran
+//! y salen con la misma transacción que su producto, un respaldo se las lleva
+//! siempre, y no queda ningún código que borre archivos por su cuenta.
+//!
+//! Los listados solo piden miniaturas; la foto a resolución de catálogo se carga
 //! cuando alguien abre la ficha. Así el punto de venta sigue siendo ligero
-//! aunque el catálogo esté fotografiado a calidad de catálogo.
+//! aunque el catálogo esté fotografiado entero.
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -64,24 +69,19 @@ pub fn agregar_foto(
 
     let foto = photos::bytes_de_data_url(&data.photo)?;
     let miniatura = photos::bytes_de_data_url(&data.thumbnail)?;
-
-    let nombres = photos::nuevos_nombres();
-    photos::guardar(&nombres, &foto, &miniatura)?;
+    photos::validar(&foto, &miniatura)?;
 
     // La primera foto de un producto queda como principal.
     let posicion = existentes as i32;
 
-    let insertado = db.execute(
-        "INSERT INTO product_images (product_id, file_name, thumb_name, position)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![data.product_id, nombres.file_name, nombres.thumb_name, posicion],
-    );
-
-    if let Err(e) = insertado {
-        // Sin fila que los referencie, los archivos serían basura invisible.
-        photos::borrar(&nombres.file_name, &nombres.thumb_name);
-        return Err(e.to_string());
-    }
+    // Los bytes van en la fila. No hay archivo suelto que pueda quedar sin
+    // dueño ni fila que pueda quedar apuntando a un archivo que ya no está:
+    // o entra todo o no entra nada.
+    db.execute(
+        "INSERT INTO product_images (product_id, file_name, thumb_name, position, photo, thumbnail, en_la_base)
+         VALUES (?1, '', '', ?2, ?3, ?4, 1)",
+        params![data.product_id, posicion, foto, miniatura],
+    ).map_err(|e| e.to_string())?;
 
     let id = db.last_insert_rowid();
     db.execute(
@@ -100,7 +100,7 @@ pub fn add_product_image(
     data: NuevaFotoDto,
 ) -> Result<ProductImage, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     agregar_foto(&db, &data)
 }
 
@@ -113,7 +113,7 @@ pub fn get_product_image_list(
     product_id: i64,
 ) -> Result<Vec<ProductImage>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db
         .prepare(
@@ -147,17 +147,26 @@ pub fn get_product_photo(
     image_id: i64,
 ) -> Result<String, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
-    let file_name: String = db
+    leer_foto(&db, image_id)
+}
+
+/// La foto grande de una fila, como data URL.
+fn leer_foto(db: &rusqlite::Connection, image_id: i64) -> Result<String, String> {
+    let (bytes, file_name): (Option<Vec<u8>>, String) = db
         .query_row(
-            "SELECT file_name FROM product_images WHERE id = ?1",
+            "SELECT photo, file_name FROM product_images WHERE id = ?1",
             params![image_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|_| "La foto no existe".to_string())?;
 
-    photos::leer_como_data_url(&file_name)
+    match bytes {
+        Some(b) if !b.is_empty() => Ok(photos::como_data_url(&b)),
+        // Una fila que todavía no se ha pasado a la base: se lee su archivo.
+        _ => photos::leer_como_data_url(&file_name),
+    }
 }
 
 #[tauri::command]
@@ -168,19 +177,18 @@ pub fn delete_product_image(
     image_id: i64,
 ) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
-    let (product_id, file_name, thumb_name): (i64, String, String) = db
+    let product_id: i64 = db
         .query_row(
-            "SELECT product_id, file_name, thumb_name FROM product_images WHERE id = ?1",
+            "SELECT product_id FROM product_images WHERE id = ?1",
             params![image_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| r.get(0),
         )
         .map_err(|_| "La foto no existe".to_string())?;
 
     db.execute("DELETE FROM product_images WHERE id = ?1", params![image_id])
         .map_err(|e| e.to_string())?;
-    photos::borrar(&file_name, &thumb_name);
 
     // Renumerar para que no queden huecos y la primera siga siendo la principal.
     renumerar(&db, product_id)?;
@@ -197,7 +205,7 @@ pub fn reorder_product_images(
     image_ids: Vec<i64>,
 ) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     for (posicion, id) in image_ids.iter().enumerate() {
         db.execute(
@@ -246,21 +254,21 @@ pub fn get_product_images(
         return Err("Demasiadas imágenes en una sola petición".to_string());
     }
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let marcadores = vec!["?"; product_ids.len()].join(",");
 
     // Solo la principal de cada producto: los listados muestran una.
     let mut stmt = db
         .prepare(&format!(
-            "SELECT product_id, thumb_name FROM product_images
+            "SELECT product_id, thumbnail, thumb_name FROM product_images
              WHERE product_id IN ({}) AND position = 0",
             marcadores
         ))
         .map_err(|e| e.to_string())?;
 
-    let filas: Vec<(i64, String)> = stmt
+    let filas: Vec<(i64, Option<Vec<u8>>, String)> = stmt
         .query_map(rusqlite::params_from_iter(product_ids.iter()), |r| {
-            Ok((r.get(0)?, r.get(1)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
@@ -270,11 +278,14 @@ pub fn get_product_images(
     // Una miniatura ilegible no debe tumbar el catálogo entero.
     Ok(filas
         .into_iter()
-        .filter_map(|(id, nombre)| photos::leer_como_data_url(&nombre).ok().map(|url| (id, url)))
+        .filter_map(|(id, bytes, nombre)| match bytes {
+            Some(b) if !b.is_empty() => Some((id, photos::como_data_url(&b))),
+            _ => photos::leer_como_data_url(&nombre).ok().map(|url| (id, url)),
+        })
         .collect())
 }
 
-/// Mueve a archivos las fotos que quedaron incrustadas en filas antiguas.
+/// Mete a la base las fotos que quedaron incrustadas en filas antiguas.
 ///
 /// Se ejecuta una vez al arrancar. Conserva la columna original hasta confirmar
 /// que la copia quedó bien, para que un fallo a medias no borre nada.
@@ -322,7 +333,61 @@ pub fn migrar_fotos_incrustadas(db: &rusqlite::Connection) {
     }
 
     if migradas > 0 {
-        log::info!("Fotos migradas de la base a archivos: {}", migradas);
+        log::info!("Fotos antiguas incorporadas a la base: {}", migradas);
+    }
+}
+
+/// Mete a la base las fotos que la 018 dejó como archivos en `fotos/`.
+///
+/// Se ejecuta al arrancar hasta que no quede ninguna. El archivo no se borra:
+/// queda de respaldo por si algo saliera mal, y la carpeta se puede tirar a
+/// mano cuando la tienda esté tranquila. Perder una foto es peor que dejar unos
+/// megabytes ocupados.
+pub fn incorporar_fotos_en_archivos(db: &rusqlite::Connection) {
+    let pendientes: Vec<(i64, String, String)> = match db.prepare(
+        "SELECT id, file_name, thumb_name FROM product_images
+         WHERE en_la_base = 0 AND file_name != ''",
+    ) {
+        Ok(mut stmt) => match stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(e) => {
+                log::warn!("No se pudieron leer las fotos por incorporar: {}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            log::warn!("No se pudieron leer las fotos por incorporar: {}", e);
+            return;
+        }
+    };
+
+    if pendientes.is_empty() {
+        return;
+    }
+
+    let mut hechas = 0;
+    let mut faltantes = 0;
+    for (id, file_name, thumb_name) in pendientes {
+        let (Ok(foto), Ok(miniatura)) = (photos::leer(&file_name), photos::leer(&thumb_name)) else {
+            faltantes += 1;
+            log::warn!("La foto {} no se encontró en disco; la fila se conserva", id);
+            continue;
+        };
+
+        match db.execute(
+            "UPDATE product_images SET photo = ?1, thumbnail = ?2, en_la_base = 1 WHERE id = ?3",
+            params![foto, miniatura, id],
+        ) {
+            Ok(_) => hechas += 1,
+            Err(e) => log::warn!("No se pudo incorporar la foto {}: {}", id, e),
+        }
+    }
+
+    if hechas > 0 {
+        log::info!("Fotos incorporadas a la base: {}", hechas);
+    }
+    if faltantes > 0 {
+        log::warn!("Fotos que ya no estaban en disco: {}", faltantes);
     }
 }
 
@@ -350,22 +415,11 @@ mod tests {
         NuevaFotoDto { product_id, photo: jpeg(), thumbnail: jpeg() }
     }
 
-    fn limpiar(db: &rusqlite::Connection) {
-        let nombres: Vec<(String, String)> = db
-            .prepare("SELECT file_name, thumb_name FROM product_images").unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
-            .collect::<Result<Vec<_>, _>>().unwrap();
-        for (f, t) in nombres {
-            photos::borrar(&f, &t);
-        }
-    }
-
     #[test]
     fn la_primera_foto_queda_como_principal() {
         let db = tienda();
         let img = agregar_foto(&db, &foto(1)).unwrap();
         assert_eq!(img.position, 0);
-        limpiar(&db);
     }
 
     #[test]
@@ -374,7 +428,64 @@ mod tests {
         agregar_foto(&db, &foto(1)).unwrap();
         let segunda = agregar_foto(&db, &foto(1)).unwrap();
         assert_eq!(segunda.position, 1);
-        limpiar(&db);
+    }
+
+    #[test]
+    fn la_foto_viaja_dentro_de_la_fila() {
+        // Es lo que hace imposible perderla: no hay archivo aparte que pueda
+        // quedarse sin dueño ni fila que pueda apuntar a un archivo que ya no
+        // está. Un respaldo de la base se lleva las fotos.
+        let db = tienda();
+        let img = agregar_foto(&db, &foto(1)).unwrap();
+
+        let (bytes, en_la_base): (Vec<u8>, i64) = db.query_row(
+            "SELECT photo, en_la_base FROM product_images WHERE id = ?1",
+            params![img.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+
+        assert!(crate::photos::es_jpeg(&bytes), "los bytes deben estar en la fila");
+        assert_eq!(en_la_base, 1);
+    }
+
+    #[test]
+    fn borrar_el_producto_se_lleva_sus_fotos_y_nada_mas() {
+        let db = tienda();
+        agregar_foto(&db, &foto(1)).unwrap();
+        db.execute("DELETE FROM products WHERE id = 1", []).unwrap();
+
+        let quedan: i64 = db.query_row(
+            "SELECT COUNT(*) FROM product_images", [], |r| r.get(0)).unwrap();
+        assert_eq!(quedan, 0, "la cascada se lleva la fila con sus bytes");
+    }
+
+    #[test]
+    fn una_foto_de_archivo_se_incorpora_a_la_base() {
+        // Las tiendas que ya venían de la versión anterior tienen sus fotos en
+        // `fotos/`. Al arrancar se meten a la base sin borrar el archivo.
+        let db = tienda();
+        let bytes = [0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let nombre = format!("{}.jpg", uuid::Uuid::new_v4());
+        let thumb = nombre.replace(".jpg", "_t.jpg");
+        std::fs::write(crate::photos::safe_path(&nombre).unwrap(), bytes).unwrap();
+        std::fs::write(crate::photos::safe_path(&thumb).unwrap(), bytes).unwrap();
+
+        db.execute(
+            "INSERT INTO product_images (product_id, file_name, thumb_name, position, en_la_base)
+             VALUES (1, ?1, ?2, 0, 0)",
+            params![nombre, thumb],
+        ).unwrap();
+
+        incorporar_fotos_en_archivos(&db);
+
+        let (guardados, en_la_base): (Vec<u8>, i64) = db.query_row(
+            "SELECT photo, en_la_base FROM product_images WHERE file_name = ?1",
+            params![nombre], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(guardados, bytes.to_vec());
+        assert_eq!(en_la_base, 1);
+        assert!(crate::photos::safe_path(&nombre).unwrap().exists(),
+                "el archivo se conserva por si acaso");
+
+        std::fs::remove_file(crate::photos::safe_path(&nombre).unwrap()).ok();
+        std::fs::remove_file(crate::photos::safe_path(&thumb).unwrap()).ok();
     }
 
     #[test]
@@ -398,7 +509,6 @@ mod tests {
             agregar_foto(&db, &foto(1)).unwrap();
         }
         assert!(agregar_foto(&db, &foto(1)).is_err());
-        limpiar(&db);
     }
 
     #[test]
@@ -431,7 +541,6 @@ mod tests {
         let marcado: i64 = db.query_row(
             "SELECT images_migradas FROM products WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(marcado, 1);
-        limpiar(&db);
     }
 
     #[test]
@@ -445,7 +554,6 @@ mod tests {
         let cuantas: i64 = db.query_row(
             "SELECT COUNT(*) FROM product_images WHERE product_id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(cuantas, 1);
-        limpiar(&db);
     }
 
     #[test]
@@ -454,24 +562,18 @@ mod tests {
         let a = agregar_foto(&db, &foto(1)).unwrap();
         agregar_foto(&db, &foto(1)).unwrap();
 
-        let (f, t): (String, String) = db.query_row(
-            "SELECT file_name, thumb_name FROM product_images WHERE id = ?1",
-            params![a.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         db.execute("DELETE FROM product_images WHERE id = ?1", params![a.id]).unwrap();
-        photos::borrar(&f, &t);
         renumerar(&db, 1).unwrap();
 
         let posicion: i32 = db.query_row(
             "SELECT position FROM product_images WHERE product_id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(posicion, 0, "la que queda debe pasar a principal");
-        limpiar(&db);
     }
 
     #[test]
     fn borrar_el_producto_se_lleva_sus_fotos() {
         let db = tienda();
         agregar_foto(&db, &foto(1)).unwrap();
-        limpiar(&db);
 
         db.execute("DELETE FROM products WHERE id = 1", []).unwrap();
 

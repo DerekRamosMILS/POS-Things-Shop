@@ -115,6 +115,9 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return filtered as unknown as T;
         }
 
+        case 'get_product':
+            return (webProducts.find(p => p.id === (args?.id as number)) ?? null) as unknown as T;
+
         case 'get_product_by_barcode': {
             const barcode = args?.barcode as string;
             const found = webProducts.find(p => p.barcode === barcode) ?? null;
@@ -194,13 +197,6 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_inventory_movements':
             return [] as unknown as T;
 
-        case 'set_product_image': {
-            const { productId, imageUrl } = args as { productId: number; imageUrl: string | null };
-            const p = webProducts.find(p => p.id === productId);
-            if (p) p.image_url = imageUrl ?? null;
-            return undefined as unknown as T;
-        }
-
         case 'create_product': {
             const data = args?.data as CreateProductDto;
             const id = webProducts.length + 1;
@@ -238,14 +234,19 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'create_user':
         case 'update_user':
         case 'change_password':
+        case 'delete_promotion':
+            return 'Promoción eliminada' as unknown as T;
+
         case 'update_promotion':
         case 'create_promotion':
-        case 'delete_promotion':
         case 'mark_notification_read':
         case 'create_reminder':
         case 'update_expense':
         case 'delete_expense':
         case 'set_config':
+        case 'dias_sin_copia_externa':
+            return null as unknown as T;
+
         case 'export_database':
             return undefined as unknown as T;
 
@@ -346,7 +347,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return [] as unknown as T;
 
         case 'capture_server_status':
-            return { encendido: false, url: null, codigo: null, qr_svg: null } as unknown as T;
+            return { encendido: false, url: null, codigo: null, qr_svg: null, interfaz: null, alternativas: [] } as unknown as T;
 
         case 'start_capture_server':
         case 'stop_capture_server':
@@ -433,9 +434,10 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return [] as unknown as T;
         case 'create_return':
             return 0 as unknown as T;
+        case 'cancel_layaway':
+            return 'Apartado cancelado' as unknown as T;
         case 'update_customer':
         case 'delete_customer':
-        case 'cancel_layaway':
             return undefined as unknown as T;
         case 'create_customer':
         case 'create_layaway':
@@ -462,12 +464,11 @@ const invoke = <T>(command: string, args?: InvokeArgs): Promise<T> => {
 
 // Products
 export const getProducts = (filters?: ProductFilters) => invoke<Product[]>('get_products', { filters });
+export const getProductById = (id: number) => invoke<Product | null>('get_product', { id });
 export const getProductByBarcode = (barcode: string) => invoke<Product | null>('get_product_by_barcode', { barcode });
 export const createProduct = (data: CreateProductDto) => invoke<Product>('create_product', { data });
 export const updateProduct = (data: UpdateProductDto) => invoke<Product>('update_product', { data });
 export const deleteProduct = (id: number) => invoke<void>('delete_product', { id });
-export const setProductImage = (productId: number, imageUrl: string | null) =>
-    invoke<void>('set_product_image', { productId, imageUrl });
 export const getProductImages = (productIds: number[]) =>
     invoke<[number, string][]>('get_product_images', { productIds });
 
@@ -537,7 +538,7 @@ export const deleteExpense = (id: number) => invoke<void>('delete_expense', { id
 export const getPromotions = () => invoke<Promotion[]>('get_promotions');
 export const createPromotion = (data: CreatePromotionDto) => invoke<Promotion>('create_promotion', { data });
 export const updatePromotion = (data: Promotion) => invoke<void>('update_promotion', { data });
-export const deletePromotion = (id: number) => invoke<void>('delete_promotion', { id });
+export const deletePromotion = (id: number) => invoke<string>('delete_promotion', { id });
 
 // Reports
 export const getDashboardStats = () => invoke<DashboardStats>('get_dashboard_stats');
@@ -547,7 +548,8 @@ export const getCashierReport = (days?: number) => invoke<CashierReport[]>('get_
 
 // Backup
 export const createBackup = () => invoke<string>('create_backup');
-export const exportDatabase = (path: string) => invoke<void>('export_database', { path });
+export const diasSinCopiaExterna = () => invoke<number | null>('dias_sin_copia_externa');
+export const exportDatabase = (path: string) => invoke<string>('export_database', { path });
 export const getBackupList = () => invoke<string[]>('get_backup_list');
 export const getLogPath = () => invoke<string>('get_log_path');
 export const generateDiagnosticReport = (path: string) =>
@@ -561,7 +563,8 @@ export const marcarFacturada = (saleId: number, uuid: string) =>
     invoke<void>('marcar_facturada', { saleId, uuid });
 
 // Captura desde el celular
-export const startCaptureServer = () => invoke<CaptureStatus>('start_capture_server');
+export const startCaptureServer = (ipPreferida?: string) =>
+    invoke<CaptureStatus>('start_capture_server', { ipPreferida });
 export const stopCaptureServer = () => invoke<CaptureStatus>('stop_capture_server');
 export const captureServerStatus = () => invoke<CaptureStatus>('capture_server_status');
 
@@ -621,5 +624,5 @@ export const getLayawayDetail = (layawayId: number) => invoke<Layaway>('get_laya
 export const addLayawayPayment = (layawayId: number, amount: number, paymentMethod: string) =>
     invoke<Layaway>('add_layaway_payment', { layawayId, amount, paymentMethod });
 export const completeLayaway = (layawayId: number) => invoke<Layaway>('complete_layaway', { layawayId });
-export const cancelLayaway = (layawayId: number) => invoke<void>('cancel_layaway', { layawayId });
+export const cancelLayaway = (layawayId: number) => invoke<string>('cancel_layaway', { layawayId });
 

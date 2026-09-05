@@ -82,6 +82,21 @@ export default function CashRegisterPage() {
     );
 
     const closedHistory = history.filter(h => h.status === 'closed');
+    // Un turno que se quedó abierto de un día para otro mezcla dos días en el
+    // mismo corte y nadie se entera hasta que no cuadra. Vale la pena decirlo.
+    const turnoDeAyer = (() => {
+        if (!register?.opened_at) return null;
+        const abierto = new Date(register.opened_at.replace(' ', 'T'));
+        if (Number.isNaN(abierto.getTime())) return null;
+        const hoy = new Date();
+        const dias = Math.floor(
+            (new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate()).getTime()
+                - new Date(abierto.getFullYear(), abierto.getMonth(), abierto.getDate()).getTime())
+            / 86_400_000,
+        );
+        return dias >= 1 ? dias : null;
+    })();
+
     const cashLines = register ? cashBreakdown(register).filter(l => l.amount !== 0) : [];
     const expectedCash = register ? computeExpectedCash(register) : 0;
 
@@ -115,6 +130,22 @@ export default function CashRegisterPage() {
                     )}
                 </div>
             </div>
+
+            {turnoDeAyer !== null && (
+                <div className="card" style={{
+                    padding: '14px 18px', marginBottom: 16,
+                    background: 'rgba(245,168,66,0.10)', border: '1px solid rgba(245,168,66,0.30)',
+                }}>
+                    <p style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 600, marginBottom: 4 }}>
+                        Este turno lleva {turnoDeAyer === 1 ? 'desde ayer' : `${turnoDeAyer} días`} abierto
+                    </p>
+                    <p style={{ fontSize: 12, color: 'var(--t2)', lineHeight: 1.5 }}>
+                        Todo lo que se venda sigue contando en este corte, así que al cerrarlo
+                        vas a estar contando el efectivo de más de un día. Ciérralo y abre uno
+                        nuevo para que las cuentas de cada día queden por separado.
+                    </p>
+                </div>
+            )}
 
             {/* Open register KPIs */}
             {register && (

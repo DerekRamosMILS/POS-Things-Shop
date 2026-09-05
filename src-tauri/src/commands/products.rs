@@ -15,7 +15,10 @@ const SEL: &str = "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.categ
                           p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
                           p.low_stock_ignored, p.created_at, p.updated_at,
                           c.name as category_name, s.name as supplier_name,
-                          (p.image_url IS NOT NULL AND p.image_url != '') as has_image,
+                          -- Las fotos viven en product_images; mirar la columna
+                          -- vieja dejaba sin imagen a todo lo capturado desde el
+                          -- celular, que nunca la llena.
+                          EXISTS(SELECT 1 FROM product_images WHERE product_id = p.id) as has_image,
                           p.has_variants
                    FROM products p
                    LEFT JOIN categories c ON p.category_id = c.id
@@ -54,7 +57,7 @@ pub fn get_products(
     filters: Option<ProductFilters>,
 ) -> Result<Vec<Product>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let filters = filters.unwrap_or_default();
 
     let mut sql = format!("{} WHERE 1=1", SEL);
@@ -92,6 +95,26 @@ pub fn get_products(
     Ok(products)
 }
 
+/// Un producto por su id.
+///
+/// El punto de venta carga el catálogo al entrar; lo que se dé de alta después
+/// —una prenda capturada desde el celular, por ejemplo— no está en esa lista.
+/// Sin esto, escanear su código decía que el producto no existe.
+#[tauri::command]
+pub fn get_product(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    id: i64,
+) -> Result<Option<Product>, String> {
+    require_auth(&sessions, &token)?;
+    let db = state.conn();
+    match get_product_by_id(&db, id) {
+        Ok(p) => Ok(Some(p)),
+        Err(_) => Ok(None),
+    }
+}
+
 #[tauri::command]
 pub fn get_product_by_barcode(
     state: State<DbState>,
@@ -100,7 +123,7 @@ pub fn get_product_by_barcode(
     barcode: String,
 ) -> Result<Option<Product>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let sql = format!("{} WHERE p.barcode = ?1 AND p.is_active = 1", SEL);
     let result = db.query_row(&sql, params![barcode], row_to_product);
@@ -173,14 +196,14 @@ pub fn get_next_sku(
     token: String,
 ) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     siguiente_sku(&db)
 }
 
 #[tauri::command]
 pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, purchase_price, sale_price, stock, min_stock)
@@ -213,7 +236,7 @@ pub fn create_product(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn update_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateProductDto) -> Result<Product, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let old_price: f64 = db
         .query_row("SELECT sale_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
@@ -242,26 +265,9 @@ pub fn update_product(state: State<DbState>, sessions: State<SessionState>, toke
 }
 
 #[tauri::command]
-pub fn set_product_image(
-    state: State<DbState>,
-    sessions: State<SessionState>,
-    token: String,
-    product_id: i64,
-    image_url: Option<String>,
-) -> Result<(), String> {
-    require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db.execute(
-        "UPDATE products SET image_url=?1, updated_at=datetime('now','localtime') WHERE id=?2",
-        params![image_url, product_id],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 pub fn delete_product(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     db.execute(
         "UPDATE products SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1",
         params![id],
@@ -287,7 +293,7 @@ pub struct PriceHistoryEntry {
 #[tauri::command]
 pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64) -> Result<Vec<PriceHistoryEntry>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let mut stmt = db.prepare(
         "SELECT ph.id, ph.old_price, ph.new_price, u.full_name, ph.created_at
          FROM price_history ph

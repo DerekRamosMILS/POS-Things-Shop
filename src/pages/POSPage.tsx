@@ -380,8 +380,17 @@ export default function POSPage() {
         try {
             const variant = await api.getVariantByBarcode(code);
             if (variant) {
-                const product = allProducts.find(p => p.id === variant.product_id);
-                if (product) { addVariantToCart(product, variant); setSearchQuery(''); setSearchResults([]); return; }
+                // El catálogo en pantalla se cargó al entrar. Una prenda dada de
+                // alta después —desde el celular, por ejemplo— no está en esa
+                // lista, y buscarla solo ahí hacía que el escáner dijera que no
+                // existe. Si no aparece, se pregunta a la base.
+                const product = allProducts.find(p => p.id === variant.product_id)
+                    ?? await api.getProductById(variant.product_id);
+                if (product) {
+                    addVariantToCart(product, variant);
+                    setSearchQuery(''); setSearchResults([]);
+                    return;
+                }
             }
             const product = await api.getProductByBarcode(code);
             if (product) { handleAddItem(product); setSearchQuery(''); setSearchResults([]); }
@@ -548,6 +557,9 @@ export default function POSPage() {
                 });
             }
             // Reflect the sold units in the on-screen catalog immediately.
+            // Las tallas se recargan de la base la próxima vez que se abra el
+            // selector: descontarlas aquí a mano se desincronizaba en cuanto
+            // otra caja o el celular tocaban el mismo producto.
             const soldMap = new Map<number, number>();
             saleItems.forEach(i => soldMap.set(i.product.id, (soldMap.get(i.product.id) || 0) + i.quantity));
             const applySold = (list: Product[]) => list.map(p => soldMap.has(p.id) ? { ...p, stock: Math.max(0, p.stock - (soldMap.get(p.id) || 0)) } : p);

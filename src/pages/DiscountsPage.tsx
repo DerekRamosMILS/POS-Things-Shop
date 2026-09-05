@@ -78,7 +78,8 @@ export default function DiscountsPage() {
     const handleDelete = async (id: number) => {
         const ok = await confirm({ title: 'Eliminar promoción', message: '¿Eliminar esta promoción?', variant: 'danger', confirmLabel: 'Eliminar' });
         if (!ok) return;
-        try { await api.deletePromotion(id); loadData(); } catch (e) { showToast(String(e), 'error'); }
+        try { showToast(await api.deletePromotion(id)); loadData(); }
+        catch (e) { showToast(String(e), 'error'); }
     };
 
     const getTargetLabel = (promo: Promotion) => {

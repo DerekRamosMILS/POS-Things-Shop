@@ -79,7 +79,10 @@ pub fn register_session(
     expires_at: i64,
 ) {
     if let Ok(mut map) = sessions.sessions.lock() {
-        map.retain(|_, s| s.expires_at > now_ts());
+        // Una sesión por usuario. El registro en disco ya reemplazaba la
+        // anterior; en memoria el token viejo seguía sirviendo hasta caducar,
+        // así que volver a entrar no cerraba de verdad la sesión previa.
+        map.retain(|_, s| s.expires_at > now_ts() && s.user_id != user_id);
         map.insert(
             token.to_string(),
             SessionInfo { user_id, role: role.to_string(), expires_at },
@@ -169,6 +172,18 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn volver_a_entrar_invalida_el_token_anterior() {
+        let estado = SessionState::with_map(HashMap::new());
+        let mut map = estado.sessions.lock().unwrap();
+        map.insert("viejo".into(), SessionInfo { user_id: 1, role: "admin".into(), expires_at: now_ts() + 3600 });
+        map.retain(|_, s| s.expires_at > now_ts() && s.user_id != 1);
+        map.insert("nuevo".into(), SessionInfo { user_id: 1, role: "admin".into(), expires_at: now_ts() + 3600 });
+
+        assert!(!map.contains_key("viejo"), "el token anterior debe dejar de servir");
+        assert!(map.contains_key("nuevo"));
     }
 
     #[test]

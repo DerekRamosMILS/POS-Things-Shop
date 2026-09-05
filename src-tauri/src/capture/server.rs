@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Json, State as AxumState};
@@ -13,7 +13,7 @@ use tauri::State;
 use crate::commands::product_photos::{agregar_foto, NuevaFotoDto};
 use crate::commands::products::siguiente_sku;
 use crate::db::connection::DbState;
-use crate::session::{require_admin, SessionState};
+use crate::session::{require_admin, require_auth, SessionState};
 
 /// Puerto por defecto. Alto y poco común para no chocar con nada de la tienda.
 const PUERTO: u16 = 7423;
@@ -21,6 +21,8 @@ const PUERTO: u16 = 7423;
 const MAX_INTENTOS: u32 = 5;
 /// Cuánto dura el bloqueo.
 const BLOQUEO_SEGUNDOS: i64 = 300;
+/// Tope de variantes que puede generar un cruce de tallas y colores.
+const MAX_VARIANTES: usize = 60;
 /// Tope del cuerpo de una petición: dos fotos de catálogo más los campos.
 const MAX_CUERPO: usize = 24 * 1024 * 1024;
 
@@ -52,20 +54,62 @@ pub struct EstadoCaptura {
     pub codigo: Option<String>,
     /// QR con la dirección ya emparejada, como SVG listo para mostrar.
     pub qr_svg: Option<String>,
+    /// Interfaz que se está usando, para saber si es la correcta de un vistazo.
+    pub interfaz: Option<String>,
+    /// Las demás direcciones de esta máquina, por si el celular no alcanza la
+    /// elegida y hay que probar otra.
+    pub alternativas: Vec<DireccionRed>,
 }
 
-/// Dirección de esta máquina en la red local.
+/// Una dirección por la que el celular podría alcanzar esta máquina.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct DireccionRed {
+    /// Nombre de la interfaz, para que se pueda distinguir cuál es cuál.
+    pub interfaz: String,
+    pub ip: String,
+}
+
+/// Interfaces que casi nunca son la red de la tienda.
 ///
-/// Se abre un socket UDP hacia una dirección externa y se pregunta qué interfaz
-/// habría usado el sistema. No se envía ningún paquete: es la forma de averiguar
-/// la IP correcta cuando hay varias tarjetas de red.
+/// Un VPN, Docker o una máquina virtual crean interfaces con direcciones
+/// privadas perfectamente válidas a las que, sin embargo, el celular no llega.
+fn es_interfaz_virtual(nombre: &str) -> bool {
+    const PREFIJOS: [&str; 8] = ["utun", "tun", "tap", "ppp", "docker", "veth", "vmnet", "bridge"];
+    let n = nombre.to_lowercase();
+    PREFIJOS.iter().any(|p| n.starts_with(p))
+}
+
+/// Direcciones por las que el celular podría llegar, la mejor primero.
+///
+/// Preguntar "¿por dónde salgo a internet?" —el truco del socket UDP— devuelve
+/// la interfaz de la ruta por defecto, que con un VPN encendido es el túnel. El
+/// teléfono está en el WiFi de la tienda y a esa dirección no llega nunca, así
+/// que hay que mirar todas las interfaces y quedarse con las reales.
+pub fn direcciones_disponibles() -> Vec<DireccionRed> {
+    let Ok(interfaces) = local_ip_address::list_afinet_netifas() else {
+        return Vec::new();
+    };
+
+    let mut candidatas: Vec<(u8, DireccionRed)> = interfaces
+        .into_iter()
+        .filter_map(|(nombre, ip)| match ip {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() && v4.is_private() => {
+                // Las interfaces físicas van primero; las virtuales quedan como
+                // último recurso por si la tienda usa una configuración rara.
+                let prioridad = if es_interfaz_virtual(&nombre) { 1 } else { 0 };
+                Some((prioridad, DireccionRed { interfaz: nombre, ip: v4.to_string() }))
+            }
+            _ => None,
+        })
+        .collect();
+
+    candidatas.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.interfaz.cmp(&b.1.interfaz)));
+    candidatas.into_iter().map(|(_, d)| d).collect()
+}
+
+/// Dirección elegida por defecto: la primera real que se encuentre.
 fn ip_local() -> Option<String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V4(ip) if !ip.is_loopback() => Some(ip.to_string()),
-        _ => None,
-    }
+    direcciones_disponibles().first().map(|d| d.ip.clone())
 }
 
 /// Código de emparejamiento de seis dígitos.
@@ -75,6 +119,48 @@ fn nuevo_codigo() -> String {
     let bytes = uuid::Uuid::new_v4();
     let n = u32::from_be_bytes(bytes.as_bytes()[..4].try_into().unwrap_or([0; 4]));
     format!("{:06}", n % 1_000_000)
+}
+
+/// Quita espacios, descarta vacíos y elimina repetidos conservando el orden.
+fn normalizar(valores: &[String]) -> Vec<String> {
+    let mut vistos = std::collections::HashSet::new();
+    valores
+        .iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .filter(|v| vistos.insert(v.to_lowercase()))
+        .collect()
+}
+
+/// Cruza tallas con colores. Si solo hay una de las dos listas, la otra queda
+/// vacía; si no hay ninguna, el producto no lleva variantes.
+fn combinar(tallas: &[String], colores: &[String]) -> Vec<(Option<String>, Option<String>)> {
+    match (tallas.is_empty(), colores.is_empty()) {
+        (true, true) => Vec::new(),
+        (false, true) => tallas.iter().map(|t| (Some(t.clone()), None)).collect(),
+        (true, false) => colores.iter().map(|c| (None, Some(c.clone()))).collect(),
+        (false, false) => tallas
+            .iter()
+            .flat_map(|t| colores.iter().map(move |c| (Some(t.clone()), Some(c.clone()))))
+            .collect(),
+    }
+}
+
+/// Piezas capturadas para una combinación concreta, si el teléfono las mandó.
+fn piezas_de(
+    piezas: &[PiezasDeVariante],
+    talla: &Option<String>,
+    color: &Option<String>,
+) -> Option<i32> {
+    let coincide = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.trim().eq_ignore_ascii_case(y.trim()),
+        _ => false,
+    };
+    piezas
+        .iter()
+        .find(|p| coincide(&p.talla, talla) && coincide(&p.color, color))
+        .map(|p| p.cantidad)
 }
 
 /// Comparación que no delata el código por el tiempo que tarda en fallar.
@@ -90,20 +176,45 @@ fn qr_svg(url: &str) -> Option<String> {
     use qrcode::QrCode;
 
     let code = QrCode::new(url.as_bytes()).ok()?;
-    Some(
-        code.render()
-            .min_dimensions(220, 220)
-            .dark_color(svg::Color("#0a0716"))
-            .light_color(svg::Color("#ffffff"))
-            .build(),
-    )
+    let svg = code
+        .render()
+        .min_dimensions(240, 240)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#0a0716"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+
+    // El renderizador fija ancho y alto en píxeles, así que el QR se recortaba
+    // al meterlo en un recuadro más chico. Con medidas relativas y su viewBox
+    // intacto, escala al espacio que tenga sin perder módulos.
+    Some(escalable(&svg))
+}
+
+/// Cambia el ancho y alto absolutos del SVG por medidas relativas.
+fn escalable(svg: &str) -> String {
+    let mut salida = svg.to_string();
+    // Solo los atributos de la etiqueta `<svg>`: buscar en todo el documento
+    // podría dar con un `stroke-width` de cualquier figura de adentro.
+    let Some(abre) = salida.find("<svg") else {
+        return salida;
+    };
+    for atributo in [" width=\"", " height=\""] {
+        let Some(inicio) = salida[abre..].find(atributo).map(|i| abre + i) else {
+            continue;
+        };
+        let desde = inicio + atributo.len();
+        if let Some(largo) = salida[desde..].find('"') {
+            salida.replace_range(desde..desde + largo, "100%");
+        }
+    }
+    salida
 }
 
 // ─── Lo que el celular envía ─────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct ProductoDelCelular {
-    codigo: String,
+    // El código de emparejamiento se comprueba en la cabecera X-Codigo, no aquí.
     nombre: String,
     #[serde(default)]
     precio: Option<f64>,
@@ -113,9 +224,28 @@ struct ProductoDelCelular {
     existencia: Option<i32>,
     #[serde(default)]
     notas: Option<String>,
+    /// Tallas y colores elegidos. Se cruzan entre sí: tres tallas y dos colores
+    /// dan seis variantes, cada una con su propia existencia.
+    #[serde(default)]
+    tallas: Vec<String>,
+    #[serde(default)]
+    colores: Vec<String>,
+    /// Piezas de cada combinación, capturadas una por una desde el teléfono.
+    /// Cuando llega vacío se usa `existencia` para todas.
+    #[serde(default)]
+    piezas: Vec<PiezasDeVariante>,
     /// Pares de foto y miniatura, ambas como data URL JPEG.
     #[serde(default)]
     fotos: Vec<FotoDelCelular>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct PiezasDeVariante {
+    #[serde(default)]
+    talla: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+    cantidad: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,9 +350,6 @@ async fn crear_producto(
     if let Err((code, msg)) = autorizado(&ctx.captura, &headers) {
         return fallo(code, msg);
     }
-    if !iguales(&entrada.codigo, "") && entrada.nombre.trim().is_empty() {
-        return fallo(StatusCode::BAD_REQUEST, "Ponle nombre al producto".into());
-    }
     if entrada.nombre.trim().is_empty() {
         return fallo(StatusCode::BAD_REQUEST, "Ponle nombre al producto".into());
     }
@@ -230,10 +357,9 @@ async fn crear_producto(
         return fallo(StatusCode::BAD_REQUEST, "Demasiadas fotos".into());
     }
 
-    let db = match ctx.db.lock() {
-        Ok(db) => db,
-        Err(_) => return fallo(StatusCode::INTERNAL_SERVER_ERROR, "Base ocupada".into()),
-    };
+    // Se recupera de un candado envenenado igual que los comandos: un fallo
+    // anterior no debe dejar la captura muerta hasta reiniciar.
+    let db = crate::db::connection::recuperar(ctx.db.lock());
 
     match guardar_producto(&db, entrada) {
         Ok(sku) => (
@@ -261,6 +387,17 @@ fn guardar_producto(
     let existencia = entrada.existencia.unwrap_or(0).max(0);
     let activo = if precio > 0.0 { 1 } else { 0 };
 
+    // Se limpian aquí para que el cruce no genere variantes vacías ni repetidas.
+    let tallas = normalizar(&entrada.tallas);
+    let colores = normalizar(&entrada.colores);
+    let combinaciones = combinar(&tallas, &colores);
+    if combinaciones.len() > MAX_VARIANTES {
+        return Err(format!(
+            "Son {} combinaciones de talla y color; el máximo es {}",
+            combinaciones.len(), MAX_VARIANTES
+        ));
+    }
+
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let resultado = (|| -> Result<String, String> {
@@ -281,6 +418,27 @@ fn guardar_producto(
         ).map_err(|e| e.to_string())?;
 
         let product_id = db.last_insert_rowid();
+
+        // Las piezas se capturan por combinación. Repartir la misma cantidad
+        // entre todas multiplicaba el inventario: nueve vestidos con tres
+        // tallas y tres colores se convertían en ochenta y uno.
+        if !combinaciones.is_empty() {
+            let mut total = 0;
+            for (talla, color) in &combinaciones {
+                let cantidad = piezas_de(&entrada.piezas, talla, color).unwrap_or(existencia).max(0);
+                total += cantidad;
+                db.execute(
+                    "INSERT INTO product_variants (product_id, size, color, stock)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![product_id, talla, color, cantidad],
+                ).map_err(|e| e.to_string())?;
+            }
+            // El stock del producto es la suma de sus variantes.
+            db.execute(
+                "UPDATE products SET has_variants = 1, stock = ?1 WHERE id = ?2",
+                params![total, product_id],
+            ).map_err(|e| e.to_string())?;
+        }
 
         for foto in &entrada.fotos {
             agregar_foto(db, &NuevaFotoDto {
@@ -318,6 +476,7 @@ pub fn start_capture_server(
     sessions: State<'_, SessionState>,
     captura: State<'_, Arc<CaptureState>>,
     token: String,
+    ip_preferida: Option<String>,
 ) -> Result<EstadoCaptura, String> {
     require_admin(&sessions, &token)?;
 
@@ -325,13 +484,24 @@ pub fn start_capture_server(
         let guard = captura.activo.lock().map_err(|e| e.to_string())?;
         if guard.is_some() {
             drop(guard);
-            return capture_server_status(captura);
+            return capture_server_status(sessions, captura, token);
         }
     }
 
-    let ip = ip_local().ok_or(
-        "No se encontró una dirección de red. Conecta este equipo al WiFi de la tienda.",
-    )?;
+    // El usuario puede forzar una dirección concreta cuando la automática no es
+    // la que ve el celular.
+    let ip = match ip_preferida {
+        Some(elegida) if !elegida.trim().is_empty() => {
+            let existe = direcciones_disponibles().iter().any(|d| d.ip == elegida);
+            if !existe {
+                return Err(format!("La dirección {} ya no está disponible", elegida));
+            }
+            elegida
+        }
+        _ => ip_local().ok_or(
+            "No se encontró una dirección de red. Conecta este equipo al WiFi de la tienda.",
+        )?,
+    };
     let codigo = nuevo_codigo();
 
     let ctx = Contexto {
@@ -379,7 +549,7 @@ pub fn start_capture_server(
         });
     }
 
-    capture_server_status(captura)
+    capture_server_status(sessions, captura, token)
 }
 
 #[tauri::command]
@@ -394,25 +564,46 @@ pub fn stop_capture_server(
     if let Some(estado) = guard.take() {
         let _ = estado.apagar.send(());
     }
-    Ok(EstadoCaptura { encendido: false, url: None, codigo: None, qr_svg: None })
+    Ok(EstadoCaptura {
+        encendido: false, url: None, codigo: None, qr_svg: None,
+        interfaz: None, alternativas: direcciones_disponibles(),
+    })
 }
 
 #[tauri::command]
 pub fn capture_server_status(
+    sessions: State<'_, SessionState>,
     captura: State<'_, Arc<CaptureState>>,
+    token: String,
 ) -> Result<EstadoCaptura, String> {
+    // El estado incluye la dirección y el código de emparejamiento: sin sesión
+    // no tiene por qué verlos nadie, igual que para encender o apagar.
+    require_auth(&sessions, &token)?;
+
     let guard = captura.activo.lock().map_err(|e| e.to_string())?;
+    // Enumerar las interfaces del equipo no es gratis y el botón de Productos
+    // consulta esto cada pocos segundos: se hace una sola vez.
+    let alternativas = direcciones_disponibles();
     match guard.as_ref() {
         Some(e) => {
             let url = format!("http://{}:{}/?c={}", e.ip, e.puerto, e.codigo);
+            let interfaz = alternativas
+                .iter()
+                .find(|d| d.ip == e.ip)
+                .map(|d| d.interfaz.clone());
             Ok(EstadoCaptura {
                 encendido: true,
                 qr_svg: qr_svg(&url),
                 url: Some(url),
                 codigo: Some(e.codigo.clone()),
+                interfaz,
+                alternativas,
             })
         }
-        None => Ok(EstadoCaptura { encendido: false, url: None, codigo: None, qr_svg: None }),
+        None => Ok(EstadoCaptura {
+            encendido: false, url: None, codigo: None, qr_svg: None,
+            interfaz: None, alternativas,
+        }),
     }
 }
 
@@ -436,25 +627,17 @@ mod tests {
 
     fn entrada(nombre: &str, precio: Option<f64>, fotos: usize) -> ProductoDelCelular {
         ProductoDelCelular {
-            codigo: "123456".into(),
             nombre: nombre.into(),
             precio,
             costo: None,
             existencia: Some(3),
             notas: None,
+            tallas: vec![],
+            colores: vec![],
+            piezas: vec![],
             fotos: (0..fotos)
                 .map(|_| FotoDelCelular { photo: jpeg(), thumbnail: jpeg() })
                 .collect(),
-        }
-    }
-
-    fn limpiar(db: &rusqlite::Connection) {
-        let nombres: Vec<(String, String)> = db
-            .prepare("SELECT file_name, thumb_name FROM product_images").unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
-            .collect::<Result<Vec<_>, _>>().unwrap();
-        for (f, t) in nombres {
-            crate::photos::borrar(&f, &t);
         }
     }
 
@@ -474,7 +657,6 @@ mod tests {
 
         let fotos: i64 = conn.query_row("SELECT COUNT(*) FROM product_images", [], |r| r.get(0)).unwrap();
         assert_eq!(fotos, 2);
-        limpiar(&conn);
     }
 
     #[test]
@@ -485,7 +667,6 @@ mod tests {
         let activo: i32 = conn.query_row(
             "SELECT is_active FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
         assert_eq!(activo, 0);
-        limpiar(&conn);
     }
 
     #[test]
@@ -525,6 +706,257 @@ mod tests {
     }
 
     #[test]
+    fn las_tallas_y_colores_se_cruzan_en_variantes() {
+        let conn = db();
+        let mut e = entrada("Vestido", Some(499.0), 0);
+        e.tallas = vec!["S".into(), "M".into(), "L".into()];
+        e.colores = vec!["Rojo".into(), "Azul".into()];
+        e.existencia = Some(2);
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 6, "tres tallas por dos colores");
+
+        // El stock del producto debe ser la suma de sus variantes.
+        let (stock, tiene): (i32, i32) = conn.query_row(
+            "SELECT stock, has_variants FROM products WHERE sku = ?1",
+            params![sku], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stock, 12);
+        assert_eq!(tiene, 1);
+    }
+
+    #[test]
+    fn las_piezas_se_capturan_por_combinacion_no_se_multiplican() {
+        // Nueve vestidos en tres tallas no son veintisiete: son nueve
+        // repartidos. Antes se ponían nueve de cada una.
+        let conn = db();
+        let mut e = entrada("Vestido", Some(499.0), 0);
+        e.tallas = vec!["CH".into(), "M".into(), "G".into()];
+        e.existencia = Some(9);
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: 2 },
+            PiezasDeVariante { talla: Some("M".into()), color: None, cantidad: 4 },
+            PiezasDeVariante { talla: Some("G".into()), color: None, cantidad: 3 },
+        ];
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row(
+            "SELECT stock FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 9, "el total es la suma de lo capturado, no un múltiplo");
+
+        let de_mediana: i32 = conn.query_row(
+            "SELECT stock FROM product_variants WHERE size = 'M'", [], |r| r.get(0)).unwrap();
+        assert_eq!(de_mediana, 4);
+    }
+
+    #[test]
+    fn las_piezas_por_talla_y_color_se_respetan_una_a_una() {
+        let conn = db();
+        let mut e = entrada("Blusa", Some(299.0), 0);
+        e.tallas = vec!["CH".into(), "G".into()];
+        e.colores = vec!["Rojo".into(), "Azul".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: Some("Rojo".into()), cantidad: 1 },
+            PiezasDeVariante { talla: Some("CH".into()), color: Some("Azul".into()), cantidad: 2 },
+            PiezasDeVariante { talla: Some("G".into()), color: Some("Rojo".into()), cantidad: 3 },
+            PiezasDeVariante { talla: Some("G".into()), color: Some("Azul".into()), cantidad: 4 },
+        ];
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row(
+            "SELECT stock FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 10);
+
+        let g_azul: i32 = conn.query_row(
+            "SELECT stock FROM product_variants WHERE size = 'G' AND color = 'Azul'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(g_azul, 4);
+    }
+
+    #[test]
+    fn una_sola_talla_usa_la_cantidad_general_sin_preguntar() {
+        // Con una sola combinación no hay nada que repartir.
+        let conn = db();
+        let mut e = entrada("Bufanda", Some(99.0), 0);
+        e.tallas = vec!["Unitalla".into()];
+        e.existencia = Some(6);
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row(
+            "SELECT stock FROM products WHERE sku = ?1", params![sku], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 6);
+    }
+
+    #[test]
+    fn una_combinacion_sin_piezas_capturadas_usa_la_cantidad_general() {
+        let conn = db();
+        let mut e = entrada("Playera", Some(199.0), 0);
+        e.tallas = vec!["CH".into(), "G".into()];
+        e.existencia = Some(5);
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: 2 },
+        ];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let g: i32 = conn.query_row(
+            "SELECT stock FROM product_variants WHERE size = 'G'", [], |r| r.get(0)).unwrap();
+        assert_eq!(g, 5, "lo que no se capturó cae en la cantidad general");
+    }
+
+    #[test]
+    fn las_piezas_se_emparejan_sin_importar_mayusculas_ni_espacios() {
+        let conn = db();
+        let mut e = entrada("Falda", Some(350.0), 0);
+        e.tallas = vec!["M".into()];
+        e.colores = vec!["Rojo".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some(" m ".into()), color: Some("ROJO".into()), cantidad: 7 },
+        ];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row("SELECT stock FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 7);
+    }
+
+    #[test]
+    fn una_cantidad_negativa_por_variante_se_trata_como_cero() {
+        let conn = db();
+        let mut e = entrada("Rara", Some(10.0), 0);
+        e.tallas = vec!["CH".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: -5 },
+        ];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let stock: i32 = conn.query_row("SELECT stock FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 0);
+    }
+
+    #[test]
+    fn solo_tallas_no_inventa_colores() {
+        let conn = db();
+        let mut e = entrada("Playera", Some(199.0), 0);
+        e.tallas = vec!["CH".into(), "G".into()];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants WHERE color IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 2);
+    }
+
+    #[test]
+    fn solo_colores_tampoco_inventa_tallas() {
+        let conn = db();
+        let mut e = entrada("Bufanda", Some(99.0), 0);
+        e.colores = vec!["Negro".into()];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants WHERE size IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 1);
+    }
+
+    #[test]
+    fn sin_tallas_ni_colores_el_producto_no_lleva_variantes() {
+        let conn = db();
+        let mut e = entrada("Cinturón", Some(150.0), 0);
+        e.existencia = Some(7);
+
+        let sku = guardar_producto(&conn, e).unwrap();
+
+        let (stock, tiene): (i32, i32) = conn.query_row(
+            "SELECT stock, has_variants FROM products WHERE sku = ?1",
+            params![sku], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stock, 7);
+        assert_eq!(tiene, 0);
+    }
+
+    #[test]
+    fn las_tallas_repetidas_o_vacias_se_descartan() {
+        let conn = db();
+        let mut e = entrada("Blusa", Some(299.0), 0);
+        e.tallas = vec!["M".into(), " m ".into(), "".into(), "  ".into(), "G".into()];
+
+        guardar_producto(&conn, e).unwrap();
+
+        let variantes: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 2, "'M' y ' m ' son la misma talla");
+    }
+
+    #[test]
+    fn un_cruce_absurdo_de_tallas_y_colores_se_rechaza() {
+        let conn = db();
+        let mut e = entrada("Imposible", Some(10.0), 0);
+        e.tallas = (0..20).map(|i| format!("T{}", i)).collect();
+        e.colores = (0..20).map(|i| format!("C{}", i)).collect();
+
+        let err = guardar_producto(&conn, e).unwrap_err();
+        assert!(err.contains("combinaciones"), "mensaje poco claro: {}", err);
+
+        let productos: i64 = conn.query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(productos, 0, "no debe quedar el producto sin sus variantes");
+    }
+
+    #[test]
+    fn normalizar_conserva_el_orden_en_que_se_capturaron() {
+        let v = normalizar(&["L".into(), "S".into(), "M".into(), "s".into()]);
+        assert_eq!(v, vec!["L", "S", "M"]);
+    }
+
+    #[test]
+    fn las_interfaces_de_vpn_y_contenedores_se_reconocen() {
+        // Con un VPN encendido, su túnel tiene una IP privada válida a la que el
+        // celular no llega nunca; no puede ser la que aparece en el QR.
+        for virtual_ in ["utun4", "utun0", "tun0", "tap0", "ppp0", "docker0", "vmnet1", "bridge100"] {
+            assert!(es_interfaz_virtual(virtual_), "{} debería tratarse como virtual", virtual_);
+        }
+        for real in ["en0", "en1", "eth0", "wlan0", "Wi-Fi", "Ethernet"] {
+            assert!(!es_interfaz_virtual(real), "{} es una interfaz real", real);
+        }
+    }
+
+    #[test]
+    fn la_deteccion_de_mayusculas_no_deja_pasar_un_tunel() {
+        assert!(es_interfaz_virtual("UTUN4"));
+        assert!(es_interfaz_virtual("Docker0"));
+    }
+
+    #[test]
+    fn solo_se_ofrecen_direcciones_privadas_alcanzables() {
+        // No se puede fijar qué interfaces tiene la máquina que corre la prueba,
+        // pero sí que nada de lo ofrecido sea inservible para un celular.
+        for d in direcciones_disponibles() {
+            let ip: std::net::Ipv4Addr = d.ip.parse().expect("debe ser IPv4");
+            assert!(ip.is_private(), "{} no es una dirección de red local", d.ip);
+            assert!(!ip.is_loopback(), "{} es loopback", d.ip);
+            assert!(!ip.is_link_local(), "{} es autoasignada", d.ip);
+            assert!(!d.interfaz.is_empty());
+        }
+    }
+
+    #[test]
+    fn las_interfaces_reales_se_ofrecen_antes_que_los_tuneles() {
+        let lista = direcciones_disponibles();
+        let primer_virtual = lista.iter().position(|d| es_interfaz_virtual(&d.interfaz));
+        let ultima_real = lista.iter().rposition(|d| !es_interfaz_virtual(&d.interfaz));
+
+        if let (Some(v), Some(r)) = (primer_virtual, ultima_real) {
+            assert!(r < v, "una interfaz virtual quedó antes que una real: {:?}", lista);
+        }
+    }
+
+    #[test]
     fn el_codigo_de_emparejamiento_tiene_seis_digitos() {
         for _ in 0..20 {
             let c = nuevo_codigo();
@@ -553,6 +985,34 @@ mod tests {
         let svg = qr_svg("http://192.168.1.50:7423/?c=123456").unwrap();
         assert!(svg.contains("<svg"));
         assert!(svg.len() > 200);
+    }
+
+    #[test]
+    fn el_qr_escala_a_su_contenedor_en_vez_de_recortarse() {
+        // Con ancho y alto en píxeles, el código se cortaba dentro de un
+        // recuadro más chico y dejaba de poder escanearse.
+        let svg = qr_svg("http://192.168.1.50:7423/?c=123456").unwrap();
+        assert!(svg.contains(r#"width="100%""#), "falta el ancho relativo: {}", &svg[..120]);
+        assert!(svg.contains(r#"height="100%""#), "falta el alto relativo");
+        assert!(svg.contains("viewBox"), "sin viewBox no puede escalar");
+    }
+
+    #[test]
+    fn escalable_no_confunde_el_ancho_del_svg_con_el_de_una_figura() {
+        // Buscar "width=" en todo el documento daba con el trazo de adentro y
+        // dejaba el SVG con su tamaño fijo, es decir recortado otra vez.
+        let original = r#"<svg width="220" height="220" viewBox="0 0 9 9"><path stroke-width="2"/></svg>"#;
+        let resultado = escalable(original);
+        assert!(resultado.contains(r#"<svg width="100%" height="100%""#));
+        assert!(resultado.contains(r#"stroke-width="2""#), "no debe tocar la figura");
+    }
+
+    #[test]
+    fn escalable_no_toca_el_resto_del_svg() {
+        let original = r#"<svg width="220" height="220" viewBox="0 0 25 25"><rect x="1" y="2"/></svg>"#;
+        let resultado = escalable(original);
+        assert!(resultado.contains(r#"viewBox="0 0 25 25""#));
+        assert!(resultado.contains(r#"<rect x="1" y="2"/>"#));
     }
 }
 
@@ -742,6 +1202,58 @@ mod http {
             let (estado, _) = pedir(s.puerto, "GET", ruta, "123456", None);
             assert_eq!(estado, 404, "la ruta {} no debería existir", ruta);
         }
+    }
+
+    #[test]
+    fn la_pagina_ofrece_camara_y_galeria_por_separado() {
+        // Un solo botón deja al teléfono decidir, y decide distinto en cada
+        // modelo; la encargada necesita poder elegir.
+        let s = levantar("123456");
+        let (_, cuerpo) = pedir(s.puerto, "GET", "/", "", None);
+
+        assert!(cuerpo.contains("Tomar foto"));
+        assert!(cuerpo.contains("De la galería"));
+        assert!(cuerpo.contains(r#"capture="environment""#), "falta el atributo que abre la cámara");
+    }
+
+    #[test]
+    fn la_pagina_permite_capturar_tallas_y_colores() {
+        let s = levantar("123456");
+        let (_, cuerpo) = pedir(s.puerto, "GET", "/", "", None);
+
+        assert!(cuerpo.contains("Tallas"));
+        assert!(cuerpo.contains("Colores"));
+    }
+
+    #[test]
+    fn un_producto_con_tallas_llega_con_sus_variantes() {
+        let s = levantar("123456");
+        let cuerpo = r#"{"codigo":"","nombre":"Vestido amarillo","precio":499.0,
+            "existencia":2,"tallas":["S","M","L"],"colores":["Amarillo"],"fotos":[]}"#;
+
+        let (estado, resp) = pedir(s.puerto, "POST", "/api/producto", "123456", Some(cuerpo));
+        assert_eq!(estado, 200, "respuesta: {}", resp);
+
+        let db = s.db.lock().unwrap();
+        let variantes: i64 = db.query_row(
+            "SELECT COUNT(*) FROM product_variants", [], |r| r.get(0)).unwrap();
+        assert_eq!(variantes, 3);
+
+        let stock: i32 = db.query_row("SELECT stock FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 6, "dos piezas por cada una de las tres tallas");
+    }
+
+    #[test]
+    fn un_producto_sin_precio_llega_como_borrador() {
+        let s = levantar("123456");
+        let cuerpo = r#"{"codigo":"","nombre":"Falta precio","existencia":1,"fotos":[]}"#;
+
+        let (estado, _) = pedir(s.puerto, "POST", "/api/producto", "123456", Some(cuerpo));
+        assert_eq!(estado, 200);
+
+        let activo: i32 = s.db.lock().unwrap()
+            .query_row("SELECT is_active FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(activo, 0);
     }
 
     #[test]

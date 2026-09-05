@@ -373,12 +373,21 @@ export interface CreatePromotionDto {
 }
 
 // Customer types
+export interface DireccionRed {
+    interfaz: string;
+    ip: string;
+}
+
 export interface CaptureStatus {
     encendido: boolean;
     url: string | null;
     codigo: string | null;
     /** QR con la dirección ya emparejada, listo para insertar. */
     qr_svg: string | null;
+    /** Interfaz en uso, para reconocer si es la del WiFi de la tienda. */
+    interfaz: string | null;
+    /** Otras direcciones del equipo, por si el celular no alcanza la elegida. */
+    alternativas: DireccionRed[];
 }
 
 export interface ProductImage {

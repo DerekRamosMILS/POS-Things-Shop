@@ -14,13 +14,31 @@ use crate::session::{require_admin, SessionState};
 #[tauri::command]
 pub fn seed_demo_data(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<String, String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let seeded: String = db
         .query_row("SELECT value FROM system_config WHERE key = 'demo_seeded'", [], |r| r.get(0))
         .unwrap_or_default();
     if seeded == "1" {
         return Err("Los datos de prueba ya fueron cargados anteriormente".to_string());
+    }
+
+    // Los datos de prueba incluyen ventas fechadas en días pasados, y esas
+    // ventas entran a los reportes y a las utilidades como cualquier otra. En
+    // una tienda que ya vendió es contaminación permanente: no hay forma de
+    // borrarlas desde la aplicación. Un clic curioso no puede costar eso.
+    let ventas_reales: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sales WHERE folio NOT LIKE 'DEMO-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if ventas_reales > 0 {
+        return Err(format!(
+            "Esta tienda ya tiene {} venta(s) registradas. Los datos de prueba incluyen ventas de ejemplo que se mezclarían con tus reportes, así que solo se pueden cargar en una instalación nueva.",
+            ventas_reales
+        ));
     }
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;

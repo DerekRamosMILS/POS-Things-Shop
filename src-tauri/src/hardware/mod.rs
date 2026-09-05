@@ -5,6 +5,13 @@
 //! spooler del sistema en modo RAW (funciona con cualquier driver instalado) y
 //! el comando que abre el cajón es configurable, porque es lo único que varía
 //! de verdad entre modelos.
+//!
+//! Regla de este módulo: **el candado de la base se suelta antes de hablar con
+//! la impresora**. Hablar con el spooler puede tardar lo que quiera —impresora
+//! apagada, sin papel, o de red que no contesta— y mientras el candado esté
+//! tomado no corre ningún otro comando: no se puede cobrar, ni buscar, ni abrir
+//! el cajón. Con gente formada eso es la tienda parada. Se arma el ticket con
+//! la base abierta, se cierra, y solo entonces se imprime.
 
 pub mod escpos;
 pub mod spooler;
@@ -77,17 +84,20 @@ pub fn list_printers(sessions: State<SessionState>, token: String) -> Result<Vec
 #[tauri::command]
 pub fn open_cash_drawer(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<(), String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
 
-    let setup = printer_setup(&db);
-    if setup.name.is_empty() {
-        return Err(
-            "No hay impresora configurada. El cajón se abre a través de la impresora de tickets."
-                .to_string(),
-        );
-    }
+    let (nombre, bytes) = {
+        let db = state.conn();
+        let setup = printer_setup(&db);
+        if setup.name.is_empty() {
+            return Err(
+                "No hay impresora configurada. El cajón se abre a través de la impresora de tickets."
+                    .to_string(),
+            );
+        }
+        (setup.name, drawer_bytes(&db)?)
+    };
 
-    spooler::print_raw(&setup.name, "Abrir cajon", &drawer_bytes(&db)?)
+    spooler::print_raw(&nombre, "Abrir cajon", &bytes)
 }
 
 /// Imprime un ticket de prueba y, opcionalmente, abre el cajón. Es lo que se usa
@@ -101,7 +111,7 @@ pub fn test_printer(
     open_drawer: bool,
 ) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let setup = printer_setup(&db);
     let target = printer.filter(|p| !p.trim().is_empty()).unwrap_or(setup.name);
@@ -125,7 +135,9 @@ pub fn test_printer(
         b.raw(&drawer_bytes(&db)?);
     }
 
-    spooler::print_raw(&target, "Prueba Things Shop", &b.finish())
+    let bytes = b.finish();
+    drop(db);
+    spooler::print_raw(&target, "Prueba Things Shop", &bytes)
 }
 
 /// Imprime el ticket de una venta ya registrada.
@@ -141,7 +153,7 @@ pub fn print_sale_receipt(
     open_drawer: Option<bool>,
 ) -> Result<(), String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let setup = printer_setup(&db);
     if setup.name.is_empty() {
@@ -287,7 +299,11 @@ pub fn print_sale_receipt(
         b.raw(&drawer_bytes(&db)?);
     }
 
-    spooler::print_raw(&setup.name, &format!("Ticket {}", folio), &b.finish())
+    // El ticket ya está armado: se suelta la base antes de hablar con la
+    // impresora, que es lo que puede tardar.
+    let bytes = b.finish();
+    drop(db);
+    spooler::print_raw(&setup.name, &format!("Ticket {}", folio), &bytes)
 }
 
 /// Comprobante de un apartado: lo que el cliente se lleva con su saldo.
@@ -302,7 +318,7 @@ pub fn print_layaway_receipt(
     layaway_id: i64,
 ) -> Result<(), String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let setup = printer_setup(&db);
     if setup.name.is_empty() {
@@ -417,7 +433,9 @@ pub fn print_layaway_receipt(
     }
     b.feed(3).cut();
 
-    spooler::print_raw(&setup.name, &format!("Apartado {}", folio), &b.finish())
+    let bytes = b.finish();
+    drop(db);
+    spooler::print_raw(&setup.name, &format!("Apartado {}", folio), &bytes)
 }
 
 fn method_label(method: &str) -> &'static str {

@@ -1,17 +1,16 @@
-//! Almacenamiento de las fotos de producto como archivos.
+//! Utilidades para las fotos de producto.
 //!
-//! Las fotos no viven dentro de la base de datos: se guardan en `fotos/` dentro
-//! del directorio de datos y la fila solo conserva el nombre del archivo.
+//! Las fotos viven dentro de la base, no en archivos. La 018 las sacó a `fotos/`
+//! para que la base quedara chica; el costo apareció en cuanto la tienda empezó
+//! a usarla. Un archivo que ninguna fila nombra es basura que hay que barrer, y
+//! barrer archivos no tiene vuelta atrás: restaurar un respaldo dejaba sin dueño
+//! todo lo fotografiado después. El respaldo tampoco se las llevaba.
 //!
-//! Tres razones. El respaldo copia la base entera cada vez, y con las fotos
-//! adentro treinta respaldos de un catálogo fotografiado son gigabytes. Un
-//! producto de ropa necesita más de una foto. Y lo más importante: reducirlas al
-//! guardarlas destruye el original, así que el día que se quiera un catálogo
-//! impreso o una tienda en línea habría que volver a fotografiar toda la
-//! mercancía.
+//! Aquí solo queda lo que sigue haciendo falta: validar los bytes, convertirlos
+//! a data URL y leer los archivos viejos mientras se terminan de incorporar.
 //!
 //! El redimensionado lo hace quien envía la foto —la app de escritorio o el
-//! celular, ambos con canvas— y aquí solo se escriben bytes. Así se evita
+//! celular, ambos con canvas— y aquí solo se manejan bytes. Así se evita
 //! arrastrar una biblioteca de imágenes al binario.
 
 use std::fs;
@@ -59,22 +58,8 @@ pub fn es_jpeg(bytes: &[u8]) -> bool {
     bytes.len() > 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
 }
 
-/// Par de nombres generado para una foto nueva: original y miniatura.
-pub struct NombresFoto {
-    pub file_name: String,
-    pub thumb_name: String,
-}
-
-pub fn nuevos_nombres() -> NombresFoto {
-    let id = uuid::Uuid::new_v4().to_string();
-    NombresFoto {
-        file_name: format!("{}.jpg", id),
-        thumb_name: format!("{}_t.jpg", id),
-    }
-}
-
-/// Escribe una foto y su miniatura, validando ambas.
-pub fn guardar(nombres: &NombresFoto, foto: &[u8], miniatura: &[u8]) -> Result<(), String> {
+/// Comprueba que un par foto/miniatura sea guardable antes de tocar la base.
+pub fn validar(foto: &[u8], miniatura: &[u8]) -> Result<(), String> {
     for (bytes, que) in [(foto, "La foto"), (miniatura, "La miniatura")] {
         if bytes.is_empty() {
             return Err(format!("{} llegó vacía", que));
@@ -86,75 +71,35 @@ pub fn guardar(nombres: &NombresFoto, foto: &[u8], miniatura: &[u8]) -> Result<(
             return Err(format!("{} no es una imagen JPEG válida", que));
         }
     }
-
-    let ruta_foto = safe_path(&nombres.file_name)?;
-    let ruta_thumb = safe_path(&nombres.thumb_name)?;
-
-    fs::write(&ruta_foto, foto).map_err(|e| format!("No se pudo guardar la foto: {}", e))?;
-    if let Err(e) = fs::write(&ruta_thumb, miniatura) {
-        // Sin miniatura la foto quedaría a medias; mejor no dejar el archivo suelto.
-        let _ = fs::remove_file(&ruta_foto);
-        return Err(format!("No se pudo guardar la miniatura: {}", e));
-    }
     Ok(())
 }
 
-/// Lee una foto como data URL para mostrarla en la interfaz.
-pub fn leer_como_data_url(file_name: &str) -> Result<String, String> {
+/// Envuelve bytes JPEG en un data URL para mostrarlos en la interfaz.
+pub fn como_data_url(bytes: &[u8]) -> String {
+    format!("data:image/jpeg;base64,{}", base64_encode(bytes))
+}
+
+/// Lee un archivo de la carpeta de fotos. Solo para las que aún no se han
+/// incorporado a la base.
+pub fn leer(file_name: &str) -> Result<Vec<u8>, String> {
     let ruta = safe_path(file_name)?;
-    let bytes = fs::read(&ruta).map_err(|e| format!("No se pudo leer la foto: {}", e))?;
-    Ok(format!("data:image/jpeg;base64,{}", base64_encode(&bytes)))
+    fs::read(&ruta).map_err(|e| format!("No se pudo leer la foto: {}", e))
 }
 
-/// Borra una foto y su miniatura. Que ya no existan no es un error.
-pub fn borrar(file_name: &str, thumb_name: &str) {
-    for nombre in [file_name, thumb_name] {
-        if let Ok(ruta) = safe_path(nombre) {
-            let _ = fs::remove_file(ruta);
-        }
-    }
+/// Lee una foto de archivo como data URL. Ídem.
+pub fn leer_como_data_url(file_name: &str) -> Result<String, String> {
+    Ok(como_data_url(&leer(file_name)?))
 }
 
-/// Elimina de la carpeta las fotos que ya ninguna fila referencia.
-///
-/// Un producto borrado se lleva sus filas por cascada, pero los archivos se
-/// quedarían ocupando disco para siempre.
-pub fn limpiar_huerfanas(db: &rusqlite::Connection) -> usize {
-    let referenciadas: std::collections::HashSet<String> = match db
-        .prepare("SELECT file_name FROM product_images UNION SELECT thumb_name FROM product_images")
-    {
-        Ok(mut stmt) => match stmt.query_map([], |r| r.get::<_, String>(0)) {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => return 0,
-        },
-        Err(_) => return 0,
-    };
-
-    let Ok(entradas) = fs::read_dir(photos_dir()) else { return 0 };
-    let mut borradas = 0;
-    for entrada in entradas.flatten() {
-        let nombre = entrada.file_name().to_string_lossy().to_string();
-        let huerfana = nombre.ends_with(".jpg") && !referenciadas.contains(&nombre);
-        if huerfana && fs::remove_file(entrada.path()).is_ok() {
-            borradas += 1;
-        }
-    }
-    if borradas > 0 {
-        log::info!("Fotos huérfanas eliminadas: {}", borradas);
-    }
-    borradas
-}
-
-/// Espacio que ocupan las fotos, para mostrarlo en el diagnóstico.
-pub fn espacio_usado() -> u64 {
-    fs::read_dir(photos_dir())
-        .map(|d| {
-            d.flatten()
-                .filter_map(|e| e.metadata().ok())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
+/// Espacio que ocupan las fotos dentro de la base, para el diagnóstico.
+pub fn espacio_usado(db: &rusqlite::Connection) -> u64 {
+    db.query_row(
+        "SELECT COALESCE(SUM(LENGTH(photo)) + SUM(LENGTH(thumbnail)), 0) FROM product_images",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+    .max(0) as u64
 }
 
 // ─── base64 ──────────────────────────────────────────────────────────────────
@@ -274,14 +219,4 @@ mod tests {
         assert!(safe_path("abc123-def_t.jpg").is_ok());
     }
 
-    #[test]
-    fn cada_foto_recibe_un_nombre_irrepetible() {
-        let a = nuevos_nombres();
-        let b = nuevos_nombres();
-        assert_ne!(a.file_name, b.file_name);
-        assert!(a.file_name.ends_with(".jpg"));
-        assert!(a.thumb_name.ends_with("_t.jpg"));
-        assert!(safe_path(&a.file_name).is_ok());
-        assert!(safe_path(&a.thumb_name).is_ok());
-    }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rusqlite::params;
 use serde::Deserialize;
 use tauri::State;
@@ -36,7 +38,7 @@ fn default_refund_method() -> String {
 #[tauri::command]
 pub fn create_return(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateReturnDto) -> Result<f64, String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_devolucion(&db, user_id, data)
 }
 
@@ -82,6 +84,11 @@ pub fn registrar_devolucion(
         struct Ri { sale_item_id: i64, product_id: i64, variant_id: Option<i64>, quantity: i32, refund: Cents }
         let mut ris: Vec<Ri> = Vec::new();
         let mut total_refund = Cents::ZERO;
+        // Lo que las partidas anteriores de esta misma devolución ya tomaron.
+        // El renglón se marca como devuelto hasta el segundo recorrido, así que
+        // sin esto la misma partida repetida se mide dos veces contra lo mismo
+        // y se devuelven más piezas —y más dinero— de las que se vendieron.
+        let mut ya_tomado: HashMap<i64, i32> = HashMap::new();
 
         for it in &data.items {
             if it.quantity <= 0 {
@@ -94,13 +101,15 @@ pub fn registrar_devolucion(
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                 ).map_err(|_| "Esa partida no pertenece a la venta".to_string())?;
 
-            let available = sold_qty - returned_qty;
+            let available =
+                sold_qty - returned_qty - ya_tomado.get(&it.sale_item_id).copied().unwrap_or(0);
             if it.quantity > available {
-                return Err(format!("Solo puedes devolver hasta {} unidad(es) de esa línea", available));
+                return Err(format!("Solo puedes devolver hasta {} unidad(es) de esa línea", available.max(0)));
             }
             if sold_qty <= 0 {
                 continue;
             }
+            *ya_tomado.entry(it.sale_item_id).or_insert(0) += it.quantity;
 
             // Parte del renglón que corresponde a las piezas devueltas...
             let neto_devuelto = Cents::from_pesos(line_net)
@@ -315,6 +324,36 @@ mod tests {
                 }),
             ).unwrap()
         }
+    }
+
+    #[test]
+    fn la_misma_partida_repetida_no_devuelve_de_mas() {
+        // El renglón se marca como devuelto hasta el segundo recorrido, así que
+        // la misma partida dos veces se medía dos veces contra lo mismo: salían
+        // del cajón seis piezas de una venta de cinco.
+        let t = Tienda::nueva().con_caja();
+        let blusa = t.producto("BLU", 100.0, 10);
+        let venta = t.vender(vec![(blusa, 5, 0.0)], None);
+        let partida = t.partidas(venta)[0];
+
+        let error = t.devolver(venta, vec![(partida, 3), (partida, 3)], "cash");
+
+        assert!(error.is_err(), "seis de cinco no deberían devolverse");
+        assert_eq!(t.stock(blusa), 5, "una devolución rechazada no toca el inventario");
+        assert_eq!(t.caja().total_refunds_cash, 0.0, "ni el cajón");
+    }
+
+    #[test]
+    fn dos_partidas_de_la_misma_venta_se_devuelven_juntas() {
+        let t = Tienda::nueva().con_caja();
+        let blusa = t.producto("BLU", 100.0, 10);
+        let venta = t.vender(vec![(blusa, 5, 0.0)], None);
+        let partida = t.partidas(venta)[0];
+
+        let devuelto = t.devolver(venta, vec![(partida, 2), (partida, 3)], "cash").unwrap();
+
+        assert_eq!(devuelto, t.total_venta(venta), "cinco de cinco es la venta entera");
+        assert_eq!(t.stock(blusa), 10);
     }
 
     #[test]

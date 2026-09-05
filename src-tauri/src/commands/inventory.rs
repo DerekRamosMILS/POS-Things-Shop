@@ -14,7 +14,7 @@ pub fn get_inventory_movements(
     limit: Option<i32>,
 ) -> Result<Vec<InventoryMovement>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let limit = limit.unwrap_or(200);
 
@@ -81,7 +81,7 @@ pub fn adjust_stock(
     data: AdjustStockDto,
 ) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     ajustar_stock(&db, user_id, data)
 }
 
@@ -153,7 +153,7 @@ pub fn register_purchase(
     data: RegisterPurchaseDto,
 ) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_compra(&db, user_id, data)
 }
 
@@ -230,13 +230,13 @@ pub fn get_low_stock_products(
     token: String,
 ) -> Result<Vec<crate::models::product::Product>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare(
         "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
                 p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
                 p.low_stock_ignored, p.created_at, p.updated_at, c.name as category_name, s.name as supplier_name,
-                (p.image_url IS NOT NULL AND p.image_url != '') as has_image, p.has_variants
+                EXISTS(SELECT 1 FROM product_images WHERE product_id = p.id) as has_image, p.has_variants
          FROM products p
          LEFT JOIN categories c ON p.category_id = c.id
          LEFT JOIN suppliers s ON p.supplier_id = s.id

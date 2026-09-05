@@ -1,4 +1,5 @@
-use chrono::Local;
+use std::collections::HashMap;
+
 use rusqlite::params;
 use tauri::State;
 
@@ -9,10 +10,6 @@ use crate::session::{require_admin, require_auth, SessionState};
 use crate::models::layaway::{
     CreateLayawayDto, Layaway, LayawayItem, LayawayPayment,
 };
-
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}
 
 fn variant_label(size: &Option<String>, color: &Option<String>) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -99,7 +96,7 @@ fn post_layaway_payment(
 #[tauri::command]
 pub fn create_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateLayawayDto) -> Result<Layaway, String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_apartado(&db, user_id, data)
 }
 
@@ -120,17 +117,17 @@ pub fn registrar_apartado(
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let result = (|| -> Result<Layaway, String> {
-        let today = Local::now().format("%Y%m%d").to_string();
-        let count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM layaways WHERE folio LIKE ?1",
-            params![format!("A-{}-%", today)],
-            |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
-        let folio = format!("A-{}-{:03}", today, count + 1);
+        let folio = crate::folios::siguiente(db, crate::folios::Serie::Apartados)?;
 
-        struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: f64, prev_stock: i32, variant_id: Option<i64>, variant_label: Option<String> }
+        struct Line { product_id: i64, name: String, sku: String, quantity: i32, unit_price: f64, unit_cost: f64, subtotal: Cents, variant_id: Option<i64>, variant_label: Option<String> }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
-        let mut total = 0.0;
+        let mut total = Cents::ZERO;
+
+        // Lo que los renglones anteriores de este mismo apartado ya reservaron:
+        // sin esto, dos tallas del mismo vestido se miden las dos contra la
+        // existencia completa.
+        let mut apartado_producto: HashMap<i64, i32> = HashMap::new();
+        let mut apartado_variante: HashMap<i64, i32> = HashMap::new();
 
         for item in &data.items {
             if item.quantity <= 0 {
@@ -150,28 +147,34 @@ pub fn registrar_apartado(
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|_| "La variante seleccionada no existe".to_string())?;
-                (Some(vid), Some(variant_label(&size, &color)), vstock)
+                let ya = apartado_variante.get(&vid).copied().unwrap_or(0);
+                (Some(vid), Some(variant_label(&size, &color)), vstock - ya)
             } else {
-                (None, None, product_stock)
+                let ya = apartado_producto.get(&item.product_id).copied().unwrap_or(0);
+                (None, None, product_stock - ya)
             };
 
             if available < item.quantity {
                 let label = variant_label.clone().map(|l| format!(" ({})", l)).unwrap_or_default();
                 return Err(format!("Stock insuficiente para '{}{}'. Disponible: {}", name, label, available));
             }
-            let subtotal = round2(price * item.quantity as f64);
-            total += subtotal;
-            lines.push(Line { product_id: item.product_id, name, sku, quantity: item.quantity, unit_price: price, unit_cost: cost, subtotal, prev_stock: product_stock, variant_id, variant_label });
-        }
-        total = round2(total);
 
-        if data.initial_payment > total {
+            *apartado_producto.entry(item.product_id).or_insert(0) += item.quantity;
+            if let Some(vid) = variant_id {
+                *apartado_variante.entry(vid).or_insert(0) += item.quantity;
+            }
+
+            let subtotal = Cents::from_pesos(price).times(item.quantity as i64);
+            total = total + subtotal;
+            lines.push(Line { product_id: item.product_id, name, sku, quantity: item.quantity, unit_price: price, unit_cost: cost, subtotal, variant_id, variant_label });
+        }
+        if Cents::from_pesos(data.initial_payment) > total {
             return Err("El anticipo no puede superar el total".to_string());
         }
 
         db.execute(
             "INSERT INTO layaways (folio, customer_id, user_id, total, paid, notes, due_date) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![folio, data.customer_id, user_id, total, data.initial_payment, data.notes, data.due_date],
+            params![folio, data.customer_id, user_id, total.to_pesos(), data.initial_payment, data.notes, data.due_date],
         ).map_err(|e| e.to_string())?;
         let layaway_id = db.last_insert_rowid();
 
@@ -179,14 +182,22 @@ pub fn registrar_apartado(
             db.execute(
                 "INSERT INTO layaway_items (layaway_id, product_id, product_name, product_sku, quantity, unit_price, unit_cost, subtotal, variant_id, variant_label)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![layaway_id, line.product_id, line.name, line.sku, line.quantity, line.unit_price, line.unit_cost, line.subtotal, line.variant_id, line.variant_label],
+                params![layaway_id, line.product_id, line.name, line.sku, line.quantity, line.unit_price, line.unit_cost, line.subtotal.to_pesos(), line.variant_id, line.variant_label],
             ).map_err(|e| e.to_string())?;
 
             // Reserve stock (moved out of available inventory).
-            let new_stock = line.prev_stock - line.quantity;
+            //
+            // Se lee aquí y se descuenta de forma relativa: con una foto tomada
+            // al armar los renglones, dos tallas del mismo vestido partían las
+            // dos del mismo número y la segunda deshacía la reserva de la
+            // primera.
+            let prev_stock: i32 = db
+                .query_row("SELECT stock FROM products WHERE id = ?1", params![line.product_id], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
+            let new_stock = prev_stock - line.quantity;
             db.execute(
-                "UPDATE products SET stock = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
-                params![new_stock, line.product_id],
+                "UPDATE products SET stock = stock - ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+                params![line.quantity, line.product_id],
             ).map_err(|e| e.to_string())?;
             if let Some(vid) = line.variant_id {
                 db.execute(
@@ -198,7 +209,7 @@ pub fn registrar_apartado(
             db.execute(
                 "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
                  VALUES (?1, 'adjustment', ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![line.product_id, -line.quantity, line.prev_stock, new_stock, layaway_id, reason, user_id],
+                params![line.product_id, -line.quantity, prev_stock, new_stock, layaway_id, reason, user_id],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -229,7 +240,7 @@ pub fn registrar_apartado(
 #[tauri::command]
 pub fn get_layaways(state: State<DbState>, sessions: State<SessionState>, token: String, status: Option<String>) -> Result<Vec<Layaway>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let (sql, has_filter) = match status {
         Some(_) => (format!("{} WHERE l.status = ?1 ORDER BY l.created_at DESC", SEL), true),
@@ -252,7 +263,7 @@ pub fn get_layaways(state: State<DbState>, sessions: State<SessionState>, token:
 #[tauri::command]
 pub fn get_layaway_detail(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<Layaway, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     get_layaway_internal(&db, layaway_id)
 }
 
@@ -266,7 +277,7 @@ pub fn add_layaway_payment(
     payment_method: String,
 ) -> Result<Layaway, String> {
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     abonar_apartado(&db, user_id, layaway_id, amount, &payment_method)
 }
 
@@ -304,11 +315,24 @@ pub fn abonar_apartado(
         ));
     }
 
-    post_layaway_payment(db, layaway_id, amount, payment_method, user_id)?;
-    db.execute(
-        "UPDATE layaways SET paid = paid + ?1 WHERE id = ?2",
-        params![amount, layaway_id],
-    ).map_err(|e| e.to_string())?;
+    // El abono toca tres tablas: el pago, el corte y el saldo del apartado. Sin
+    // transacción, un fallo a la mitad dejaba el dinero contado en la caja y el
+    // saldo del cliente sin bajar.
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        post_layaway_payment(db, layaway_id, amount, payment_method, user_id)?;
+        db.execute(
+            "UPDATE layaways SET paid = paid + ?1 WHERE id = ?2",
+            params![amount, layaway_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
 
     get_layaway_internal(db, layaway_id)
 }
@@ -316,43 +340,151 @@ pub fn abonar_apartado(
 #[tauri::command]
 pub fn complete_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<Layaway, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     entregar_apartado(&db, layaway_id)
 }
 
 /// Núcleo de la entrega, con la conexión explícita.
+///
+/// Entregar es cuando la prenda deja la tienda, así que es cuando se registra
+/// la venta. El inventario ya se descontó al apartar y el dinero ya entró al
+/// corte abono por abono, así que aquí no se toca ninguno de los dos: solo se
+/// deja la venta para que el reporte y las utilidades cuenten lo que de verdad
+/// se vendió.
 pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<Layaway, String> {
-
-    let (status, total, paid): (String, f64, f64) = db.query_row(
-        "SELECT status, total, paid FROM layaways WHERE id = ?1",
+    let (status, total, paid, user_id): (String, f64, f64, i64) = db.query_row(
+        "SELECT status, total, paid, user_id FROM layaways WHERE id = ?1",
         params![layaway_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     ).map_err(|e| e.to_string())?;
 
     if status != "active" {
         return Err("El apartado no está activo".to_string());
     }
-    if round2(paid) + 0.001 < round2(total) {
+    if Cents::from_pesos(paid) < Cents::from_pesos(total) {
         return Err("El apartado aún tiene saldo pendiente".to_string());
     }
 
-    db.execute(
-        "UPDATE layaways SET status = 'completed', completed_at = datetime('now','localtime') WHERE id = ?1",
-        params![layaway_id],
-    ).map_err(|e| e.to_string())?;
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        db.execute(
+            "UPDATE layaways SET status = 'completed', completed_at = datetime('now','localtime') WHERE id = ?1",
+            params![layaway_id],
+        ).map_err(|e| e.to_string())?;
+        registrar_venta_de_entrega(db, layaway_id, user_id, total)
+    })();
+
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
 
     get_layaway_internal(db, layaway_id)
 }
 
+/// Deja la venta que corresponde a un apartado entregado.
+///
+/// Ni inventario ni caja: los dos ya se movieron en su momento. Lo único que
+/// falta es la venta, con sus partidas y su costo, para que el reporte diario y
+/// la utilidad incluyan lo que salió por apartado.
+fn registrar_venta_de_entrega(
+    db: &rusqlite::Connection,
+    layaway_id: i64,
+    user_id: i64,
+    total: f64,
+) -> Result<(), String> {
+    let folio_apartado: String = db
+        .query_row("SELECT folio FROM layaways WHERE id = ?1", params![layaway_id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let customer_id: Option<i64> = db
+        .query_row("SELECT customer_id FROM layaways WHERE id = ?1", params![layaway_id], |r| r.get(0))
+        .unwrap_or(None);
+
+    // Cómo pagó: si usó más de una forma a lo largo de los abonos, es mixto.
+    let metodos: Vec<String> = db
+        .prepare("SELECT DISTINCT payment_method FROM layaway_payments WHERE layaway_id = ?1")
+        .and_then(|mut s| s.query_map(params![layaway_id], |r| r.get(0))?.collect())
+        .map_err(|e| e.to_string())?;
+    let payment_method = match metodos.len() {
+        0 => "cash".to_string(),
+        1 => metodos[0].clone(),
+        _ => "mixed".to_string(),
+    };
+
+    let folio = crate::folios::siguiente(db, crate::folios::Serie::Ventas)?;
+
+    db.execute(
+        "INSERT INTO sales (folio, user_id, cash_register_id, subtotal, discount_total, tax, total,
+                            payment_method, amount_paid, change_amount, notes, customer_id,
+                            layaway_id, terminal_id)
+         VALUES (?1, ?2, NULL, ?3, 0, 0, ?3, ?4, ?3, 0, ?5, ?6, ?7, ?8)",
+        params![
+            folio,
+            user_id,
+            total,
+            payment_method,
+            format!("Entrega del apartado {}", folio_apartado),
+            customer_id,
+            layaway_id,
+            crate::folios::terminal_id(db)
+        ],
+    ).map_err(|e| e.to_string())?;
+    let sale_id = db.last_insert_rowid();
+
+    // El desglose por forma de pago sale de los abonos, tal como se recibieron.
+    let abonos: Vec<(String, f64)> = db
+        .prepare(
+            "SELECT payment_method, SUM(amount) FROM layaway_payments
+             WHERE layaway_id = ?1 GROUP BY payment_method",
+        )
+        .and_then(|mut s| {
+            s.query_map(params![layaway_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })
+        .map_err(|e| e.to_string())?;
+    for (metodo, monto) in abonos {
+        db.execute(
+            "INSERT INTO sale_payments (sale_id, method, amount) VALUES (?1, ?2, ?3)",
+            params![sale_id, metodo, monto],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Las partidas se copian con su costo: sin él la utilidad saldría mal.
+    db.execute(
+        "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku, quantity,
+                                 unit_price, discount, subtotal, unit_cost, variant_id, variant_label)
+         SELECT ?1, product_id, product_name, product_sku, quantity,
+                unit_price, 0, subtotal, unit_cost, variant_id, variant_label
+         FROM layaway_items WHERE layaway_id = ?2",
+        params![sale_id, layaway_id],
+    ).map_err(|e| e.to_string())?;
+
+    db.execute(
+        "INSERT INTO app_logs (level, module, message, user_id) VALUES ('info', 'apartados', ?1, ?2)",
+        params![
+            format!("Apartado {} entregado y registrado como venta {}", folio_apartado, folio),
+            user_id
+        ],
+    ).ok();
+
+    Ok(())
+}
+
 #[tauri::command]
-pub fn cancel_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<(), String> {
+pub fn cancel_layaway(state: State<DbState>, sessions: State<SessionState>, token: String, layaway_id: i64) -> Result<String, String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     cancelar_apartado(&db, user_id, layaway_id)
 }
 
 /// Núcleo de la cancelación, con la conexión explícita.
-pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i64) -> Result<(), String> {
+pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i64) -> Result<String, String> {
+    // Lo abonado no se mueve solo: si se le regresa a la clienta, ese efectivo
+    // sale del cajón y el corte tiene que enterarse. El sistema no puede saber
+    // qué se acordó, así que lo dice en voz alta en vez de callarlo.
+    let abonado: f64 = db
+        .query_row("SELECT paid FROM layaways WHERE id = ?1", params![layaway_id], |r| r.get(0))
+        .unwrap_or(0.0);
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
@@ -412,7 +544,22 @@ pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i6
     match result {
         Ok(()) => {
             db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
-            Ok(())
+            if abonado > 0.0 {
+                db.execute(
+                    "INSERT INTO app_logs (level, module, message, user_id)
+                     VALUES ('warn', 'apartados', ?1, ?2)",
+                    params![
+                        format!("Apartado {} cancelado con {:.2} abonados", layaway_id, abonado),
+                        user_id
+                    ],
+                ).ok();
+                Ok(format!(
+                    "Apartado cancelado y mercancía devuelta al inventario. Tenía {:.2} abonados: si se los regresas en efectivo, anótalo como gasto para que el corte cuadre.",
+                    abonado
+                ))
+            } else {
+                Ok("Apartado cancelado y mercancía devuelta al inventario.".to_string())
+            }
         }
         Err(e) => {
             db.execute_batch("ROLLBACK;").ok();
@@ -485,6 +632,151 @@ mod tests {
         ).unwrap();
         db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
         db
+    }
+
+    #[test]
+    fn entregar_un_apartado_lo_deja_registrado_como_venta() {
+        // El reporte de ventas no veía los apartados: una tienda que aparta la
+        // mitad de lo que vende leía la mitad de lo que vendió.
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "VES", 500.0, 10);
+
+        let ap = registrar_apartado(&db, 1, apartado(p, 2, 400.0, "cash")).unwrap();
+        abonar_apartado(&db, 1, ap.id, 600.0, "card").unwrap();
+        entregar_apartado(&db, ap.id).unwrap();
+
+        let (total, metodo, partidas): (f64, String, i64) = db.query_row(
+            "SELECT s.total, s.payment_method,
+                    (SELECT COUNT(*) FROM sale_items WHERE sale_id = s.id)
+             FROM sales s WHERE s.layaway_id = ?1",
+            params![ap.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+
+        assert_eq!(total, 1000.0);
+        assert_eq!(metodo, "mixed", "pagó en efectivo y con tarjeta");
+        assert_eq!(partidas, 1);
+
+        let costo: f64 = db.query_row(
+            "SELECT unit_cost FROM sale_items WHERE sale_id = (SELECT id FROM sales WHERE layaway_id = ?1)",
+            params![ap.id], |r| r.get(0)).unwrap();
+        assert!(costo > 0.0, "sin costo la utilidad saldría mal");
+    }
+
+    #[test]
+    fn la_entrega_no_vuelve_a_tocar_el_inventario_ni_la_caja() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "BLU", 300.0, 10);
+
+        let ap = registrar_apartado(&db, 1, apartado(p, 3, 900.0, "cash")).unwrap();
+        let stock_apartado: i32 = db.query_row(
+            "SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        let efectivo_antes = caja_efectivo(&db);
+
+        entregar_apartado(&db, ap.id).unwrap();
+
+        let stock_despues: i32 = db.query_row(
+            "SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(stock_despues, stock_apartado, "el inventario se descontó al apartar");
+        assert_eq!(caja_efectivo(&db), efectivo_antes, "el dinero entró abono por abono");
+
+        let ventas_en_caja: f64 = db.query_row(
+            "SELECT total_sales FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas_en_caja, 0.0, "el corte no cuenta la entrega dos veces");
+    }
+
+    #[test]
+    fn la_venta_de_una_entrega_no_se_cancela_desde_ventas() {
+        // Cancelarla devolvería al inventario mercancía que esa venta nunca
+        // descontó. Lo que se cancela es el apartado.
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "PAN", 400.0, 10);
+        let ap = registrar_apartado(&db, 1, apartado(p, 1, 400.0, "cash")).unwrap();
+        entregar_apartado(&db, ap.id).unwrap();
+
+        let venta: i64 = db.query_row(
+            "SELECT id FROM sales WHERE layaway_id = ?1", params![ap.id], |r| r.get(0)).unwrap();
+
+        assert!(crate::commands::sales::cancelar_venta(&db, 1, venta).is_err());
+    }
+
+    #[test]
+    fn muchos_abonos_parciales_cierran_exactamente() {
+        // Sumar en coma flotante dejaba un saldo de un centavo imposible de
+        // pagar: el apartado quedaba pagado y sin poderse entregar.
+        let db = tienda();
+        abrir_caja(&db);
+        let producto = producto(&db, "TER", 33.33, 30);
+
+        let ap = registrar_apartado(&db, 1, apartado(producto, 3, 0.0, "cash")).unwrap();
+        let total = ap.total;
+
+        // Diez abonos de una décima parte, cada uno redondeado a dos decimales.
+        let parte = (total / 10.0 * 100.0).round() / 100.0;
+        let mut pagado = 0.0;
+        for _ in 0..9 {
+            abonar_apartado(&db, 1, ap.id, parte, "cash").unwrap();
+            pagado += parte;
+        }
+        let resto = ((total - pagado) * 100.0).round() / 100.0;
+        abonar_apartado(&db, 1, ap.id, resto, "cash").unwrap();
+
+        entregar_apartado(&db, ap.id).expect("pagado completo debe poder entregarse");
+    }
+
+    #[test]
+    fn apartar_dos_tallas_del_mismo_modelo_reserva_las_dos() {
+        // Igual que en una venta: dos renglones del mismo producto partían los
+        // dos de la misma foto del inventario y el segundo deshacía al primero.
+        let db = tienda();
+        abrir_caja(&db);
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, has_variants)
+             VALUES (7, 'VES', 'Vestido', 200.0, 499.0, 10, 1)", []).unwrap();
+        db.execute(
+            "INSERT INTO product_variants (id, product_id, size, stock) VALUES (1, 7, 'M', 5), (2, 7, 'G', 5)",
+            []).unwrap();
+
+        registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![
+                CreateLayawayItemDto { product_id: 7, quantity: 2, unit_price: 0.0, variant_id: Some(1) },
+                CreateLayawayItemDto { product_id: 7, quantity: 3, unit_price: 0.0, variant_id: Some(2) },
+            ],
+            initial_payment: 0.0,
+            payment_method: "cash".into(),
+            notes: None,
+            due_date: None,
+        }).unwrap();
+
+        let total: i32 = db.query_row("SELECT stock FROM products WHERE id = 7", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 5, "el total del producto es la suma de sus tallas");
+    }
+
+    #[test]
+    fn no_se_aparta_mas_de_lo_que_hay_entre_varios_renglones() {
+        let db = tienda();
+        abrir_caja(&db);
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (8, 'BLU', 'Blusa', 100.0, 299.0, 5)", []).unwrap();
+
+        let error = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![
+                CreateLayawayItemDto { product_id: 8, quantity: 3, unit_price: 0.0, variant_id: None },
+                CreateLayawayItemDto { product_id: 8, quantity: 3, unit_price: 0.0, variant_id: None },
+            ],
+            initial_payment: 0.0,
+            payment_method: "cash".into(),
+            notes: None,
+            due_date: None,
+        });
+
+        assert!(error.is_err(), "seis piezas de cinco no deberían apartarse");
+        let quedan: i32 = db.query_row("SELECT stock FROM products WHERE id = 8", [], |r| r.get(0)).unwrap();
+        assert_eq!(quedan, 5, "un apartado rechazado no toca el inventario");
     }
 
     fn abrir_caja(db: &rusqlite::Connection) {

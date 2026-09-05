@@ -1,6 +1,7 @@
 mod capture;
 mod commands;
 mod db;
+mod folios;
 mod hardware;
 mod logging;
 mod models;
@@ -19,8 +20,56 @@ use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Atiende `--restablecer-admin` antes de levantar la interfaz.
+///
+/// Una tienda que olvida la contraseña no tiene a quién pedirle un correo de
+/// recuperación: todo vive en ese equipo. Esta es la salida, y por eso está en
+/// la línea de comandos y no dentro de la aplicación, que es justo a lo que no
+/// se puede entrar.
+///
+/// Devuelve `true` si atendió la petición y no hay que abrir la ventana.
+fn atender_recuperacion() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(pos) = args.iter().position(|a| a == "--restablecer-admin") else {
+        return false;
+    };
+
+    let usuario = args.get(pos + 1).cloned().unwrap_or_else(|| "admin".to_string());
+    let nueva = match args.get(pos + 2) {
+        Some(v) => v.clone(),
+        None => {
+            eprintln!("Uso: things-shop --restablecer-admin <usuario> <nueva-contraseña>");
+            eprintln!("Ejemplo: things-shop --restablecer-admin admin nuevaclave123");
+            std::process::exit(2);
+        }
+    };
+
+    let conn = match init_db() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("No se pudo abrir la base de datos: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match commands::users::restablecer_admin(&conn, &usuario, &nueva) {
+        Ok(mensaje) => {
+            println!("{}", mensaje);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn run() {
     logging::init();
+
+    if atender_recuperacion() {
+        return;
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -47,19 +96,37 @@ pub fn run() {
                 }
             };
 
-            if let Err(e) = users::ensure_admin_exists(&conn) {
-                log::error!("Fallo al crear el administrador inicial: {}", e);
-                app.dialog()
-                    .message(format!("No se pudo crear el usuario administrador.\n\n{}", e))
-                    .kind(MessageDialogKind::Error)
-                    .title("Things Shop POS")
-                    .blocking_show();
-                std::process::exit(1);
+            match users::ensure_admin_exists(&conn) {
+                // Primer arranque: se dice con qué entrar, para no tener que
+                // buscarlo en ningún lado.
+                Ok(Some(clave)) => {
+                    app.dialog()
+                        .message(format!(
+                            "Esta es la primera vez que se abre Things Shop.\n\n\
+                             Usuario:  admin\n\
+                             Contraseña:  {}\n\n\
+                             Al entrar te va a pedir que la cambies por una tuya.",
+                            clave
+                        ))
+                        .kind(MessageDialogKind::Info)
+                        .title("Things Shop POS")
+                        .blocking_show();
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::error!("Fallo al crear el administrador inicial: {}", e);
+                    app.dialog()
+                        .message(format!("No se pudo crear el usuario administrador.\n\n{}", e))
+                        .kind(MessageDialogKind::Error)
+                        .title("Things Shop POS")
+                        .blocking_show();
+                    std::process::exit(1);
+                }
             }
 
             purge_old_logs(&conn);
             product_photos::migrar_fotos_incrustadas(&conn);
-            crate::photos::limpiar_huerfanas(&conn);
+            product_photos::incorporar_fotos_en_archivos(&conn);
 
             // Rehydrate still-valid sessions so logins survive restarts.
             let session_map = session::load_sessions(&conn);
@@ -72,12 +139,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Products
             products::get_products,
+            products::get_product,
             products::get_product_by_barcode,
             products::get_next_sku,
             products::create_product,
             products::update_product,
             products::delete_product,
-            products::set_product_image,
             // Fotos de producto
             product_photos::add_product_image,
             product_photos::get_product_images,
@@ -143,6 +210,7 @@ pub fn run() {
             // Backup
             backup::create_backup,
             backup::export_database,
+            backup::dias_sin_copia_externa,
             backup::get_log_path,
             diagnostics::generate_diagnostic_report,
             // Datos fiscales

@@ -7,7 +7,7 @@ use tauri::State;
 #[tauri::command]
 pub fn get_notifications(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Notification>, String> {
     require_auth(&sessions, &token)?;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
 
     // Low stock notifications
     // We dynamically insert/report low stock products that aren't ignored
@@ -86,7 +86,7 @@ pub fn mark_notification_read(
     notification_type: String,
 ) -> Result<(), String> {
     require_auth(&sessions, &token)?;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
 
     if notification_type == "low_stock" {
         // ID is passed as -product_id
@@ -115,7 +115,7 @@ pub fn create_reminder(
     data: CreateReminderDto,
 ) -> Result<Notification, String> {
     require_auth(&sessions, &token)?;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
 
     // Get product name
     let product_name: String = conn

@@ -8,7 +8,7 @@ use crate::session::{require_admin, require_auth, SessionState};
 #[tauri::command]
 pub fn get_categories(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Category>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let mut stmt = db.prepare(
         "SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) as product_count
@@ -37,7 +37,7 @@ pub fn get_categories(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn create_category(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateCategoryDto) -> Result<Category, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "INSERT INTO categories (name, description) VALUES (?1, ?2)",
@@ -71,7 +71,7 @@ pub fn create_category(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn update_category(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateCategoryDto) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     db.execute(
         "UPDATE categories SET name=?1, description=?2, is_active=?3, updated_at=datetime('now','localtime') WHERE id=?4",
@@ -84,16 +84,22 @@ pub fn update_category(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn delete_category(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
+    // Cuentan también los descontinuados: la llave foránea no distingue, y
+    // filtrar por activos dejaba pasar el borrado para que SQLite lo rechazara
+    // después con un error que nadie entiende.
     let product_count: i64 = db.query_row(
-        "SELECT COUNT(*) FROM products WHERE category_id = ?1 AND is_active = 1",
+        "SELECT COUNT(*) FROM products WHERE category_id = ?1",
         params![id],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
 
     if product_count > 0 {
-        return Err(format!("No se puede eliminar: hay {} productos activos en esta categoría", product_count));
+        return Err(format!(
+            "Todavía hay {} producto(s) en esta categoría. Cámbialos de categoría antes de quitarla.",
+            product_count
+        ));
     }
 
     db.execute("DELETE FROM categories WHERE id = ?1", params![id])

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
 import CaptureSettings from '../components/CaptureSettings';
+import CategorySettings from '../components/CategorySettings';
 import HardwareSettings from '../components/HardwareSettings';
 import type { SystemConfig } from '../types';
 import { useToast } from '../contexts/ToastContext';
@@ -14,7 +15,9 @@ const NUMERIC_KEYS = ['tax_rate', 'low_stock_threshold', 'max_backups', 'session
     'log_retention_days', 'scanner_max_gap_ms', 'scanner_min_length', 'printer_width'];
 const MULTILINE_KEYS = ['ticket_footer'];
 // Kept out of the editable grid: it is plumbing, not a shop setting.
-const HIDDEN_KEYS = ['demo_seeded', 'update_endpoint'];
+// Fuera del formulario: son piezas internas, no ajustes de la tienda. Verlas
+// como cajitas de texto sin explicación solo invita a romper algo.
+const HIDDEN_KEYS = ['demo_seeded', 'update_endpoint', 'sku_counter', 'terminal_id'];
 // Estas se editan en su propia tarjeta, no en la reja genérica de la tienda.
 const HARDWARE_KEYS = [
     'printer_name', 'printer_width', 'printer_auto_print',
@@ -30,6 +33,10 @@ const IcoLoader   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="
 
 export default function SettingsPage() {
     const [configs, setConfigs] = useState<SystemConfig[]>([]);
+    // Los respaldos de todos los días viven en este mismo disco. La copia que
+    // de verdad protege de que la computadora se muera es la de la USB, y es la
+    // que se olvida: conviene recordarlo cuando lleva tiempo sin hacerse.
+    const [diasSinCopia, setDiasSinCopia] = useState<number | null | undefined>(undefined);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [backupList, setBackupList] = useState<string[]>([]);
@@ -48,7 +55,7 @@ export default function SettingsPage() {
         if (!user) return;
         const ok = await confirm({
             title: 'Cargar datos de prueba',
-            message: 'Se agregarán productos, clientes, proveedores y ventas de ejemplo para probar el sistema. Solo se puede hacer una vez. ¿Continuar?',
+            message: 'Se agregarán productos, clientes, proveedores y ventas de ejemplo para practicar con el sistema. Las ventas de ejemplo cuentan en los reportes, así que esto solo sirve antes de empezar a vender de verdad. ¿Continuar?',
             confirmLabel: 'Cargar datos',
         });
         if (!ok) return;
@@ -68,6 +75,7 @@ export default function SettingsPage() {
             const c = cAll.filter(cfg => !HIDDEN_KEYS.includes(cfg.key));
             api.getLogPath().then(setLogPath).catch(() => {});
             setConfigs(c); setBackupList(b);
+            api.diasSinCopiaExterna().then(setDiasSinCopia).catch(() => setDiasSinCopia(undefined));
             const vals: Record<string, string> = {};
             c.forEach(cfg => { vals[cfg.key] = cfg.value; });
             setValues(vals);
@@ -105,19 +113,17 @@ export default function SettingsPage() {
         catch (err) { showToast(String(err), 'error'); }
     };
 
-    /// Copy the live database somewhere the operator chooses (USB, network share).
+    /// Copia completa —base y fotos— a donde el encargado elija: USB, disco, red.
     const handleExport = async () => {
         setExporting(true);
         try {
-            const stamp = new Date().toISOString().slice(0, 10);
-            const target = await save({
-                title: 'Exportar base de datos',
-                defaultPath: `things-shop-${stamp}.db`,
-                filters: [{ name: 'Base de datos SQLite', extensions: ['db'] }],
+            const target = await open({
+                title: 'Elige dónde guardar la copia',
+                directory: true,
             });
-            if (!target) return;
-            await api.exportDatabase(target);
-            showToast('Base de datos exportada');
+            if (!target || Array.isArray(target)) return;
+            showToast(await api.exportDatabase(target));
+            setDiasSinCopia(0);
         } catch (err) { showToast(String(err), 'error'); }
         finally { setExporting(false); }
     };
@@ -278,13 +284,30 @@ export default function SettingsPage() {
                     </p>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button onClick={handleExport} disabled={exporting} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
-                            {exporting ? <IcoLoader /> : <IcoDownload />} Exportar a archivo
+                            {exporting ? <IcoLoader /> : <IcoDownload />} Copiar a una USB
                         </button>
                         <button onClick={handleBackup} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
                             <IcoDownload /> Crear Respaldo
                         </button>
                     </div>
                 </div>
+                <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
+                    Cada vez que se cierra el turno se guarda un respaldo en esta computadora.
+                    Copiar a una USB se lleva la base con todas las fotos: eso es lo que hay
+                    que sacar de aquí de vez en cuando, por si la computadora falla.
+                </p>
+                {(diasSinCopia === null || (diasSinCopia !== undefined && diasSinCopia >= 7)) && (
+                    <div style={{
+                        padding: '12px 14px', borderRadius: 12, marginBottom: 16,
+                        background: 'rgba(245,168,66,0.10)', border: '1px solid rgba(245,168,66,0.30)',
+                    }}>
+                        <p style={{ fontSize: 12, color: 'var(--t2)', lineHeight: 1.5 }}>
+                            {diasSinCopia === null
+                                ? 'Todavía no se ha sacado ninguna copia a una USB. Si esta computadora falla, se pierde todo.'
+                                : `Van ${diasSinCopia} días desde la última copia a una USB.`}
+                        </p>
+                    </div>
+                )}
                 {backupList.length === 0 ? (
                     <p style={{ textAlign: 'center', padding: '32px 0', fontSize: 13, color: 'var(--t3)' }}>Sin respaldos disponibles</p>
                 ) : (
@@ -298,6 +321,9 @@ export default function SettingsPage() {
                     </div>
                 )}
             </div>
+
+            {/* Categorías */}
+            <CategorySettings />
 
             {/* Captura desde el celular */}
             <CaptureSettings />

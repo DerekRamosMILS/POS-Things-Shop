@@ -7,13 +7,22 @@ import type { Product, Category, CreateProductDto, UpdateProductDto, Notificatio
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { invalidateProductImage, useProductImage } from '../hooks/useProductImages';
+import CaptureSettings from '../components/CaptureSettings';
 
 // ─── Fotos ───────────────────────────────────────────────────────────────────
 // Las fotos se guardan como archivos, no dentro de la base, así que pueden
 // conservarse a resolución de catálogo. Se envían dos tamaños: el bueno y una
 // miniatura para los listados. El redimensionado ocurre aquí para que el
 // backend no necesite una biblioteca de imágenes.
-async function compressImage(file: File, maxDim = 1600, quality = 0.85): Promise<string> {
+//
+// 1280 px al 75% ronda los 150 KB. Las fotos viven dentro de la base y cada
+// respaldo las copia enteras, así que la resolución es un compromiso: alcanza
+// de sobra para verla en pantalla y para un catálogo, sin que dos mil prendas
+// conviertan cada respaldo en medio gigabyte.
+/// Tope del backend; aquí se respeta para no chocar contra su error.
+const MAX_FOTOS_POR_PRODUCTO = 8;
+
+async function compressImage(file: File, maxDim = 1280, quality = 0.75): Promise<string> {
     const dataUrl: string = await new Promise((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(r.result as string);
@@ -203,10 +212,28 @@ export default function ProductsPage() {
     };
 
     const photoRequestFor = useRef<number | null>(null);
+    const [showCaptura, setShowCaptura] = useState(false);
+    const [capturaActiva, setCapturaActiva] = useState(false);
+
+    // El botón dice si la captura está prendida: sin eso, la única forma de
+    // saberlo es abrir la ventana.
+    useEffect(() => {
+        let vivo = true;
+        const revisar = () => api.captureServerStatus()
+            .then(e => { if (vivo) setCapturaActiva(e.encendido); })
+            .catch(() => {});
+        revisar();
+        const t = setInterval(revisar, 5000);
+        return () => { vivo = false; clearInterval(t); };
+    }, []);
 
     const openEditForm = (product: Product) => {
         setEditingProduct(product);
-        setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active });
+        // Lo capturado desde el celular sin precio queda inactivo a propósito.
+        // Ponerle precio es justo lo que faltaba para venderlo, así que el
+        // interruptor llega encendido en vez de dejarlo guardado y sin vender.
+        const faltabaPrecio = !product.is_active && product.sale_price <= 0;
+        setForm({ id: product.id, sku: product.sku, barcode: product.barcode, name: product.name, description: product.description, category_id: product.category_id, supplier_id: product.supplier_id, purchase_price: product.purchase_price, sale_price: product.sale_price, stock: product.stock, min_stock: product.min_stock, is_active: product.is_active || faltabaPrecio });
         // El listado ya no trae la foto: se pide solo al abrir la ficha.
         setPhotoPreview(null);
         setPhotoThumb(null);
@@ -301,13 +328,23 @@ export default function ProductsPage() {
             // La foto se guarda como archivo. Reemplazar significa quitar las
             // anteriores: el formulario maneja una sola imagen principal.
             if (photoChanged) {
-                const previas = await api.getProductImageList(productId);
-                for (const img of previas) await api.deleteProductImage(img.id);
+                // Primero entra la nueva y después se quitan las viejas. Al
+                // revés, si la subida fallaba el producto se quedaba sin
+                // ninguna foto y la anterior ya no existía.
+                let previas = await api.getProductImageList(productId);
                 if (photoPreview && photoThumb) {
+                    // Con el cupo lleno hay que hacer sitio; se quita la última,
+                    // nunca la principal, para que si algo falla siga habiendo foto.
+                    while (previas.length >= MAX_FOTOS_POR_PRODUCTO) {
+                        const ultima = previas[previas.length - 1];
+                        await api.deleteProductImage(ultima.id);
+                        previas = previas.slice(0, -1);
+                    }
                     await api.addProductImage({
                         product_id: productId, photo: photoPreview, thumbnail: photoThumb,
                     });
                 }
+                for (const img of previas) await api.deleteProductImage(img.id);
                 invalidateProductImage(productId);
             }
             // Save variants (or clear them if variants were turned off)
@@ -391,10 +428,37 @@ export default function ProductsPage() {
                     <h1 className="page-title">Productos</h1>
                     <p className="page-subtitle">{filtered.length} de {products.length} productos · inventario {formatCurrency(inventoryValue)}</p>
                 </div>
-                <button onClick={openCreateForm} className="btn btn-primary">
-                    <IcoPlus /> Nuevo Producto
-                </button>
+                <div style={{ display: 'flex', gap: 10 }}>
+                    <button onClick={() => setShowCaptura(true)} className="btn btn-ghost" style={{ gap: 9 }}>
+                        <span style={{
+                            width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                            background: capturaActiva ? 'var(--success)' : 'var(--t3)',
+                        }} />
+                        Capturar desde el celular
+                        <span style={{ fontSize: 11, color: capturaActiva ? 'var(--success)' : 'var(--t3)', fontWeight: 600 }}>
+                            {capturaActiva ? 'Prendido' : 'Apagado'}
+                        </span>
+                    </button>
+                    <button onClick={openCreateForm} className="btn btn-primary">
+                        <IcoPlus /> Nuevo Producto
+                    </button>
+                </div>
             </div>
+
+            {showCaptura && (
+                <div className="modal-overlay" onClick={() => setShowCaptura(false)}>
+                    <div className="glass-modal animate-scale-in" style={{ width: '100%', maxWidth: 520, padding: 26 }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                            <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)' }}>Capturar desde el celular</h3>
+                            <button onClick={() => setShowCaptura(false)} style={{ padding: 6, borderRadius: 9, color: 'var(--t3)' }}><IcoX /></button>
+                        </div>
+                        <CaptureSettings compacto />
+                        <button onClick={() => { setShowCaptura(false); loadData(); }} className="btn btn-ghost" style={{ width: '100%', marginTop: 16, justifyContent: 'center' }}>
+                            Cerrar y actualizar lista
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* KPI cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16 }}>

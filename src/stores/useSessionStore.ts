@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { almacenSeguro } from './almacen';
 import type { User } from '../types';
 
 interface SessionStore {
@@ -38,6 +39,7 @@ export const useSessionStore = create<SessionStore>()(
         }),
         {
             name: 'things-shop-session',
+            storage: almacenSeguro,
         }
     )
 );

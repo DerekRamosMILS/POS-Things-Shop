@@ -128,7 +128,7 @@ pub fn build_report(db: &Connection) -> String {
         .unwrap_or(0);
     let _ = writeln!(out, "Respaldos guardados: {}", backups);
     let fotos: i64 = scalar(db, "SELECT COUNT(*) FROM product_images").parse().unwrap_or(0);
-    let _ = writeln!(out, "Fotos de producto: {} ({})", fotos, human_size(crate::photos::espacio_usado()));
+    let _ = writeln!(out, "Fotos de producto: {} ({})", fotos, human_size(crate::photos::espacio_usado(db)));
     let _ = writeln!(out);
 
     // ── Configuración ──
@@ -161,7 +161,7 @@ pub fn generate_diagnostic_report(
     path: String,
 ) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
 
     let report = build_report(&db);
     fs::write(&path, report).map_err(|e| format!("No se pudo guardar el reporte: {}", e))?;

@@ -76,6 +76,18 @@ fn migration_list() -> Vec<(&'static str, &'static str)> {
             "018_fotos_en_archivos",
             include_str!("../../migrations/018_fotos_en_archivos.sql"),
         ),
+        (
+            "019_categorias_ropa",
+            include_str!("../../migrations/019_categorias_ropa.sql"),
+        ),
+        (
+            "020_fotos_en_la_base",
+            include_str!("../../migrations/020_fotos_en_la_base.sql"),
+        ),
+        (
+            "021_apartado_entregado_es_venta",
+            include_str!("../../migrations/021_apartado_entregado_es_venta.sql"),
+        ),
     ]
 }
 
@@ -133,7 +145,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 18);
+        assert_eq!(applied, 21);
     }
 
     #[test]
@@ -143,7 +155,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 18);
+        assert_eq!(applied, 21);
     }
 
     /// La 017 reconstruye `sales` para corregir su restricción. Una reconstrucción
@@ -307,6 +319,55 @@ mod tests {
             "INSERT INTO sales (folio, user_id, subtotal, total, payment_method)
              VALUES ('F-X', 1, 1.0, 1.0, 'bitcoin')", [],
         ).is_err());
+    }
+
+    #[test]
+    fn las_categorias_son_de_una_tienda_de_ropa() {
+        let conn = fresh();
+        let nombres: Vec<String> = conn
+            .prepare("SELECT name FROM categories ORDER BY name").unwrap()
+            .query_map([], |r| r.get(0)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+
+        for esperada in ["Vestidos", "Blusas", "Pantalones", "Faldas"] {
+            assert!(nombres.iter().any(|n| n == esperada), "falta {}", esperada);
+        }
+        for generica in ["General", "Electrónicos", "Ropa"] {
+            assert!(!nombres.iter().any(|n| n == generica),
+                    "{} no clasifica nada en una tienda de ropa", generica);
+        }
+    }
+
+    #[test]
+    fn una_categoria_generica_con_productos_no_se_borra() {
+        // Si alguien ya clasificó mercancía ahí, quitarla dejaría productos
+        // huérfanos o rompería la llave foránea.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _migrations (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));",
+        ).unwrap();
+
+        for (name, sql) in migration_list() {
+            if name == "019_categorias_ropa" { break; }
+            conn.execute_batch(sql).unwrap();
+        }
+
+        let id: i64 = conn.query_row(
+            "SELECT id FROM categories WHERE name = 'General'", [], |r| r.get(0)).unwrap();
+        conn.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock, category_id)
+             VALUES ('X', 'Algo', 1.0, 2.0, 1, ?1)", [&id],
+        ).unwrap();
+
+        let sql = migration_list().into_iter()
+            .find(|(n, _)| *n == "019_categorias_ropa").unwrap().1;
+        conn.execute_batch(sql).unwrap();
+
+        let sigue: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM categories WHERE name = 'General'", [], |r| r.get(0)).unwrap();
+        assert_eq!(sigue, 1, "no se borra una categoría en uso");
     }
 
     #[test]

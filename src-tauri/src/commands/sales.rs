@@ -1,6 +1,7 @@
+use std::collections::HashMap;
+
 use rusqlite::params;
 use tauri::State;
-use chrono::Local;
 
 use crate::db::connection::DbState;
 use crate::models::sale::{CreateSaleDto, PaymentSplitDto, Sale, SaleFilters, SaleItem};
@@ -28,48 +29,6 @@ fn config_number(db: &rusqlite::Connection, key: &str, default: f64) -> f64 {
     .ok()
     .and_then(|s| s.trim().parse::<f64>().ok())
     .unwrap_or(default)
-}
-
-/// Terminal desde la que se cobra. Con una sola caja siempre es "01".
-fn terminal_id(db: &rusqlite::Connection) -> String {
-    db.query_row(
-        "SELECT value FROM system_config WHERE key = 'terminal_id'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .map(|v| v.trim().to_string())
-    .filter(|v| !v.is_empty())
-    .unwrap_or_else(|| "01".to_string())
-}
-
-/// Siguiente folio del día.
-///
-/// Se calcula desde el consecutivo más alto ya emitido, no contando renglones:
-/// contar produce folios repetidos en cuanto falta una fila, y `folio` es único,
-/// así que la venta fallaría al cobrar. Con más de una terminal el folio lleva
-/// además su identificador, para que dos cajas no emitan el mismo número.
-fn next_folio(db: &rusqlite::Connection) -> Result<String, String> {
-    let today = Local::now().format("%Y%m%d").to_string();
-    let terminal = terminal_id(db);
-
-    let prefix = if terminal == "01" {
-        format!("V-{}-", today)
-    } else {
-        format!("V{}-{}-", terminal, today)
-    };
-
-    // El consecutivo son los caracteres que siguen al prefijo.
-    let last: i64 = db
-        .query_row(
-            "SELECT COALESCE(MAX(CAST(substr(folio, ?2) AS INTEGER)), 0)
-             FROM sales WHERE folio LIKE ?1",
-            params![format!("{}%", prefix), prefix.len() as i64 + 1],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-
-    Ok(format!("{}{:03}", prefix, last + 1))
 }
 
 /// Cash register column that accumulates a given payment method.
@@ -209,7 +168,7 @@ pub fn create_sale(
 ) -> Result<Sale, String> {
     // The seller on record is the authenticated user, never a client-sent id.
     let user_id = require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     registrar_venta(&db, user_id, cash_register_id, data)
 }
 
@@ -256,7 +215,7 @@ pub fn registrar_venta(
             }
         }
 
-        let folio = next_folio(db)?;
+        let folio = crate::folios::siguiente(db, crate::folios::Serie::Ventas)?;
 
         // Resolve every line from the DB (authoritative price + cost snapshot).
         struct Line {
@@ -269,12 +228,17 @@ pub fn registrar_venta(
             unit_cost: Cents,
             discount: Cents,
             line_subtotal: Cents,
-            prev_stock: i32,
             variant_id: Option<i64>,
             variant_label: Option<String>,
         }
         let mut lines: Vec<Line> = Vec::with_capacity(data.items.len());
         let mut subtotal = Cents::ZERO; // bruto, antes de cualquier descuento
+
+        // Lo que los renglones anteriores de esta misma venta ya apartaron. Sin
+        // esto, dos renglones del mismo producto se miden los dos contra la
+        // existencia completa y entre ambos venden más de lo que hay.
+        let mut apartado_producto: HashMap<i64, i32> = HashMap::new();
+        let mut apartado_variante: HashMap<i64, i32> = HashMap::new();
 
         for item in &data.items {
             if item.quantity <= 0 {
@@ -297,9 +261,11 @@ pub fn registrar_venta(
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|_| "La variante seleccionada no existe".to_string())?;
-                (Some(vid), Some(variant_label(&size, &color)), vstock)
+                let ya = apartado_variante.get(&vid).copied().unwrap_or(0);
+                (Some(vid), Some(variant_label(&size, &color)), vstock - ya)
             } else {
-                (None, None, product_stock)
+                let ya = apartado_producto.get(&item.product_id).copied().unwrap_or(0);
+                (None, None, product_stock - ya)
             };
 
             if available < item.quantity {
@@ -308,6 +274,11 @@ pub fn registrar_venta(
                     "Stock insuficiente para '{}{}'. Disponible: {}, Solicitado: {}",
                     name, label, available, item.quantity
                 ));
+            }
+
+            *apartado_producto.entry(item.product_id).or_insert(0) += item.quantity;
+            if let Some(vid) = variant_id {
+                *apartado_variante.entry(vid).or_insert(0) += item.quantity;
             }
 
             // Un descuento de línea nunca puede superar lo que vale la línea.
@@ -328,7 +299,6 @@ pub fn registrar_venta(
                 unit_cost: Cents::from_pesos(cost),
                 discount,
                 line_subtotal,
-                prev_stock: product_stock,
                 variant_id,
                 variant_label,
             });
@@ -382,7 +352,7 @@ pub fn registrar_venta(
                 folio, user_id, register_id, subtotal.to_pesos(),
                 discount_total.to_pesos(), tax.to_pesos(), total.to_pesos(), payment_method,
                 amount_paid.to_pesos(), change_amount.to_pesos(), data.notes, data.customer_id,
-                data.client_request_id, data.promotion_id, terminal_id(db)
+                data.client_request_id, data.promotion_id, crate::folios::terminal_id(db)
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -434,12 +404,22 @@ pub fn registrar_venta(
                 ],
             ).map_err(|e| e.to_string())?;
 
-            let new_stock = line.prev_stock - line.quantity;
+            // La existencia se lee aquí y se descuenta de forma relativa. Con
+            // una foto tomada al armar los renglones, dos tallas del mismo
+            // vestido partían las dos del mismo número y la segunda deshacía el
+            // descuento de la primera.
+            let prev_stock: i32 = db
+                .query_row(
+                    "SELECT stock FROM products WHERE id = ?1",
+                    params![line.product_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let new_stock = prev_stock - line.quantity;
 
-            // Product-level aggregate stock always decreases.
             db.execute(
-                "UPDATE products SET stock = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
-                params![new_stock, line.product_id],
+                "UPDATE products SET stock = stock - ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+                params![line.quantity, line.product_id],
             ).map_err(|e| e.to_string())?;
 
             // Variant-level stock, when applicable.
@@ -455,7 +435,7 @@ pub fn registrar_venta(
                 "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
                  VALUES (?1, 'sale', ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    line.product_id, -line.quantity, line.prev_stock,
+                    line.product_id, -line.quantity, prev_stock,
                     new_stock, sale_id, reason, user_id
                 ],
             ).map_err(|e| e.to_string())?;
@@ -506,7 +486,7 @@ pub fn registrar_venta(
 #[tauri::command]
 pub fn cancel_sale(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<(), String> {
     let user_id = require_admin(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     cancelar_venta(&db, user_id, sale_id)
 }
 
@@ -525,6 +505,19 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
 
         if status != "completed" {
             return Err("Solo se pueden cancelar ventas completadas".to_string());
+        }
+
+        // La venta de un apartado entregado no descontó inventario —eso pasó al
+        // apartar— así que cancelarla lo devolvería dos veces. Lo que se cancela
+        // en ese caso es el apartado, no la venta.
+        let de_apartado: Option<i64> = db
+            .query_row("SELECT layaway_id FROM sales WHERE id = ?1", params![sale_id], |r| r.get(0))
+            .unwrap_or(None);
+        if de_apartado.is_some() {
+            return Err(
+                "Esta venta es la entrega de un apartado. Si hay que deshacerla, hazlo desde Apartados."
+                    .to_string(),
+            );
         }
 
         // Get sale items to restore stock
@@ -640,7 +633,7 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
 #[tauri::command]
 pub fn get_sales(state: State<DbState>, sessions: State<SessionState>, token: String, filters: Option<SaleFilters>) -> Result<Vec<Sale>, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     let filters = filters.unwrap_or_default();
 
     let mut sql = String::from(
@@ -718,7 +711,7 @@ pub fn get_sales(state: State<DbState>, sessions: State<SessionState>, token: St
 #[tauri::command]
 pub fn get_sale_detail(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<Sale, String> {
     require_auth(&sessions, &token)?;
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let db = state.conn();
     get_sale_by_id(&db, sale_id)
 }
 
@@ -994,13 +987,13 @@ mod tests {
     }
 
     fn hoy() -> String {
-        Local::now().format("%Y%m%d").to_string()
+        chrono::Local::now().format("%Y%m%d").to_string()
     }
 
     #[test]
     fn the_first_sale_of_the_day_starts_at_one() {
         let conn = db_ventas();
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-001", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-001", hoy()));
     }
 
     #[test]
@@ -1008,7 +1001,7 @@ mod tests {
         let conn = db_ventas();
         insertar_folio(&conn, &format!("V-{}-001", hoy()));
         insertar_folio(&conn, &format!("V-{}-002", hoy()));
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-003", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-003", hoy()));
     }
 
     #[test]
@@ -1021,14 +1014,14 @@ mod tests {
         insertar_folio(&conn, &format!("V-{}-003", hoy()));
         conn.execute("DELETE FROM sales WHERE folio LIKE '%-002'", []).unwrap();
 
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-004", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-004", hoy()));
     }
 
     #[test]
     fn folios_from_other_days_do_not_interfere() {
         let conn = db_ventas();
         insertar_folio(&conn, "V-20200101-999");
-        assert_eq!(next_folio(&conn).unwrap(), format!("V-{}-001", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-001", hoy()));
     }
 
     #[test]
@@ -1039,14 +1032,14 @@ mod tests {
         conn.execute("UPDATE system_config SET value = '02' WHERE key = 'terminal_id'", []).unwrap();
 
         // La caja 2 no continúa la serie de la caja 1: emite la suya.
-        assert_eq!(next_folio(&conn).unwrap(), format!("V02-{}-001", hoy()));
+        assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V02-{}-001", hoy()));
     }
 
     #[test]
     fn the_default_terminal_keeps_the_plain_folio_format() {
         let conn = db_ventas();
-        assert!(next_folio(&conn).unwrap().starts_with("V-"));
-        assert_eq!(terminal_id(&conn), "01");
+        assert!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap().starts_with("V-"));
+        assert_eq!(crate::folios::terminal_id(&conn), "01");
     }
 
     #[test]
@@ -1139,6 +1132,42 @@ mod integracion {
                 }),
             ).unwrap()
         }
+    }
+
+    #[test]
+    fn dos_tallas_del_mismo_modelo_descuentan_las_dos() {
+        // El caso normal de una tienda de ropa: la clienta se lleva el mismo
+        // vestido en mediana y en grande. Son dos renglones del mismo producto.
+        let t = Tienda::nueva().con_caja(500.0);
+        let vestido = t.producto("VES", 499.0, 200.0, 0);
+        t.db.execute(
+            "INSERT INTO product_variants (id, product_id, size, stock) VALUES
+             (1, ?1, 'M', 5), (2, ?1, 'G', 5)", params![vestido]).unwrap();
+        t.db.execute("UPDATE products SET has_variants = 1, stock = 10 WHERE id = ?1",
+                     params![vestido]).unwrap();
+
+        let mut data = venta(vec![]);
+        data.items = vec![
+            CreateSaleItemDto { product_id: vestido, quantity: 2, unit_price: 0.0, discount: 0.0, variant_id: Some(1) },
+            CreateSaleItemDto { product_id: vestido, quantity: 3, unit_price: 0.0, discount: 0.0, variant_id: Some(2) },
+        ];
+        t.cobrar(data).unwrap();
+
+        let m: i32 = t.db.query_row("SELECT stock FROM product_variants WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let g: i32 = t.db.query_row("SELECT stock FROM product_variants WHERE id = 2", [], |r| r.get(0)).unwrap();
+        assert_eq!((m, g), (3, 2), "cada talla descuenta lo suyo");
+        assert_eq!(t.stock(vestido), 5, "el total del producto es la suma de sus tallas");
+    }
+
+    #[test]
+    fn el_mismo_producto_en_dos_renglones_no_puede_rebasar_la_existencia() {
+        let t = Tienda::nueva().con_caja(500.0);
+        let blusa = t.producto("BLU", 299.0, 100.0, 5);
+
+        let error = t.cobrar(venta(vec![(blusa, 3), (blusa, 3)]));
+
+        assert!(error.is_err(), "seis piezas de cinco no deberían venderse");
+        assert_eq!(t.stock(blusa), 5, "una venta rechazada no toca el inventario");
     }
 
     fn venta(items: Vec<(i64, i32)>) -> CreateSaleDto {

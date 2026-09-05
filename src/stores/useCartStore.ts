@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import { almacenSeguro } from './almacen';
 import type { CartItem, CartVariant, Product } from '../types';
 
 // A cart line is identified by product + variant, so the same product can appear
@@ -27,7 +29,11 @@ interface CartStore {
     getItemCount: () => number;
 }
 
-export const useCartStore = create<CartStore>((set, get) => ({
+// El carrito se guarda igual que las órdenes en espera. Si la aplicación se
+// cierra —un corte de luz, un cierre por error— con la venta a medias, volver a
+// abrirla la encuentra tal cual en vez de obligar a rearmarla con la fila
+// esperando.
+export const useCartStore = create<CartStore>()(persist((set, get) => ({
     items: [],
 
     addItem: (product: Product, variant?: CartVariant | null) => {
@@ -59,9 +65,15 @@ export const useCartStore = create<CartStore>((set, get) => ({
                 return { items: state.items.filter((i) => cartLineId(i) !== lineId) };
             }
             return {
-                items: state.items.map((i) =>
-                    cartLineId(i) === lineId ? { ...i, quantity: Math.min(quantity, stockOf(i)) } : i
-                ),
+                items: state.items.map((i) => {
+                    if (cartLineId(i) !== lineId) return i;
+                    const q = Math.min(quantity, stockOf(i));
+                    // El descuento se capturó contra la cantidad anterior. Al
+                    // bajarla podía acabar valiendo más que la línea entera y
+                    // el total en pantalla se iba a negativo, aunque el
+                    // servidor luego lo recortara al cobrar.
+                    return { ...i, quantity: q, discount: Math.min(i.discount, i.product.sale_price * q) };
+                }),
             };
         });
     },
@@ -84,4 +96,4 @@ export const useCartStore = create<CartStore>((set, get) => ({
     getTotal: () => get().getSubtotal() - get().getDiscountTotal(),
 
     getItemCount: () => get().items.reduce((sum, item) => sum + item.quantity, 0),
-}));
+}), { name: 'things-shop-cart', storage: almacenSeguro }));
