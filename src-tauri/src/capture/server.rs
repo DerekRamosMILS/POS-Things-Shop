@@ -17,6 +17,13 @@ use crate::session::{require_admin, require_auth, SessionState};
 
 /// Puerto por defecto. Alto y poco común para no chocar con nada de la tienda.
 const PUERTO: u16 = 7423;
+/// Puerto del ayudante que entrega el certificado.
+///
+/// Tiene que ir sin cifrar por el huevo y la gallina: el teléfono necesita el
+/// certificado *antes* de poder confiar en la conexión cifrada. Por ahí no pasa
+/// ningún dato de la tienda, solo el certificado público y las instrucciones
+/// para instalarlo.
+const PUERTO_AYUDA: u16 = 7424;
 /// Intentos con código incorrecto antes de bloquear.
 const MAX_INTENTOS: u32 = 5;
 /// Cuánto dura el bloqueo.
@@ -509,32 +516,79 @@ pub fn start_capture_server(
         captura: Arc::clone(&captura),
     };
 
+    // El certificado se emite para esta dirección concreta, firmado por la
+    // autoridad de la tienda. Si el router cambió la dirección desde la última
+    // vez, este se vuelve a emitir y el teléfono no se entera: lo que tiene
+    // instalado es la autoridad, no esto.
+    let identidad = {
+        let db = state.conn();
+        super::tls::identidad_para(&db, &ip)?
+    };
+
     let app = construir_router(ctx);
+    let ayuda = super::ayuda::router(identidad.ca_pem.clone(), ip.clone());
 
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PUERTO);
-    let listener = std::net::TcpListener::bind(addr)
-        .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO, e))?;
-    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    // Ambos puertos se abren aquí, antes de arrancar nada, para poder avisar de
+    // inmediato si alguno está ocupado en vez de fallar en segundo plano.
+    let escucha = std::net::TcpListener::bind(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        PUERTO,
+    ))
+    .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO, e))?;
+    let escucha_ayuda = std::net::TcpListener::bind(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        PUERTO_AYUDA,
+    ))
+    .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO_AYUDA, e))?;
+    escucha_ayuda.set_nonblocking(true).map_err(|e| e.to_string())?;
 
+    let manija = axum_server::Handle::new();
     let (apagar_tx, apagar_rx) = tokio::sync::oneshot::channel();
 
+    let config_tls = tokio::task::block_in_place(|| {
+        tauri::async_runtime::block_on(axum_server::tls_rustls::RustlsConfig::from_pem(
+            identidad.cert_pem.into_bytes(),
+            identidad.key_pem.into_bytes(),
+        ))
+    })
+    .map_err(|e| format!("El certificado de la captura no se pudo usar: {}", e))?;
+
+    {
+        let manija = manija.clone();
+        tauri::async_runtime::spawn(async move {
+            // Un solo aviso apaga los dos servidores.
+            let _ = apagar_rx.await;
+            manija.graceful_shutdown(Some(std::time::Duration::from_secs(2)));
+        });
+    }
+
+    {
+        let manija = manija.clone();
+        tauri::async_runtime::spawn(async move {
+            log::info!("Captura por celular escuchando en el puerto {} (cifrada)", PUERTO);
+            let servidor = match axum_server::from_tcp_rustls(escucha, config_tls) {
+                Ok(s) => s.handle(manija).serve(app.into_make_service()),
+                Err(e) => {
+                    log::error!("No se pudo iniciar la captura cifrada: {}", e);
+                    return;
+                }
+            };
+            if let Err(e) = servidor.await {
+                log::error!("La captura por celular terminó con error: {}", e);
+            }
+            log::info!("Captura por celular apagada");
+        });
+    }
+
     tauri::async_runtime::spawn(async move {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
+        let escucha_ayuda = match tokio::net::TcpListener::from_std(escucha_ayuda) {
             Ok(l) => l,
             Err(e) => {
-                log::error!("No se pudo iniciar la captura por celular: {}", e);
+                log::error!("No se pudo abrir la página del certificado: {}", e);
                 return;
             }
         };
-        log::info!("Captura por celular escuchando en el puerto {}", PUERTO);
-        let servidor = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = apagar_rx.await;
-            });
-        if let Err(e) = servidor.await {
-            log::error!("La captura por celular terminó con error: {}", e);
-        }
-        log::info!("Captura por celular apagada");
+        let _ = axum::serve(escucha_ayuda, ayuda).await;
     });
 
     {
