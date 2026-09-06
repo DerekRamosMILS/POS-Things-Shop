@@ -196,3 +196,73 @@ describe('calibración', () => {
         expect(c.maxGapMs).toBeLessThanOrEqual(250);
     });
 });
+
+describe('tecleo humano contra lectura de escáner', () => {
+    const config = { ...DEFAULT_SCANNER_CONFIG };
+
+    /** Reproduce una tanda de teclas con un hueco dado entre cada una. */
+    function teclear(
+        handler: (e: KeyboardEvent) => void,
+        texto: string,
+        huecoMs: number,
+        terminar = true,
+    ) {
+        let reloj = 1000;
+        const original = performance.now;
+        performance.now = () => reloj;
+        try {
+            for (const ch of texto) {
+                handler({
+                    key: ch, ctrlKey: false, metaKey: false, altKey: false,
+                    preventDefault: () => {}, target: null,
+                } as unknown as KeyboardEvent);
+                reloj += huecoMs;
+            }
+            if (terminar) {
+                handler({
+                    key: 'Enter', ctrlKey: false, metaKey: false, altKey: false,
+                    preventDefault: () => {}, target: null,
+                } as unknown as KeyboardEvent);
+            }
+        } finally {
+            performance.now = original;
+        }
+    }
+
+    it('acepta una lectura del escáner', () => {
+        const leidos: string[] = [];
+        const handler = createScannerHandler({ onScan: c => leidos.push(c), getConfig: () => config });
+        teclear(handler, '7501234567890', 3);
+        expect(leidos).toEqual(['7501234567890']);
+    });
+
+    it('no se roba lo que alguien teclea, aunque teclee rápido', () => {
+        // Cincuenta milisegundos por tecla son 240 pulsaciones por minuto: más
+        // rápido que casi cualquiera, y aun así diez veces más lento que un
+        // lector. Antes esto vaciaba el buscador y decía "producto no encontrado".
+        const leidos: string[] = [];
+        const handler = createScannerHandler({ onScan: c => leidos.push(c), getConfig: () => config });
+        teclear(handler, 'vestido', 50);
+        expect(leidos).toEqual([]);
+    });
+
+    it('el Enter de una persona sigue sirviendo para enviar', () => {
+        let tragado = false;
+        const handler = createScannerHandler({ onScan: () => {}, getConfig: () => config });
+        let reloj = 1000;
+        const original = performance.now;
+        performance.now = () => reloj;
+        try {
+            for (const ch of '1000') {
+                handler({ key: ch, ctrlKey: false, metaKey: false, altKey: false,
+                    preventDefault: () => {}, target: null } as unknown as KeyboardEvent);
+                reloj += 50;
+            }
+            handler({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false,
+                preventDefault: () => { tragado = true; }, target: null } as unknown as KeyboardEvent);
+        } finally {
+            performance.now = original;
+        }
+        expect(tragado).toBe(false);
+    });
+});

@@ -6,6 +6,12 @@ use crate::db::connection::DbState;
 use crate::models::expense::{CreateExpenseDto, Expense};
 use crate::session::{require_admin, require_auth, SessionState};
 
+/// Columnas enumeradas a propósito: `e.*` se rompe en silencio en cuanto una
+/// migración agrega una columna a la tabla.
+const SEL: &str = "SELECT e.id, e.cash_register_id, e.category, e.description, e.amount,
+    e.user_id, e.created_at, u.full_name as user_name
+    FROM expenses e LEFT JOIN users u ON e.user_id = u.id";
+
 #[tauri::command]
 pub fn create_expense(
     state: State<DbState>,
@@ -69,7 +75,7 @@ pub fn registrar_gasto(
 
     let id = db.last_insert_rowid();
     db.query_row(
-        "SELECT e.*, u.full_name as user_name FROM expenses e LEFT JOIN users u ON e.user_id = u.id WHERE e.id = ?1",
+        &format!("{} WHERE e.id = ?1", SEL),
         params![id],
         |row| {
             Ok(Expense {
@@ -93,17 +99,12 @@ pub fn get_expenses(state: State<DbState>, sessions: State<SessionState>, token:
 
     let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(cr_id) = cash_register_id {
         (
-            "SELECT e.*, u.full_name as user_name FROM expenses e
-             LEFT JOIN users u ON e.user_id = u.id
-             WHERE e.cash_register_id = ?1
-             ORDER BY e.created_at DESC".to_string(),
+            format!("{} WHERE e.cash_register_id = ?1 ORDER BY e.created_at DESC", SEL),
             vec![Box::new(cr_id) as Box<dyn rusqlite::types::ToSql>],
         )
     } else {
         (
-            "SELECT e.*, u.full_name as user_name FROM expenses e
-             LEFT JOIN users u ON e.user_id = u.id
-             ORDER BY e.created_at DESC LIMIT 200".to_string(),
+            format!("{} ORDER BY e.created_at DESC LIMIT 200", SEL),
             vec![],
         )
     };
