@@ -49,9 +49,9 @@ async function compressImage(file: File, maxDim = 1280, quality = 0.75): Promise
 
 // ─── Gradient avatar helper ──────────────────────────────────────────────────
 const GRAD_PAIRS: [string, string][] = [
-    ['#8B78F5','#F0C547'],['#F45270','#F0C547'],['#22D3A0','#8B78F5'],
-    ['#F5A842','#F45270'],['#8B78F5','#22D3A0'],['#F0C547','#22D3A0'],
-    ['#F45270','#8B78F5'],['#22D3A0','#F5A842'],
+    ['var(--primary)','var(--accent)'],['var(--danger)','var(--accent)'],['var(--success)','var(--primary)'],
+    ['var(--warning)','var(--danger)'],['var(--primary)','var(--success)'],['var(--accent)','var(--success)'],
+    ['var(--danger)','var(--primary)'],['var(--success)','var(--warning)'],
 ];
 function getGrad(name: string): [string, string] {
     let h = 0;
@@ -110,7 +110,7 @@ const escLabel = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': 
 const IcoPackage = () => <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="opacity-40"><path d="M16.5 9.4l-9-5.19"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>;
 
 // ─── Icon button ─────────────────────────────────────────────────────────────
-function IcoBtn({ onClick, title, children, hoverColor = '#8B78F5', hoverBg = 'rgba(139,120,245,0.10)' }: {
+function IcoBtn({ onClick, title, children, hoverColor = 'var(--primary)', hoverBg = 'rgba(139,120,245,0.10)' }: {
     onClick: () => void; title: string; children: React.ReactNode;
     hoverColor?: string; hoverBg?: string;
 }) {
@@ -119,9 +119,9 @@ function IcoBtn({ onClick, title, children, hoverColor = '#8B78F5', hoverBg = 'r
             onClick={onClick}
             title={title}
             className="p-2 rounded-lg transition-colors"
-            style={{ color: '#7580A0' }}
+            style={{ color: 'var(--t3)' }}
             onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = hoverColor; (e.currentTarget as HTMLButtonElement).style.background = hoverBg; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = '#7580A0'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
         >{children}</button>
     );
 }

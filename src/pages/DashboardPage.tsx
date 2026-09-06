@@ -2,16 +2,12 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { formatCurrency } from '../utils';
 import * as api from '../api';
+import { T } from '../theme';
 import type { DashboardStats, TopProduct, Product, DailySalesReport } from '../types';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useToast } from '../contexts/ToastContext';
 
 // ─── Design tokens (match global CSS vars) ───────────────────────────────────
-const T = {
-    primary: '#8B78F5', success: '#22D3A0', accent: '#F0C547',
-    danger: '#F45270', warning: '#F5A842',
-    t1: '#EDEFFA', t2: '#B4BBCE', t3: '#7580A0',
-};
 
 // ─── Gradient Avatar ──────────────────────────────────────────────────────────
 const PALETTE: [string, string][] = [

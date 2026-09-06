@@ -5,6 +5,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
 import CaptureSettings from '../components/CaptureSettings';
 import CategorySettings from '../components/CategorySettings';
+import TamanoSettings from '../components/TamanoSettings';
 import HardwareSettings from '../components/HardwareSettings';
 import type { SystemConfig } from '../types';
 import { useToast } from '../contexts/ToastContext';
@@ -228,6 +229,9 @@ export default function SettingsPage() {
                     <p style={{ fontSize: 22, fontWeight: 900, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>{backupList.length}</p>
                 </div>
             </div>
+
+            {/* Tamaño de la interfaz */}
+            <TamanoSettings />
 
             {/* Store settings */}
             <div className="card" style={{ padding: '22px 24px' }}>

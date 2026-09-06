@@ -15,8 +15,8 @@ const IcoUsers  = () => <svg width="40" height="40" viewBox="0 0 24 24" fill="no
 
 // ─── Gradient helper ─────────────────────────────────────────────────────────
 const GRAD_PAIRS: [string, string][] = [
-    ['#8B78F5','#F0C547'],['#F45270','#F0C547'],['#22D3A0','#8B78F5'],
-    ['#F5A842','#F45270'],['#8B78F5','#22D3A0'],
+    ['var(--primary)','var(--accent)'],['var(--danger)','var(--accent)'],['var(--success)','var(--primary)'],
+    ['var(--warning)','var(--danger)'],['var(--primary)','var(--success)'],
 ];
 function getGrad(name: string): [string, string] {
     let h = 0;

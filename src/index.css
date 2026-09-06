@@ -2,12 +2,16 @@
 
 /* ─── DESIGN TOKENS ──────────────────────────────────────────────────────────── */
 :root {
-  --bg:        #06040D;
-  --bg2:       #0D0A1C;
-  --surface:   rgba(255,255,255,0.04);
-  --surface-h: rgba(255,255,255,0.07);
-  --border:    rgba(255,255,255,0.08);
-  --border-h:  rgba(255,255,255,0.16);
+  /* Negro de verdad y grises neutros. Los fondos y el texto llevaban un tinte
+     morado que teñía toda la pantalla; los colores con significado —el verde de
+     que algo salió bien, el rojo de que no— se conservan, porque son lo que
+     permite leer el estado de un vistazo sin ponerse a leer. */
+  --bg:        #000000;
+  --bg2:       #0B0B0B;
+  --surface:   rgba(255,255,255,0.045);
+  --surface-h: rgba(255,255,255,0.08);
+  --border:    rgba(255,255,255,0.09);
+  --border-h:  rgba(255,255,255,0.18);
 
   --primary:   #8B78F5;
   --primary-d: #6B56E0;
@@ -20,9 +24,9 @@
   --danger:    #F45270;
   --warning:   #F5A842;
 
-  --t1: #EDEFFA;
-  --t2: #B4BBCE;
-  --t3: #7580A0;
+  --t1: #F4F4F5;
+  --t2: #A8A8AD;
+  --t3: #6E6E76;
 
   --font: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   --radius: 14px;
@@ -78,14 +82,14 @@ button { cursor: pointer; padding: 0; }
   content: '';
   position: absolute; top: -20%; left: -10%;
   width: 700px; height: 700px; border-radius: 50%;
-  background: radial-gradient(circle, rgba(139,120,245,0.12) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(139,120,245,0.06) 0%, transparent 70%);
   filter: blur(60px);
 }
 .blobs::after {
   content: '';
   position: absolute; bottom: -15%; right: -5%;
   width: 600px; height: 600px; border-radius: 50%;
-  background: radial-gradient(circle, rgba(240,197,71,0.07) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(240,197,71,0.035) 0%, transparent 70%);
   filter: blur(60px);
 }
 

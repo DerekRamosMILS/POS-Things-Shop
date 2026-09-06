@@ -18,8 +18,10 @@ pub const HTML: &str = r####"
 <title>Capturar producto</title>
 <style>
   :root {
-    --bg: #0a0716; --card: #14101f; --line: rgba(255,255,255,.10);
-    --t1: #f2f0f7; --t2: #b9b4c9; --t3: #7d7791;
+    /* Los mismos negros y grises neutros que la computadora, para que se vea
+       como la misma aplicación y no como una página aparte. */
+    --bg: #000000; --card: #0F0F0F; --line: rgba(255,255,255,.11);
+    --t1: #f4f4f5; --t2: #a8a8ad; --t3: #6e6e76;
     --primary: #8B78F5; --ok: #22D3A0; --bad: #f45270;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }

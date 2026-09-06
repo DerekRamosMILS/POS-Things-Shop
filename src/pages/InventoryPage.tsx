@@ -7,8 +7,8 @@ import { useToast } from '../contexts/ToastContext';
 
 // ─── Gradient avatar helper ──────────────────────────────────────────────────
 const GRAD_PAIRS: [string, string][] = [
-    ['#8B78F5','#F0C547'],['#F45270','#F0C547'],['#22D3A0','#8B78F5'],
-    ['#F5A842','#F45270'],['#8B78F5','#22D3A0'],['#F0C547','#22D3A0'],
+    ['var(--primary)','var(--accent)'],['var(--danger)','var(--accent)'],['var(--success)','var(--primary)'],
+    ['var(--warning)','var(--danger)'],['var(--primary)','var(--success)'],['var(--accent)','var(--success)'],
 ];
 function getGrad(name: string): [string, string] {
     let h = 0;
