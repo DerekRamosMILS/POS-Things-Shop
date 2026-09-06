@@ -10,7 +10,9 @@ name = "things_shop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dev-dependencies]
+rustls-pemfile = "2.2.0"
 tempfile = "3"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -251,6 +251,7 @@ pub fn run() {
             capture::server::start_capture_server,
             capture::server::stop_capture_server,
             capture::server::capture_server_status,
+            capture::server::regenerar_codigo_captura,
             // Demo data
             seed::seed_demo_data,
         ])

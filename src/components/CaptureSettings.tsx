@@ -64,14 +64,14 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
     const reiniciarCodigo = async () => {
         const ok = await confirm({
             title: 'Generar un código nuevo',
-            message: 'Los celulares que estén capturando tendrán que volver a apuntar la cámara al código nuevo. ¿Continuar?',
+            message: 'Ojo: si algún celular tiene productos capturados sin mandar, no va a poder mandarlos hasta que vuelva a apuntar la cámara al código nuevo. ¿Continuar?',
+            variant: 'warning',
             confirmLabel: 'Generar',
         });
         if (!ok) return;
         setOcupado(true);
         try {
-            await api.stopCaptureServer();
-            setEstado(await api.startCaptureServer());
+            setEstado(await api.regenerarCodigoCaptura());
             showToast('Código nuevo generado');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }

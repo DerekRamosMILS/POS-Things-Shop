@@ -21,6 +21,7 @@
 
 mod ayuda;
 mod page;
+mod pwa;
 pub mod server;
 pub mod tls;
 

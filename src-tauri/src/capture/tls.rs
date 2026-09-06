@@ -269,3 +269,123 @@ mod verificacion {
         assert!(texto.contains("IP Address:192.168.0.55"), "sin la dirección: {}", texto);
     }
 }
+
+/// Prueba de extremo a extremo del camino cifrado.
+///
+/// Verificar la cadena con openssl comprueba que el certificado esté bien
+/// firmado, que es necesario pero no suficiente: falta que rustls acepte el par
+/// certificado/llave y que un cliente que solo confía en la autoridad complete
+/// el saludo contra el servidor de verdad. Si eso falla, el teléfono dice "no es
+/// seguro" y no hay nada de lo demás: ni guardado sin conexión ni cifrado.
+///
+/// El cliente es rustls y no `openssl s_client` porque las banderas de openssl
+/// cambian entre macOS y Linux, y una prueba que solo corre en la máquina de
+/// quien la escribió no protege de nada.
+#[cfg(test)]
+mod extremo_a_extremo {
+    use super::*;
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+    use tokio_rustls::TlsConnector;
+
+    /// Un cliente que confía únicamente en la autoridad de esta tienda, como el
+    /// teléfono después de instalarla.
+    fn cliente_que_confia_solo_en(ca_pem: &str) -> ClientConfig {
+        let mut raiz = RootCertStore::empty();
+        let mut cursor = std::io::Cursor::new(ca_pem.as_bytes());
+        for cert in rustls_pemfile::certs(&mut cursor) {
+            raiz.add(cert.expect("la autoridad no se pudo leer")).unwrap();
+        }
+        ClientConfig::builder()
+            .with_root_certificates(raiz)
+            .with_no_client_auth()
+    }
+
+    async fn servidor_de_prueba(id: &Identidad) -> (u16, axum_server::Handle<std::net::SocketAddr>) {
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem(
+            id.cert_pem.clone().into_bytes(),
+            id.key_pem.clone().into_bytes(),
+        )
+        .await
+        .expect("rustls no aceptó el certificado");
+
+        let escucha = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // Igual que en el servidor de verdad: entregarle a tokio un socket
+        // bloqueante revienta la tarea y la captura nunca arranca, con la
+        // pantalla diciendo que está encendida. Esta prueba existe por eso.
+        escucha.set_nonblocking(true).unwrap();
+        let puerto = escucha.local_addr().unwrap().port();
+
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "hola" }));
+        let manija = axum_server::Handle::new();
+        {
+            let manija = manija.clone();
+            tokio::spawn(async move {
+                let _ = axum_server::from_tcp_rustls(escucha, config)
+                    .unwrap()
+                    .handle(manija)
+                    .serve(app.into_make_service())
+                    .await;
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        (puerto, manija)
+    }
+
+    #[tokio::test]
+    async fn el_telefono_con_la_autoridad_instalada_entra_sin_advertencias() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        let id = identidad_para(&db, "127.0.0.1").unwrap();
+        let (puerto, manija) = servidor_de_prueba(&id).await;
+
+        let conector = TlsConnector::from(Arc::new(cliente_que_confia_solo_en(&id.ca_pem)));
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", puerto)).await.unwrap();
+        // Se conecta por la dirección, que es lo que va a teclear el teléfono.
+        let destino = ServerName::try_from("127.0.0.1").unwrap();
+
+        let mut flujo = conector
+            .connect(destino, tcp)
+            .await
+            .expect("el cliente no confió en la caja");
+
+        flujo
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut respuesta = Vec::new();
+        flujo.read_to_end(&mut respuesta).await.ok();
+        // Se apaga después de leer: hacerlo antes cortaba la respuesta a medias.
+        manija.graceful_shutdown(Some(std::time::Duration::from_millis(100)));
+
+        let texto = String::from_utf8_lossy(&respuesta);
+        assert!(texto.contains("hola"), "no llegó la página: {}", texto);
+    }
+
+    #[tokio::test]
+    async fn sin_la_autoridad_instalada_el_telefono_desconfia() {
+        // El contrapeso de la prueba anterior: si esto pasara, el certificado
+        // estaría siendo aceptado por algo que no es la autoridad de la tienda.
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        let id = identidad_para(&db, "127.0.0.1").unwrap();
+        let (puerto, manija) = servidor_de_prueba(&id).await;
+
+        // Una autoridad distinta: la de otra tienda cualquiera.
+        let otra = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&otra).unwrap();
+        let ajena = identidad_para(&otra, "127.0.0.1").unwrap();
+
+        let conector = TlsConnector::from(Arc::new(cliente_que_confia_solo_en(&ajena.ca_pem)));
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", puerto)).await.unwrap();
+        let resultado = conector
+            .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+            .await;
+        manija.graceful_shutdown(Some(std::time::Duration::from_millis(100)));
+
+        assert!(resultado.is_err(), "debió rechazar un certificado ajeno");
+    }
+}

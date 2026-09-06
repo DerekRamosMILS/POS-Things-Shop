@@ -16,6 +16,11 @@ pub const HTML: &str = r####"
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Capturar producto</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <style>
   :root {
     /* Los mismos negros y grises neutros que la computadora, para que se vea
@@ -93,6 +98,12 @@ pub const HTML: &str = r####"
   .reparto input { width: 84px; text-align: center; padding: 10px 6px; font-size: 17px; }
   .total { display: flex; justify-content: space-between; margin-top: 12px; font-size: 14px; }
   .total b { color: var(--t1); }
+  .pend {
+    background: rgba(139,120,245,.12); border: 1px solid rgba(139,120,245,.4);
+    border-radius: 14px; padding: 14px 15px; margin-bottom: 16px;
+  }
+  .pend p { margin: 0 0 10px; font-size: 14px; color: var(--t1); }
+  .pend button { width: 100%; }
   .hist { font-size: 13px; color: var(--t3); }
   .hist div { padding: 7px 0; border-bottom: 1px solid var(--line); }
   .hist div:last-child { border-bottom: none; }
@@ -105,6 +116,11 @@ pub const HTML: &str = r####"
 <p class="sub">Se guarda directo en la computadora de la tienda.</p>
 
 <div id="aviso"></div>
+
+<div class="pend" id="pendientes" style="display:none">
+  <p id="pendientesTexto"></p>
+  <button type="button" class="sec" id="sincronizar">Mandar ahora</button>
+</div>
 
 <div class="card">
   <div class="campo">
@@ -186,9 +202,11 @@ pub const HTML: &str = r####"
   // El código de emparejamiento viaja en el enlace del QR. Se guarda para que
   // recargar la página no obligue a volver a escanearlo.
   var params = new URLSearchParams(location.search);
-  var codigo = params.get('c') || sessionStorage.getItem('codigo') || '';
+  var codigo = params.get('c') || localStorage.getItem('codigo') || '';
   if (params.get('c')) {
-    sessionStorage.setItem('codigo', codigo);
+    // En almacenamiento permanente y no de sesión: la aplicación se abre desde
+    // la pantalla de inicio días después y tiene que seguir emparejada.
+    try { localStorage.setItem('codigo', codigo); } catch (e) {}
     history.replaceState(null, '', location.pathname);
   }
 
@@ -468,6 +486,145 @@ pub const HTML: &str = r####"
     $('nombre').focus();
   }
 
+
+  // ── La cola: lo capturado vive en el teléfono hasta que la caja lo recibe ──
+  //
+  // Todo pasa por aquí, con o sin conexión. Tener un solo camino es lo que hace
+  // que esto sea confiable: si "guardar" hiciera una cosa con WiFi y otra sin
+  // él, el caso raro —justo el que importa— sería el que nadie prueba.
+  //
+  // Cada producto lleva un identificador que se le pone al capturarlo, no al
+  // mandarlo. Por eso reintentar es seguro: si la conexión se cae después de
+  // que la caja lo recibió pero antes de que conteste, el siguiente intento
+  // lleva el mismo identificador y la caja devuelve el código que ya le dio en
+  // vez de dar de alta la prenda otra vez.
+
+  var BD = null;
+
+  function abrirBD() {
+    if (BD) return Promise.resolve(BD);
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open('things-shop-captura', 1);
+      req.onupgradeneeded = function () {
+        req.result.createObjectStore('pendientes', { keyPath: 'id' });
+      };
+      req.onsuccess = function () { BD = req.result; resolve(BD); };
+      req.onerror = function () { reject(req.error || new Error('sin almacenamiento')); };
+    });
+  }
+
+  function conTienda(modo, fn) {
+    return abrirBD().then(function (bd) {
+      return new Promise(function (resolve, reject) {
+        var tx = bd.transaction('pendientes', modo);
+        var pedido = fn(tx.objectStore('pendientes'));
+        tx.oncomplete = function () { resolve(pedido && pedido.result); };
+        tx.onerror = function () { reject(tx.error); };
+        tx.onabort = function () { reject(tx.error); };
+      });
+    });
+  }
+
+  function encolar(producto) { return conTienda('readwrite', function (t) { return t.put(producto); }); }
+  function sacarDeLaCola(id) { return conTienda('readwrite', function (t) { return t.delete(id); }); }
+  function verCola() {
+    return conTienda('readonly', function (t) { return t.getAll(); }).then(function (cola) {
+      // `getAll` devuelve por clave, y la clave es un identificador al azar: sin
+      // ordenar, lo capturado sale en desorden y los códigos de producto no
+      // siguen el orden en que se fotografió la mercancía.
+      return (cola || []).sort(function (a, b) {
+        return (a.capturado - b.capturado) || (a.id < b.id ? -1 : 1);
+      });
+    });
+  }
+
+  function idNuevo() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+    // Los navegadores viejos no lo traen; con la hora y dos números al azar
+    // basta para que dos capturas del mismo teléfono no choquen.
+    return 'c-' + Date.now().toString(36) + '-' +
+           Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+
+  var sincronizando = false;
+  var faltaOtraVuelta = false;
+
+  /**
+   * Manda lo que haya en la cola. Devuelve cuántos quedaron sin mandar.
+   *
+   * Solo corre una a la vez, pero si llega otra petición mientras tanto no se
+   * descarta: se apunta y se da otra vuelta al terminar. Descartarla dejaba sin
+   * mandar lo capturado cuando dos prendas se guardaban una detrás de otra, que
+   * es exactamente el ritmo al que se trabaja.
+   */
+  async function sincronizar(silencioso) {
+    if (sincronizando) { faltaOtraVuelta = true; return -1; }
+    sincronizando = true;
+    try {
+      var cola = await verCola();
+      if (!cola.length) { pintarPendientes(0); return 0; }
+
+      var enviados = 0;
+      var ultimoError = '';
+      for (var i = 0; i < cola.length; i++) {
+        var item = cola[i];
+        try {
+          var r = await fetch('/api/producto', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Codigo': codigo },
+            body: JSON.stringify(item.datos)
+          });
+          var data = await r.json();
+          if (r.ok && data.ok) {
+            // Solo entonces sale de la cola. Si el teléfono se apaga entre la
+            // respuesta y esta línea, el reintento no duplica: el identificador
+            // ya es conocido por la caja.
+            await sacarDeLaCola(item.id);
+            agregarAlHistorial(data.sku, item.datos.nombre);
+            enviados++;
+          } else {
+            // La caja contestó que no. Reintentar no va a cambiar nada: se
+            // queda en la cola y se avisa, para que no desaparezca en silencio.
+            ultimoError = data.mensaje || 'La caja no lo aceptó.';
+            break;
+          }
+        } catch (err) {
+          // Sin conexión. Se queda todo como está y se intenta más tarde.
+          break;
+        }
+      }
+
+      var quedan = (await verCola()).length;
+      pintarPendientes(quedan);
+
+      if (ultimoError) {
+        aviso(ultimoError, 'bad');
+      } else if (enviados > 0) {
+        aviso(enviados === 1
+          ? 'Se mandó 1 producto a la caja.'
+          : 'Se mandaron ' + enviados + ' productos a la caja.', 'ok');
+      } else if (quedan > 0 && !silencioso) {
+        aviso('La caja no contesta. Lo capturado está guardado aquí y se manda solo cuando la prendan.', 'bad');
+      }
+      return quedan;
+    } finally {
+      sincronizando = false;
+      if (faltaOtraVuelta) {
+        faltaOtraVuelta = false;
+        await sincronizar(true);
+      }
+    }
+  }
+
+  function pintarPendientes(cuantos) {
+    var caja = $('pendientes');
+    if (!cuantos) { caja.style.display = 'none'; return; }
+    caja.style.display = 'block';
+    $('pendientesTexto').textContent = cuantos === 1
+      ? '1 producto esperando a que prendas la computadora'
+      : cuantos + ' productos esperando a que prendas la computadora';
+  }
+
   $('guardar').addEventListener('click', async function () {
     if (enviando) return;
     var nombre = $('nombre').value.trim();
@@ -478,44 +635,77 @@ pub const HTML: &str = r####"
     $('guardar').textContent = 'Guardando...';
     aviso('', '');
 
-    try {
-      var r = await fetch('/api/producto', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Codigo': codigo },
-        body: JSON.stringify({
-          nombre: nombre,
-          precio: parseFloat($('precio').value) || null,
-          existencia: parseInt($('existencia').value, 10) || 0,
-          notas: $('notas').value.trim() || null,
-          tallas: tallas,
-          colores: colores,
-          // Solo cuando hubo algo que repartir. Con una sola combinación el
-          // reparto está vacío y mandarlo pondría cero piezas, ignorando las
-          // que se pusieron arriba.
-          piezas: piezasCapturadas(),
-          fotos: fotos
-        })
-      });
-      var data = await r.json();
-      if (r.ok && data.ok) {
-        aviso('Guardado como <b>' + data.sku + '</b>. Ya puedes capturar el siguiente.', 'ok');
-        agregarAlHistorial(data.sku, nombre);
-        limpiar(true);
-      } else {
-        aviso(data.mensaje || 'No se pudo guardar.', 'bad');
+    var producto = {
+      id: idNuevo(),
+      capturado: Date.now(),
+      datos: {
+        captura_id: null,
+        nombre: nombre,
+        precio: parseFloat($('precio').value) || null,
+        existencia: parseInt($('existencia').value, 10) || 0,
+        notas: $('notas').value.trim() || null,
+        tallas: tallas.slice(),
+        colores: colores.slice(),
+        // Solo cuando hubo algo que repartir. Con una sola combinación el
+        // reparto está vacío y mandarlo pondría cero piezas, ignorando las
+        // que se pusieron arriba.
+        piezas: piezasCapturadas(),
+        fotos: fotos.slice()
       }
+    };
+    producto.datos.captura_id = producto.id;
+
+    try {
+      // Primero al teléfono. Aunque la caja esté encendida: si se guarda aquí,
+      // ya no se puede perder pase lo que pase con el WiFi.
+      await encolar(producto);
     } catch (err) {
-      aviso('Se perdió la conexión. Revisa que sigas en el WiFi de la tienda.', 'bad');
-    } finally {
-      enviando = false;
-      $('guardar').disabled = false;
-      $('guardar').textContent = 'Guardar producto';
+      aviso('El teléfono no dejó guardar la captura. Revisa que le quede espacio.', 'bad');
+      soltarBoton();
+      return;
     }
+
+    // En cuanto está a salvo se libera el botón, antes de contar la cola y antes
+    // de intentar mandarla. Dejarlo bloqueado durante esas dos esperas hacía que
+    // el siguiente toque no hiciera nada: quien captura rápido perdía la prenda
+    // sin que nada se lo dijera.
+    limpiar(true);
+    soltarBoton();
+
+    // El contador lo pinta solo `sincronizar`, que lee la cola al terminar.
+    // Contarla también aquí abría una carrera: la cuenta de antes de mandar
+    // podía llegar después de la de después, y el aviso reaparecía con un
+    // número viejo cuando ya no quedaba nada.
+    sincronizar(true);
+  });
+
+  function soltarBoton() {
+    enviando = false;
+    $('guardar').disabled = false;
+    $('guardar').textContent = 'Guardar producto';
+  }
+
+  $('sincronizar').addEventListener('click', function () { sincronizar(false); });
+
+  // Se intenta cuando el teléfono recupera la red y al volver a la aplicación,
+  // que son los dos momentos en que la caja pudo haberse encendido.
+  window.addEventListener('online', function () { sincronizar(true); });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) sincronizar(true);
   });
 
   // Avisa de entrada si el código ya no sirve, en vez de dejar que capture todo
   // un producto para descubrirlo al guardar.
   $('limpiarTodo').addEventListener('click', function () { limpiar(false); });
+
+  // Guarda la aplicación en el teléfono. Es lo que la deja abrir con la
+  // computadora apagada; si el navegador no lo permite, todo lo demás sigue
+  // funcionando mientras haya conexión.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(function (e) {
+      console.warn('Sin guardado sin conexión:', e);
+    });
+  }
 
   fetch('/api/verificar', { headers: { 'X-Codigo': codigo } })
     .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
@@ -523,11 +713,19 @@ pub const HTML: &str = r####"
       if (!res.ok) aviso(res.d.mensaje + ' Vuelve a apuntar la cámara al código.', 'bad');
     })
     .catch(function () {
-      aviso('No se pudo conectar. Revisa que estés en el WiFi de la tienda.', 'bad');
+      // Sin caja no se avisa de nada: capturar sin conexión es lo normal ahora,
+      // y lo pendiente ya se ve en su propio recuadro.
     });
 
   pintarGaleria();
   pintarResumen();
+  // Lo que quedó de la última vez: se enseña y se intenta mandar.
+  verCola()
+    .then(function (cola) {
+      pintarPendientes(cola.length);
+      if (cola.length) sincronizar(true);
+    })
+    .catch(function () { /* sin almacenamiento: se sigue igual, solo en línea */ });
 })();
 </script>
 </body>
