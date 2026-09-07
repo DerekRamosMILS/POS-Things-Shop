@@ -2,13 +2,11 @@ import { useEffect, useState } from 'react';
 import * as api from '../api';
 import type { Supplier } from '../types';
 import { useToast } from '../contexts/ToastContext';
-import { useConfirm } from '../contexts/ConfirmContext';
 
 // ─── Inline SVGs ─────────────────────────────────────────────────────────────
 const IcoPlus   = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>;
 const IcoX      = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>;
 const IcoEdit   = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>;
-const IcoTrash  = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>;
 const IcoSearch = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
 const IcoLoader = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>;
 const IcoTruck  = () => <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="opacity-40"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>;
@@ -18,8 +16,8 @@ const IcoMap    = () => <svg width="11" height="11" viewBox="0 0 24 24" fill="no
 
 // ─── Gradient avatar helper ──────────────────────────────────────────────────
 const GRAD_PAIRS: [string, string][] = [
-    ['#8B78F5','#F0C547'],['#F45270','#F0C547'],['#22D3A0','#8B78F5'],
-    ['#F5A842','#F45270'],['#8B78F5','#22D3A0'],
+    ['var(--primary)','var(--accent)'],['var(--danger)','var(--accent)'],['var(--success)','var(--primary)'],
+    ['var(--warning)','var(--danger)'],['var(--primary)','var(--success)'],
 ];
 function getGrad(name: string): [string, string] {
     let h = 0;
@@ -37,7 +35,6 @@ export default function SuppliersPage() {
     const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
     const [processing, setProcessing] = useState(false);
     const { showToast } = useToast();
-    const { confirm } = useConfirm();
 
     useEffect(() => { load(); }, []);
 
@@ -63,12 +60,6 @@ export default function SuppliersPage() {
             }
             setShowForm(false); load();
         } catch (e) { showToast(String(e), 'error'); } finally { setProcessing(false); }
-    };
-
-    const handleDelete = async (id: number) => {
-        const ok = await confirm({ title: 'Eliminar proveedor', message: '¿Eliminar este proveedor?', variant: 'danger', confirmLabel: 'Eliminar' });
-        if (!ok) return;
-        try { await api.deleteSupplier(id); load(); } catch (e) { showToast(String(e), 'error'); }
     };
 
     const handleToggleActive = async (supplier: Supplier) => {
@@ -144,10 +135,6 @@ export default function SuppliersPage() {
                                         onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--primary)'; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(139,120,245,0.10)'; }}
                                         onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
                                     ><IcoEdit /></button>
-                                    <button onClick={() => handleDelete(s.id)} style={{ padding: 6, borderRadius: 8, color: 'var(--t3)', cursor: 'pointer' }}
-                                        onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--danger)'; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(244,82,112,0.10)'; }}
-                                        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--t3)'; (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
-                                    ><IcoTrash /></button>
                                 </div>
                             </div>
 

@@ -5,13 +5,18 @@ use crate::db::connection::DbState;
 use crate::models::supplier::{CreateSupplierDto, Supplier, UpdateSupplierDto};
 use crate::session::{require_admin, require_auth, SessionState};
 
+/// Columnas enumeradas a propósito: `SELECT *` se rompe en silencio en cuanto
+/// una migración agrega una columna a la tabla.
+const SEL: &str = "SELECT id, name, contact_name, phone, email, address, notes,
+    is_active, created_at, updated_at FROM suppliers";
+
 #[tauri::command]
 pub fn get_suppliers(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Supplier>, String> {
     require_auth(&sessions, &token)?;
     let db = state.conn();
 
     let mut stmt = db.prepare(
-        "SELECT * FROM suppliers ORDER BY name ASC"
+        &format!("{} ORDER BY name ASC", SEL)
     ).map_err(|e| e.to_string())?;
 
     let suppliers = stmt
@@ -48,7 +53,7 @@ pub fn create_supplier(state: State<DbState>, sessions: State<SessionState>, tok
 
     let id = db.last_insert_rowid();
     db.query_row(
-        "SELECT * FROM suppliers WHERE id = ?1",
+        &format!("{} WHERE id = ?1", SEL),
         params![id],
         |row| {
             Ok(Supplier {

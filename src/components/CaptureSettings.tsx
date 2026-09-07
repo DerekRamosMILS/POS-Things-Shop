@@ -64,14 +64,14 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
     const reiniciarCodigo = async () => {
         const ok = await confirm({
             title: 'Generar un código nuevo',
-            message: 'Los celulares que estén capturando tendrán que volver a apuntar la cámara al código nuevo. ¿Continuar?',
+            message: 'Ojo: si algún celular tiene productos capturados sin mandar, no va a poder mandarlos hasta que vuelva a apuntar la cámara al código nuevo. ¿Continuar?',
+            variant: 'warning',
             confirmLabel: 'Generar',
         });
         if (!ok) return;
         setOcupado(true);
         try {
-            await api.stopCaptureServer();
-            setEstado(await api.startCaptureServer());
+            setEstado(await api.regenerarCodigoCaptura());
             showToast('Código nuevo generado');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }
@@ -99,8 +99,10 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
             </div>
 
             <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 16, lineHeight: 1.5 }}>
-                Toma las fotos con el teléfono y el producto se da de alta solo. El
-                celular tiene que estar en el mismo WiFi que esta computadora.
+                Toma las fotos con el teléfono y el producto se da de alta solo. La primera
+                vez, el teléfono pide un permiso: son tres toques y se explican en pantalla.
+                Después de eso puedes capturar aunque esta computadora esté apagada, y todo
+                se manda solo cuando la prendas.
             </p>
 
             {!estado.encendido ? (
@@ -109,7 +111,8 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                         {ocupado ? 'Encendiendo...' : 'Encender captura'}
                     </button>
                     <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 10, lineHeight: 1.5 }}>
-                        Apágala cuando termines de capturar.
+                        Enciéndela para emparejar un teléfono nuevo o para recibir lo que se
+                        capturó mientras estaba apagada.
                     </p>
                 </>
             ) : (
@@ -126,7 +129,9 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                                 Apunta la cámara del celular al código
                             </p>
                             <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
-                                Se abre solo. Si no, escribe esta dirección en el teléfono:
+                                La primera vez te va a pedir instalar un permiso: síguelo hasta
+                                el final y guarda la captura en la pantalla de inicio. Si el
+                                código no abre, escribe esta dirección:
                             </p>
 
                             <input readOnly value={estado.url ?? ''} className="input"

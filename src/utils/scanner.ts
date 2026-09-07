@@ -9,9 +9,24 @@
  * Lo que distingue una lectura de alguien escribiendo no es el contenido sino el
  * ritmo: un lector manda todos los caracteres con huecos de milisegundos, cosa
  * que una persona no puede reproducir.
+ *
+ * Se miden dos cosas, no una. El hueco entre teclas separa el caso normal, pero
+ * por sí solo deja pasar una racha rápida o una tecla repetida: bastaba con
+ * teclear cuatro caracteres seguidos y dar Enter para que el buscador se
+ * vaciara y saliera un "producto no encontrado" de la nada. Un lector manda un
+ * código de doce caracteres en menos de lo que una persona tarda en teclear
+ * dos, así que el tiempo total de la ráfaga es lo que de verdad los separa.
  */
 
 export type ScannerSuffix = 'enter' | 'tab' | 'none';
+
+/**
+ * Milisegundos por carácter que ni el tecleo más rápido baja.
+ *
+ * Un mecanógrafo veloz ronda los 100 ms por tecla; 25 son cuatro veces más
+ * rápido que eso, y aun así diez veces más lento que cualquier lector.
+ */
+export const MS_POR_CARACTER_HUMANO = 25;
 
 export interface ScannerConfig {
     enabled: boolean;
@@ -86,10 +101,16 @@ export function createScannerHandler({ onScan, getConfig }: ScannerEvents) {
         const raw = burst.chars.join('');
         const field = burst.field;
         const fieldValue = burst.fieldValue;
+        const duracion = burst.lastAt - burst.startedAt;
         const code = stripPrefix(raw, config.prefix);
         reset();
 
         if (code.length < config.minLength) return;
+
+        // Demasiado lenta para ser una lectura: fue alguien escribiendo. Se deja
+        // pasar tal cual, sin vaciarle el campo ni buscar un producto que no
+        // existe.
+        if (duracion > raw.length * MS_POR_CARACTER_HUMANO) return;
 
         // El lector escribió dentro de un campo: devuélvelo a como estaba para
         // que el código no quede pegado en el buscador o en las notas.
@@ -114,7 +135,13 @@ export function createScannerHandler({ onScan, getConfig }: ScannerEvents) {
             (config.suffix === 'tab' && e.key === 'Tab');
 
         if (terminator) {
-            if (burst && burst.chars.length >= config.minLength) {
+            const pareceLectura =
+                burst !== null
+                && burst.chars.length >= config.minLength
+                && burst.lastAt - burst.startedAt <= burst.chars.length * MS_POR_CARACTER_HUMANO;
+            if (pareceLectura) {
+                // Solo aquí se traga el Enter: si fue una persona, su Enter
+                // tiene que seguir sirviendo para enviar el formulario.
                 e.preventDefault();
                 commit(config);
             } else {

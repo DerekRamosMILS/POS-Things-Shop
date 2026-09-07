@@ -2,10 +2,14 @@
  * La página que se abre en el celular vive dentro de una cadena de Rust, así
  * que su JavaScript nunca se ejecutaba en ninguna prueba. Aquí se carga tal
  * cual, se llena el formulario y se revisa lo que sale hacia la caja.
+ *
+ * Lo capturado pasa siempre por la cola del teléfono antes de salir, así que
+ * hace falta un IndexedDB: sin él no se guarda y no se manda nada.
  */
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
 const fuente = readFileSync('src-tauri/src/capture/page.rs', 'utf-8');
 const HTML = fuente.slice(
@@ -28,16 +32,20 @@ async function capturar(llenar: (d: Document) => void): Promise<Enviado> {
 
     const dom = new JSDOM(HTML, {
         runScripts: 'dangerously',
-        url: 'http://192.168.0.10:7423/?c=123456',
+        url: 'https://192.168.0.10:7423/?c=123456',
         beforeParse(win) {
-            (win as unknown as { fetch: unknown }).fetch = fetchFalso;
+            const w = win as unknown as Record<string, unknown>;
+            w.fetch = fetchFalso;
+            w.indexedDB = new IDBFactory();
+            w.IDBKeyRange = IDBKeyRange;
         },
     });
 
     const doc = dom.window.document;
+    await new Promise(r => setTimeout(r, 40));
     llenar(doc);
     doc.getElementById('guardar')!.dispatchEvent(new dom.window.Event('click'));
-    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 120));
 
     const guardado = enviados.find(e => 'piezas' in e);
     expect(guardado, 'no se mandó ningún producto').toBeDefined();
@@ -99,8 +107,11 @@ describe('captura desde el celular', () => {
     });
 
     it('el total que ve quien captura es la suma, no un múltiplo', async () => {
-        const dom = new JSDOM(HTML, { runScripts: 'dangerously', url: 'http://x/?c=1', beforeParse(w) {
-            (w as unknown as { fetch: unknown }).fetch = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
+        const dom = new JSDOM(HTML, { runScripts: 'dangerously', url: 'https://x/?c=1', beforeParse(win) {
+            const w = win as unknown as Record<string, unknown>;
+            w.fetch = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
+            w.indexedDB = new IDBFactory();
+            w.IDBKeyRange = IDBKeyRange;
         } });
         const doc = dom.window.document;
 

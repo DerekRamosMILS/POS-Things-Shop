@@ -17,6 +17,13 @@ use crate::session::{require_admin, require_auth, SessionState};
 
 /// Puerto por defecto. Alto y poco común para no chocar con nada de la tienda.
 const PUERTO: u16 = 7423;
+/// Puerto del ayudante que entrega el certificado.
+///
+/// Tiene que ir sin cifrar por el huevo y la gallina: el teléfono necesita el
+/// certificado *antes* de poder confiar en la conexión cifrada. Por ahí no pasa
+/// ningún dato de la tienda, solo el certificado público y las instrucciones
+/// para instalarlo.
+const PUERTO_AYUDA: u16 = 7424;
 /// Intentos con código incorrecto antes de bloquear.
 const MAX_INTENTOS: u32 = 5;
 /// Cuánto dura el bloqueo.
@@ -29,7 +36,6 @@ const MAX_CUERPO: usize = 24 * 1024 * 1024;
 /// Estado del servidor mientras está encendido.
 struct Encendido {
     codigo: String,
-    puerto: u16,
     ip: String,
     apagar: tokio::sync::oneshot::Sender<()>,
     intentos_fallidos: u32,
@@ -112,6 +118,9 @@ fn ip_local() -> Option<String> {
     direcciones_disponibles().first().map(|d| d.ip.clone())
 }
 
+/// Clave donde vive el código de emparejamiento entre arranques.
+const CLAVE_CODIGO: &str = "captura_codigo";
+
 /// Código de emparejamiento de seis dígitos.
 fn nuevo_codigo() -> String {
     // uuid v4 es aleatorio criptográficamente; se toman dígitos de ahí para no
@@ -119,6 +128,43 @@ fn nuevo_codigo() -> String {
     let bytes = uuid::Uuid::new_v4();
     let n = u32::from_be_bytes(bytes.as_bytes()[..4].try_into().unwrap_or([0; 4]));
     format!("{:06}", n % 1_000_000)
+}
+
+/// El código de esta tienda: el mismo entre arranques, hasta que se pida otro.
+///
+/// Antes se generaba uno nuevo cada vez que se encendía la captura. Con el
+/// teléfono guardando lo que captura para mandarlo horas después, eso significa
+/// que todo lo capturado anoche se rechaza esta mañana y hay que volver a
+/// escanear el QR con la cola llena. Lo que protege el código no es que cambie
+/// seguido, sino el bloqueo tras cinco intentos fallidos: un candado de seis
+/// dígitos que solo admite un intento por minuto no se abre a fuerza bruta.
+///
+/// Rotarlo sigue siendo posible a propósito, desde Ajustes.
+fn codigo_de_la_tienda(db: &rusqlite::Connection) -> String {
+    if let Ok(guardado) = db.query_row(
+        "SELECT value FROM system_config WHERE key = ?1",
+        params![CLAVE_CODIGO],
+        |r| r.get::<_, String>(0),
+    ) {
+        let limpio = guardado.trim().to_string();
+        if limpio.len() == 6 && limpio.chars().all(|c| c.is_ascii_digit()) {
+            return limpio;
+        }
+    }
+
+    let codigo = nuevo_codigo();
+    db.execute(
+        "INSERT OR REPLACE INTO system_config (key, value, description, updated_at)
+         VALUES (?1, ?2, 'Código de emparejamiento de la captura por celular', datetime('now','localtime'))",
+        params![CLAVE_CODIGO, codigo],
+    )
+    .ok();
+    codigo
+}
+
+/// Descarta el código actual para que el siguiente encendido emita otro.
+pub fn olvidar_codigo(db: &rusqlite::Connection) {
+    db.execute("DELETE FROM system_config WHERE key = ?1", params![CLAVE_CODIGO]).ok();
 }
 
 /// Quita espacios, descarta vacíos y elimina repetidos conservando el orden.
@@ -215,6 +261,12 @@ fn escalable(svg: &str) -> String {
 #[derive(Debug, Deserialize)]
 struct ProductoDelCelular {
     // El código de emparejamiento se comprueba en la cabecera X-Codigo, no aquí.
+    /// Identificador que el teléfono le pone al capturarlo, no al mandarlo.
+    ///
+    /// Es lo que hace que reintentar sea seguro: todos los envíos del mismo
+    /// producto llevan el mismo, y el segundo encuentra el primero.
+    #[serde(default)]
+    captura_id: Option<String>,
     nombre: String,
     #[serde(default)]
     precio: Option<f64>,
@@ -263,7 +315,7 @@ struct Respuesta {
 }
 
 #[derive(Clone)]
-struct Contexto {
+pub struct Contexto {
     db: Arc<Mutex<rusqlite::Connection>>,
     captura: Arc<CaptureState>,
 }
@@ -318,6 +370,9 @@ fn construir_router(ctx: Contexto) -> Router {
         .route("/", get(pagina))
         .route("/api/verificar", get(verificar))
         .route("/api/producto", post(crear_producto))
+        .route("/api/catalogo", get(catalogo))
+        .route("/api/conteo", post(recibir_conteo))
+        .merge(super::pwa::rutas())
         .layer(axum::extract::DefaultBodyLimit::max(MAX_CUERPO))
         .with_state(ctx)
 }
@@ -370,6 +425,119 @@ async fn crear_producto(
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ParaContar {
+    sku: String,
+    nombre: String,
+    /// Lo que la caja cree que hay. Sirve de referencia al contar, nunca se
+    /// impone: quien está frente al perchero ve la verdad.
+    stock: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    variantes: Vec<VarianteParaContar>,
+}
+
+#[derive(Debug, Serialize)]
+struct VarianteParaContar {
+    id: i64,
+    etiqueta: String,
+    stock: i32,
+}
+
+/// El catálogo que el teléfono se lleva para poder contar sin conexión.
+///
+/// Solo lo indispensable para reconocer una prenda y anotar cuántas hay: ni
+/// precios de compra, ni ventas, ni clientes. Si el teléfono se pierde, lo que
+/// se lleva es una lista de nombres.
+async fn catalogo(
+    AxumState(ctx): AxumState<Contexto>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = autorizado(&ctx.captura, &headers) {
+        return (code, Json(serde_json::json!({ "ok": false, "mensaje": msg })));
+    }
+
+    let db = crate::db::connection::recuperar(ctx.db.lock());
+    let productos = (|| -> Result<Vec<ParaContar>, String> {
+        let mut stmt = db
+            .prepare(
+                "SELECT id, sku, name, stock FROM products
+                 WHERE is_active = 1 ORDER BY name ASC LIMIT 5000",
+            )
+            .map_err(|e| e.to_string())?;
+        let filas: Vec<(i64, String, String, i32)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(stmt);
+
+        let mut vstmt = db
+            .prepare(
+                "SELECT id, size, color, stock FROM product_variants
+                 WHERE product_id = ?1 AND is_active = 1 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut salida = Vec::with_capacity(filas.len());
+        for (id, sku, nombre, stock) in filas {
+            let variantes: Vec<VarianteParaContar> = vstmt
+                .query_map(params![id], |r| {
+                    let size: Option<String> = r.get(1)?;
+                    let color: Option<String> = r.get(2)?;
+                    Ok(VarianteParaContar {
+                        id: r.get(0)?,
+                        etiqueta: [size, color]
+                            .into_iter()
+                            .flatten()
+                            .filter(|v| !v.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" / "),
+                        stock: r.get(3)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            salida.push(ParaContar { sku, nombre, stock, variantes });
+        }
+        Ok(salida)
+    })();
+
+    match productos {
+        Ok(p) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "productos": p }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "mensaje": e })),
+        ),
+    }
+}
+
+/// Recibe un conteo hecho con el teléfono, quizá horas antes.
+async fn recibir_conteo(
+    AxumState(ctx): AxumState<Contexto>,
+    headers: HeaderMap,
+    Json(entrada): Json<super::conteo::ConteoDelCelular>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = autorizado(&ctx.captura, &headers) {
+        return (code, Json(serde_json::json!({ "ok": false, "mensaje": msg })));
+    }
+
+    let db = crate::db::connection::recuperar(ctx.db.lock());
+    match super::conteo::aplicar_conteo(&db, None, &entrada) {
+        Ok(r) => {
+            log::info!(
+                "Conteo desde el celular: {} pasó de {} a {}",
+                r.etiqueta, r.antes, r.despues
+            );
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "conteo": r })))
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "mensaje": e })),
+        ),
+    }
+}
+
 /// Da de alta el producto y sus fotos en una sola transacción.
 ///
 /// Sin precio queda inactivo a propósito: así se puede fotografiar la mercancía
@@ -398,14 +566,33 @@ fn guardar_producto(
         ));
     }
 
+    // Ya llegó antes: se devuelve el código que se le dio entonces. Es lo que
+    // permite al teléfono reintentar sin miedo cuando no supo si llegó.
+    let captura_id = entrada
+        .captura_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    if let Some(ref id) = captura_id {
+        if let Ok(sku) = db.query_row(
+            "SELECT sku FROM products WHERE captura_id = ?1",
+            params![id],
+            |r| r.get::<_, String>(0),
+        ) {
+            log::info!("Captura repetida ignorada ({}), ya era {}", id, sku);
+            return Ok(sku);
+        }
+    }
+
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let resultado = (|| -> Result<String, String> {
         let sku = siguiente_sku(db)?;
 
         db.execute(
-            "INSERT INTO products (sku, name, description, purchase_price, sale_price, stock, is_active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO products (sku, name, description, purchase_price, sale_price, stock, is_active, captura_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 sku,
                 entrada.nombre.trim(),
@@ -413,7 +600,8 @@ fn guardar_producto(
                 costo,
                 precio,
                 existencia,
-                activo
+                activo,
+                captura_id
             ],
         ).map_err(|e| e.to_string())?;
 
@@ -502,46 +690,98 @@ pub fn start_capture_server(
             "No se encontró una dirección de red. Conecta este equipo al WiFi de la tienda.",
         )?,
     };
-    let codigo = nuevo_codigo();
+    let codigo = {
+        let db = state.conn();
+        codigo_de_la_tienda(&db)
+    };
 
     let ctx = Contexto {
         db: Arc::clone(&state.db),
         captura: Arc::clone(&captura),
     };
 
+    // El certificado se emite para esta dirección concreta, firmado por la
+    // autoridad de la tienda. Si el router cambió la dirección desde la última
+    // vez, este se vuelve a emitir y el teléfono no se entera: lo que tiene
+    // instalado es la autoridad, no esto.
+    let identidad = {
+        let db = state.conn();
+        super::tls::identidad_para(&db, &ip)?
+    };
+
     let app = construir_router(ctx);
+    let ayuda = super::ayuda::router(identidad.ca_pem.clone(), ip.clone());
 
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PUERTO);
-    let listener = std::net::TcpListener::bind(addr)
-        .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO, e))?;
-    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    // Ambos puertos se abren aquí, antes de arrancar nada, para poder avisar de
+    // inmediato si alguno está ocupado en vez de fallar en segundo plano.
+    let escucha = std::net::TcpListener::bind(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        PUERTO,
+    ))
+    .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO, e))?;
+    // Sin esto, entregarle el socket a tokio revienta la tarea y la captura
+    // nunca arranca, con la pantalla diciendo que está encendida.
+    escucha.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let escucha_ayuda = std::net::TcpListener::bind(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        PUERTO_AYUDA,
+    ))
+    .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO_AYUDA, e))?;
+    escucha_ayuda.set_nonblocking(true).map_err(|e| e.to_string())?;
 
+    let manija = axum_server::Handle::new();
     let (apagar_tx, apagar_rx) = tokio::sync::oneshot::channel();
 
+    let config_tls = tokio::task::block_in_place(|| {
+        tauri::async_runtime::block_on(axum_server::tls_rustls::RustlsConfig::from_pem(
+            identidad.cert_pem.into_bytes(),
+            identidad.key_pem.into_bytes(),
+        ))
+    })
+    .map_err(|e| format!("El certificado de la captura no se pudo usar: {}", e))?;
+
+    {
+        let manija = manija.clone();
+        tauri::async_runtime::spawn(async move {
+            // Un solo aviso apaga los dos servidores.
+            let _ = apagar_rx.await;
+            manija.graceful_shutdown(Some(std::time::Duration::from_secs(2)));
+        });
+    }
+
+    {
+        let manija = manija.clone();
+        tauri::async_runtime::spawn(async move {
+            log::info!("Captura por celular escuchando en el puerto {} (cifrada)", PUERTO);
+            let servidor = match axum_server::from_tcp_rustls(escucha, config_tls) {
+                Ok(s) => s.handle(manija).serve(app.into_make_service()),
+                Err(e) => {
+                    log::error!("No se pudo iniciar la captura cifrada: {}", e);
+                    return;
+                }
+            };
+            if let Err(e) = servidor.await {
+                log::error!("La captura por celular terminó con error: {}", e);
+            }
+            log::info!("Captura por celular apagada");
+        });
+    }
+
     tauri::async_runtime::spawn(async move {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
+        let escucha_ayuda = match tokio::net::TcpListener::from_std(escucha_ayuda) {
             Ok(l) => l,
             Err(e) => {
-                log::error!("No se pudo iniciar la captura por celular: {}", e);
+                log::error!("No se pudo abrir la página del certificado: {}", e);
                 return;
             }
         };
-        log::info!("Captura por celular escuchando en el puerto {}", PUERTO);
-        let servidor = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = apagar_rx.await;
-            });
-        if let Err(e) = servidor.await {
-            log::error!("La captura por celular terminó con error: {}", e);
-        }
-        log::info!("Captura por celular apagada");
+        let _ = axum::serve(escucha_ayuda, ayuda).await;
     });
 
     {
         let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
         *guard = Some(Encendido {
             codigo,
-            puerto: PUERTO,
             ip,
             apagar: apagar_tx,
             intentos_fallidos: 0,
@@ -570,6 +810,43 @@ pub fn stop_capture_server(
     })
 }
 
+/// Emite un código de emparejamiento nuevo e invalida el anterior.
+///
+/// Existe como orden propia porque el código dejó de cambiar solo al reiniciar:
+/// ahora dura para que lo capturado sin conexión pueda mandarse mañana. Cuando
+/// se quiere cambiar, se quiere a propósito.
+#[tauri::command]
+pub fn regenerar_codigo_captura(
+    state: State<'_, DbState>,
+    sessions: State<'_, SessionState>,
+    captura: State<'_, Arc<CaptureState>>,
+    token: String,
+) -> Result<EstadoCaptura, String> {
+    require_admin(&sessions, &token)?;
+
+    let estaba_encendida = {
+        let guard = captura.activo.lock().map_err(|e| e.to_string())?;
+        guard.as_ref().map(|e| e.ip.clone())
+    };
+
+    {
+        let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
+        if let Some(estado) = guard.take() {
+            let _ = estado.apagar.send(());
+        }
+    }
+    {
+        let db = state.conn();
+        olvidar_codigo(&db);
+    }
+
+    match estaba_encendida {
+        // Se vuelve a encender en la misma red en la que estaba.
+        Some(ip) => start_capture_server(state, sessions, captura, token, Some(ip)),
+        None => capture_server_status(sessions, captura, token),
+    }
+}
+
 #[tauri::command]
 pub fn capture_server_status(
     sessions: State<'_, SessionState>,
@@ -586,7 +863,11 @@ pub fn capture_server_status(
     let alternativas = direcciones_disponibles();
     match guard.as_ref() {
         Some(e) => {
-            let url = format!("http://{}:{}/?c={}", e.ip, e.puerto, e.codigo);
+            // El QR lleva a la página del permiso, no directo a la captura: un
+            // teléfono sin el permiso instalado no puede abrir la dirección
+            // cifrada, y quien ya lo tiene solo toca el último botón de esa
+            // página, que lleva el código consigo.
+            let url = format!("http://{}:{}/?c={}", e.ip, PUERTO_AYUDA, e.codigo);
             let interfaz = alternativas
                 .iter()
                 .find(|d| d.ip == e.ip)
@@ -627,6 +908,7 @@ mod tests {
 
     fn entrada(nombre: &str, precio: Option<f64>, fotos: usize) -> ProductoDelCelular {
         ProductoDelCelular {
+            captura_id: None,
             nombre: nombre.into(),
             precio,
             costo: None,
@@ -725,6 +1007,52 @@ mod tests {
             params![sku], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(stock, 12);
         assert_eq!(tiene, 1);
+    }
+
+    #[test]
+    fn mandar_dos_veces_la_misma_captura_no_crea_dos_productos() {
+        // El teléfono guarda lo capturado y lo manda cuando alcanza la caja. Si
+        // el WiFi se cae entre "lo mandé" y "me contestaron", va a reintentar; y
+        // quien esté esperando también le va a dar otra vez al botón.
+        let conn = db();
+        let mut e = entrada("Vestido amarillo", Some(499.0), 0);
+        e.captura_id = Some("abc-123".into());
+
+        let primero = guardar_producto(&conn, e).unwrap();
+
+        let mut otra_vez = entrada("Vestido amarillo", Some(499.0), 0);
+        otra_vez.captura_id = Some("abc-123".into());
+        let segundo = guardar_producto(&conn, otra_vez).unwrap();
+
+        assert_eq!(primero, segundo, "el reintento devuelve el mismo código");
+        let cuantos: i64 = conn
+            .query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cuantos, 1, "y no da de alta el vestido dos veces");
+    }
+
+    #[test]
+    fn dos_capturas_distintas_siguen_siendo_dos_productos() {
+        // Lo contrario también importa: dos prendas iguales capturadas a
+        // propósito son dos prendas.
+        let conn = db();
+        let mut a = entrada("Blusa", Some(299.0), 0);
+        a.captura_id = Some("uno".into());
+        let mut b = entrada("Blusa", Some(299.0), 0);
+        b.captura_id = Some("dos".into());
+
+        let sku_a = guardar_producto(&conn, a).unwrap();
+        let sku_b = guardar_producto(&conn, b).unwrap();
+
+        assert_ne!(sku_a, sku_b);
+    }
+
+    #[test]
+    fn una_captura_sin_identificador_se_acepta_igual() {
+        // La app de escritorio y las versiones viejas del teléfono no lo mandan.
+        let conn = db();
+        let sku = guardar_producto(&conn, entrada("Falda", Some(350.0), 0)).unwrap();
+        assert_eq!(sku, "TS-000001");
     }
 
     #[test]
@@ -1046,7 +1374,6 @@ mod http {
             let mut guard = captura.activo.lock().unwrap();
             *guard = Some(Encendido {
                 codigo: codigo.to_string(),
-                puerto: 0,
                 ip: "127.0.0.1".into(),
                 apagar: tx,
                 intentos_fallidos: 0,

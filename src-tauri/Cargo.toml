@@ -10,7 +10,9 @@ name = "things_shop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dev-dependencies]
+rustls-pemfile = "2.2.0"
 tempfile = "3"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -38,6 +40,8 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Enumera las interfaces de red: con un VPN activo, preguntar "¿por dónde salgo
 # a internet?" devuelve el túnel, que el celular no puede alcanzar.
 local-ip-address = "0.6"
+rcgen = { version = "0.14.10", default-features = false, features = ["pem", "crypto", "ring"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 
 [profile.release]
 strip = true

@@ -160,7 +160,11 @@ pub fn exportar_pendientes_factura(
     require_admin(&sessions, &token)?;
     let db = state.conn();
 
-    let mut out = String::from(
+    // La marca de orden de bytes es lo que hace que Excel abra el archivo como
+    // UTF-8. Sin ella, en una computadora en español "Rodríguez" llega como
+    // "RodrÃ­guez" y el contador tiene que corregir la razón social a mano.
+    let mut out = String::from("\u{FEFF}");
+    out.push_str(
         "folio,fecha,rfc,razon_social,regimen_fiscal,cp_fiscal,uso_cfdi,\
          subtotal,descuento,impuesto,total,forma_pago\n",
     );

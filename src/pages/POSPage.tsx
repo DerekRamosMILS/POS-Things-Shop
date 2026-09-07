@@ -9,6 +9,7 @@ import { useProductImage } from '../hooks/useProductImages';
 import { evaluateMixedTender, round2 } from '../utils/cash';
 import KeyboardHelp from '../components/KeyboardHelp';
 import * as api from '../api';
+import { T } from '../theme';
 
 
 import type { CartItem, CartVariant, Category, Customer, PaymentSplit, Product, ProductVariant, Promotion } from '../types';
@@ -17,12 +18,6 @@ const variantLabel = (v: CartVariant | null): string =>
     v ? ([v.size, v.color].filter(x => x && x.trim()).join(' / ') || 'Único') : '';
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
-const T = {
-    primary: '#8B78F5', primaryD: '#6B56E0', primaryG: 'rgba(139,120,245,0.3)',
-    accent: '#F0C547', accentG: 'rgba(240,197,71,0.28)',
-    success: '#22D3A0', danger: '#F45270', warning: '#F5A842',
-    t1: '#EDEFFA', t2: '#B4BBCE', t3: '#7580A0',
-};
 
 // ─── Gradient Avatar fallback ─────────────────────────────────────────────────
 const PALETTE: [string, string][] = [
@@ -974,7 +969,7 @@ export default function POSPage() {
                                 onClick={() => serviceType === 'layaway' ? setShowLayaway(true) : setShowPayment(true)}
                                 style={{
                                     width: '100%', padding: '13px', borderRadius: 14, border: 'none',
-                                    background: 'linear-gradient(135deg, #F0C547, #C8A030)',
+                                    background: 'linear-gradient(135deg, var(--accent), #C8A030)',
                                     color: '#1a1200', fontSize: 14, fontWeight: 800, cursor: 'pointer',
                                     fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
                                     boxShadow: '0 6px 20px rgba(240,197,71,0.3)', transition: 'all 0.15s',
@@ -1111,7 +1106,7 @@ export default function POSPage() {
                             disabled={cannotCharge}
                             style={{
                                 width: '100%', padding: '14px', borderRadius: 14, border: 'none',
-                                background: 'linear-gradient(135deg, #22D3A0, #18A880)',
+                                background: 'linear-gradient(135deg, var(--success), #18A880)',
                                 color: '#001a13', fontSize: 15, fontWeight: 800, cursor: processing ? 'wait' : 'pointer',
                                 fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
                                 boxShadow: '0 8px 28px rgba(34,211,160,0.35)', opacity: cannotCharge ? 0.45 : 1,
@@ -1208,7 +1203,7 @@ export default function POSPage() {
                                 <span style={{ fontSize: 15, fontWeight: 900, color: T.warning, fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(Math.max(0, layawayTotal - (parseFloat(layawayInitial) || 0)))}</span>
                             </div>
                             <button onClick={handleCreateLayaway} disabled={processing}
-                                style={{ width: '100%', padding: '14px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg, #8B78F5, #6B56E0)', color: '#fff', fontSize: 15, fontWeight: 800, cursor: processing ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, opacity: processing ? 0.6 : 1 }}>
+                                style={{ width: '100%', padding: '14px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg, var(--primary), var(--primary-d))', color: '#fff', fontSize: 15, fontWeight: 800, cursor: processing ? 'wait' : 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, opacity: processing ? 0.6 : 1 }}>
                                 {processing ? 'Procesando...' : 'Confirmar apartado'}
                             </button>
                         </div>
@@ -1233,7 +1228,7 @@ export default function POSPage() {
                                 Imprimir
                             </button>
                             <button onClick={() => { setLastSale(null); searchRef.current?.focus(); }}
-                                style={{ padding: '10px 20px', borderRadius: 13, background: 'linear-gradient(135deg, #8B78F5, #6B56E0)', border: 'none', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 4px 16px rgba(139,120,245,0.3)', transition: 'all 0.15s' }}>
+                                style={{ padding: '10px 20px', borderRadius: 13, background: 'linear-gradient(135deg, var(--primary), var(--primary-d))', border: 'none', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 4px 16px rgba(139,120,245,0.3)', transition: 'all 0.15s' }}>
                                 Nueva venta
                             </button>
                         </div>

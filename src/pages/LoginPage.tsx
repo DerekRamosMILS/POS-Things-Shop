@@ -42,7 +42,7 @@ export default function LoginPage() {
                     <div style={{
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                         width: 64, height: 64, borderRadius: 20, marginBottom: 16,
-                        background: 'linear-gradient(135deg, #8B78F5, #F0C547)',
+                        background: 'linear-gradient(135deg, var(--primary), var(--accent))',
                         boxShadow: '0 12px 40px rgba(139,120,245,0.45)',
                     }}>
                         <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -103,7 +103,7 @@ export default function LoginPage() {
                             type="submit" disabled={loading}
                             style={{
                                 width: '100%', padding: '14px', borderRadius: 14, border: 'none',
-                                background: 'linear-gradient(135deg, #8B78F5, #6B56E0)',
+                                background: 'linear-gradient(135deg, var(--primary), var(--primary-d))',
                                 color: '#fff', fontSize: 15, fontWeight: 700,
                                 cursor: loading ? 'not-allowed' : 'pointer',
                                 boxShadow: '0 8px 28px rgba(139,120,245,0.4)',

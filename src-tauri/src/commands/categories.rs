@@ -5,14 +5,21 @@ use crate::db::connection::DbState;
 use crate::models::category::{Category, CreateCategoryDto, UpdateCategoryDto};
 use crate::session::{require_admin, require_auth, SessionState};
 
+/// Columnas enumeradas a propósito: con `c.*`, agregar una columna a la tabla
+/// recorrería los índices y `product_count` pasaría a leer otra cosa.
+const COLUMNAS: &str = "c.id, c.name, c.description, c.is_active, c.created_at, c.updated_at";
+
 #[tauri::command]
 pub fn get_categories(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Category>, String> {
     require_auth(&sessions, &token)?;
     let db = state.conn();
 
     let mut stmt = db.prepare(
-        "SELECT c.*, (SELECT COUNT(*) FROM products WHERE category_id = c.id) as product_count
-         FROM categories c ORDER BY c.name ASC"
+        &format!(
+            "SELECT {}, (SELECT COUNT(*) FROM products WHERE category_id = c.id) as product_count
+             FROM categories c ORDER BY c.name ASC",
+            COLUMNAS
+        )
     ).map_err(|e| e.to_string())?;
 
     let categories = stmt
@@ -52,7 +59,7 @@ pub fn create_category(state: State<DbState>, sessions: State<SessionState>, tok
 
     let id = db.last_insert_rowid();
     db.query_row(
-        "SELECT c.*, 0 as product_count FROM categories c WHERE c.id = ?1",
+        &format!("SELECT {}, 0 as product_count FROM categories c WHERE c.id = ?1", COLUMNAS),
         params![id],
         |row| {
             Ok(Category {

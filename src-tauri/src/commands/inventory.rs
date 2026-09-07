@@ -5,6 +5,13 @@ use crate::db::connection::DbState;
 use crate::models::inventory::{AdjustStockDto, InventoryMovement, RegisterPurchaseDto};
 use crate::session::{require_admin, require_auth, SessionState};
 
+/// Columnas enumeradas a propósito. Con `im.*`, el día que una migración agregue
+/// una columna a la tabla se recorren todos los índices y el mapeo empieza a
+/// leer un campo por otro sin que nada falle a la vista.
+const MOVIMIENTO_COLUMNAS: &str = "im.id, im.product_id, im.movement_type, im.quantity,
+    im.previous_stock, im.new_stock, im.reference_id, im.reason, im.user_id, im.created_at,
+    p.name as product_name, u.full_name as user_name";
+
 #[tauri::command]
 pub fn get_inventory_movements(
     state: State<DbState>,
@@ -21,13 +28,14 @@ pub fn get_inventory_movements(
     let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
         if let Some(pid) = product_id {
             (
-                "SELECT im.*, p.name as product_name, u.full_name as user_name
-             FROM inventory_movements im
-             LEFT JOIN products p ON im.product_id = p.id
-             LEFT JOIN users u ON im.user_id = u.id
-             WHERE im.product_id = ?1
-             ORDER BY im.created_at DESC LIMIT ?2"
-                    .to_string(),
+                format!(
+                    "SELECT {} FROM inventory_movements im
+                     LEFT JOIN products p ON im.product_id = p.id
+                     LEFT JOIN users u ON im.user_id = u.id
+                     WHERE im.product_id = ?1
+                     ORDER BY im.created_at DESC LIMIT ?2",
+                    MOVIMIENTO_COLUMNAS
+                ),
                 vec![
                     Box::new(pid) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(limit),
@@ -35,12 +43,13 @@ pub fn get_inventory_movements(
             )
         } else {
             (
-                "SELECT im.*, p.name as product_name, u.full_name as user_name
-             FROM inventory_movements im
-             LEFT JOIN products p ON im.product_id = p.id
-             LEFT JOIN users u ON im.user_id = u.id
-             ORDER BY im.created_at DESC LIMIT ?1"
-                    .to_string(),
+                format!(
+                    "SELECT {} FROM inventory_movements im
+                     LEFT JOIN products p ON im.product_id = p.id
+                     LEFT JOIN users u ON im.user_id = u.id
+                     ORDER BY im.created_at DESC LIMIT ?1",
+                    MOVIMIENTO_COLUMNAS
+                ),
                 vec![Box::new(limit) as Box<dyn rusqlite::types::ToSql>],
             )
         };
