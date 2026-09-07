@@ -36,7 +36,6 @@ const MAX_CUERPO: usize = 24 * 1024 * 1024;
 /// Estado del servidor mientras está encendido.
 struct Encendido {
     codigo: String,
-    puerto: u16,
     ip: String,
     apagar: tokio::sync::oneshot::Sender<()>,
     intentos_fallidos: u32,
@@ -371,6 +370,8 @@ fn construir_router(ctx: Contexto) -> Router {
         .route("/", get(pagina))
         .route("/api/verificar", get(verificar))
         .route("/api/producto", post(crear_producto))
+        .route("/api/catalogo", get(catalogo))
+        .route("/api/conteo", post(recibir_conteo))
         .merge(super::pwa::rutas())
         .layer(axum::extract::DefaultBodyLimit::max(MAX_CUERPO))
         .with_state(ctx)
@@ -421,6 +422,119 @@ async fn crear_producto(
             Json(Respuesta { ok: true, mensaje: "Producto guardado".into(), sku: Some(sku) }),
         ),
         Err(e) => fallo(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ParaContar {
+    sku: String,
+    nombre: String,
+    /// Lo que la caja cree que hay. Sirve de referencia al contar, nunca se
+    /// impone: quien está frente al perchero ve la verdad.
+    stock: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    variantes: Vec<VarianteParaContar>,
+}
+
+#[derive(Debug, Serialize)]
+struct VarianteParaContar {
+    id: i64,
+    etiqueta: String,
+    stock: i32,
+}
+
+/// El catálogo que el teléfono se lleva para poder contar sin conexión.
+///
+/// Solo lo indispensable para reconocer una prenda y anotar cuántas hay: ni
+/// precios de compra, ni ventas, ni clientes. Si el teléfono se pierde, lo que
+/// se lleva es una lista de nombres.
+async fn catalogo(
+    AxumState(ctx): AxumState<Contexto>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = autorizado(&ctx.captura, &headers) {
+        return (code, Json(serde_json::json!({ "ok": false, "mensaje": msg })));
+    }
+
+    let db = crate::db::connection::recuperar(ctx.db.lock());
+    let productos = (|| -> Result<Vec<ParaContar>, String> {
+        let mut stmt = db
+            .prepare(
+                "SELECT id, sku, name, stock FROM products
+                 WHERE is_active = 1 ORDER BY name ASC LIMIT 5000",
+            )
+            .map_err(|e| e.to_string())?;
+        let filas: Vec<(i64, String, String, i32)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        drop(stmt);
+
+        let mut vstmt = db
+            .prepare(
+                "SELECT id, size, color, stock FROM product_variants
+                 WHERE product_id = ?1 AND is_active = 1 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut salida = Vec::with_capacity(filas.len());
+        for (id, sku, nombre, stock) in filas {
+            let variantes: Vec<VarianteParaContar> = vstmt
+                .query_map(params![id], |r| {
+                    let size: Option<String> = r.get(1)?;
+                    let color: Option<String> = r.get(2)?;
+                    Ok(VarianteParaContar {
+                        id: r.get(0)?,
+                        etiqueta: [size, color]
+                            .into_iter()
+                            .flatten()
+                            .filter(|v| !v.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" / "),
+                        stock: r.get(3)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            salida.push(ParaContar { sku, nombre, stock, variantes });
+        }
+        Ok(salida)
+    })();
+
+    match productos {
+        Ok(p) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "productos": p }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "mensaje": e })),
+        ),
+    }
+}
+
+/// Recibe un conteo hecho con el teléfono, quizá horas antes.
+async fn recibir_conteo(
+    AxumState(ctx): AxumState<Contexto>,
+    headers: HeaderMap,
+    Json(entrada): Json<super::conteo::ConteoDelCelular>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = autorizado(&ctx.captura, &headers) {
+        return (code, Json(serde_json::json!({ "ok": false, "mensaje": msg })));
+    }
+
+    let db = crate::db::connection::recuperar(ctx.db.lock());
+    match super::conteo::aplicar_conteo(&db, None, &entrada) {
+        Ok(r) => {
+            log::info!(
+                "Conteo desde el celular: {} pasó de {} a {}",
+                r.etiqueta, r.antes, r.despues
+            );
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "conteo": r })))
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "mensaje": e })),
+        ),
     }
 }
 
@@ -668,7 +782,6 @@ pub fn start_capture_server(
         let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
         *guard = Some(Encendido {
             codigo,
-            puerto: PUERTO,
             ip,
             apagar: apagar_tx,
             intentos_fallidos: 0,
@@ -750,7 +863,11 @@ pub fn capture_server_status(
     let alternativas = direcciones_disponibles();
     match guard.as_ref() {
         Some(e) => {
-            let url = format!("http://{}:{}/?c={}", e.ip, e.puerto, e.codigo);
+            // El QR lleva a la página del permiso, no directo a la captura: un
+            // teléfono sin el permiso instalado no puede abrir la dirección
+            // cifrada, y quien ya lo tiene solo toca el último botón de esa
+            // página, que lleva el código consigo.
+            let url = format!("http://{}:{}/?c={}", e.ip, PUERTO_AYUDA, e.codigo);
             let interfaz = alternativas
                 .iter()
                 .find(|d| d.ip == e.ip)
@@ -1257,7 +1374,6 @@ mod http {
             let mut guard = captura.activo.lock().unwrap();
             *guard = Some(Encendido {
                 codigo: codigo.to_string(),
-                puerto: 0,
                 ip: "127.0.0.1".into(),
                 apagar: tx,
                 intentos_fallidos: 0,

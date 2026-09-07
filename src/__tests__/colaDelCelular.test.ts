@@ -117,7 +117,7 @@ describe('capturar con la caja apagada', () => {
 
         expect(caja.recibidos).toEqual([]);
         await esperarA(
-            () => doc.getElementById('pendientesTexto')!.textContent!.includes('2 productos esperando'),
+            () => doc.getElementById('pendientesTexto')!.textContent!.includes('Faltan 2'),
             'que avisara de los dos pendientes',
         );
 
@@ -171,7 +171,7 @@ describe('capturar con la caja apagada', () => {
             'que avisara del código',
         );
 
-        expect(doc.getElementById('pendientesTexto')!.textContent).toContain('1 producto');
+        expect(doc.getElementById('pendientesTexto')!.textContent).toContain('Falta 1');
 
         // Y cuando el código se arregla, sale.
         caja.rechazaCon = null;
@@ -186,5 +186,139 @@ describe('capturar con la caja apagada', () => {
         await capturar(doc, 'Suéter');
 
         expect((doc.getElementById('nombre') as HTMLInputElement).value).toBe('');
+    });
+});
+
+/**
+ * Contar la mercancía con el teléfono.
+ *
+ * Lo delicado no es anotar el número: es que la tienda sigue vendiendo mientras
+ * se cuenta, y el conteo puede llegar horas después. Por eso el teléfono manda
+ * también *cuándo* contó.
+ */
+describe('contar mercancía', () => {
+    const catalogo = [
+        { sku: 'TS-000001', nombre: 'Vestido amarillo', stock: 20, variantes: [] },
+        {
+            sku: 'TS-000002', nombre: 'Blusa roja', stock: 8,
+            variantes: [
+                { id: 5, etiqueta: 'M', stock: 3 },
+                { id: 6, etiqueta: 'G', stock: 5 },
+            ],
+        },
+    ];
+
+    async function abrirEnConteo(encendida = true) {
+        const enviados: Record<string, unknown>[] = [];
+        const fetchFalso = vi.fn(async (url: string, init?: { body?: string }) => {
+            if (!encendida) throw new TypeError('Failed to fetch');
+            if (String(url).includes('/api/catalogo')) {
+                return { ok: true, json: async () => ({ ok: true, productos: catalogo }) };
+            }
+            if (String(url).includes('/api/conteo')) {
+                const cuerpo = JSON.parse(init?.body ?? '{}');
+                enviados.push(cuerpo);
+                return {
+                    ok: true,
+                    json: async () => ({
+                        ok: true,
+                        conteo: { sku: cuerpo.sku, etiqueta: 'x', antes: 20, despues: cuerpo.contado, movido_mientras: 0 },
+                    }),
+                };
+            }
+            return { ok: true, json: async () => ({ ok: true }) };
+        });
+
+        const dom = new JSDOM(HTML, {
+            runScripts: 'dangerously',
+            url: 'https://192.168.0.10:7423/?c=123456',
+            beforeParse(win) {
+                const w = win as unknown as Record<string, unknown>;
+                w.fetch = fetchFalso;
+                w.indexedDB = new IDBFactory();
+                w.IDBKeyRange = IDBKeyRange;
+            },
+        });
+        const doc = dom.window.document;
+        await reposar(40);
+        (dom.window as unknown as { verModo: (m: string) => void }).verModo('conteo');
+        await reposar(60);
+        return { dom, doc, enviados };
+    }
+
+    function buscar(doc: Document, texto: string) {
+        const campo = doc.getElementById('buscar') as HTMLInputElement;
+        campo.value = texto;
+        campo.dispatchEvent(new doc.defaultView!.Event('input', { bubbles: true }));
+    }
+
+    it('busca en el catálogo guardado y abre la prenda', async () => {
+        const { doc } = await abrirEnConteo();
+        buscar(doc, 'vestido');
+
+        expect(doc.getElementById('tarjetaResultados')!.style.display).toBe('block');
+        doc.querySelector<HTMLButtonElement>('#resultados button[data-i="0"]')!
+            .dispatchEvent(new doc.defaultView!.Event('click', { bubbles: true }));
+
+        expect(doc.getElementById('contandoQue')!.textContent).toBe('Vestido amarillo');
+    });
+
+    it('manda lo contado con la hora en que se contó', async () => {
+        // Sin la hora, la caja no podría respetar lo que se venda de aquí a que
+        // reciba el conteo.
+        const { doc, enviados } = await abrirEnConteo();
+        buscar(doc, 'vestido');
+        doc.querySelector<HTMLButtonElement>('#resultados button[data-i="0"]')!
+            .dispatchEvent(new doc.defaultView!.Event('click', { bubbles: true }));
+
+        const casilla = doc.querySelector<HTMLInputElement>('#lineasConteo input')!;
+        casilla.value = '12';
+        doc.getElementById('guardarConteo')!.dispatchEvent(new doc.defaultView!.Event('click'));
+        await esperarA(() => enviados.length === 1, 'que se mandara el conteo');
+
+        expect(enviados[0]).toMatchObject({ sku: 'TS-000001', contado: 12, variant_id: null });
+        expect(String(enviados[0].contado_en)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+        expect(enviados[0].conteo_id).toBeTruthy();
+    });
+
+    it('una prenda con tallas se cuenta talla por talla', async () => {
+        const { doc, enviados } = await abrirEnConteo();
+        buscar(doc, 'blusa');
+        doc.querySelector<HTMLButtonElement>('#resultados button[data-i="0"]')!
+            .dispatchEvent(new doc.defaultView!.Event('click', { bubbles: true }));
+
+        const casillas = doc.querySelectorAll<HTMLInputElement>('#lineasConteo input');
+        expect(casillas).toHaveLength(2);
+        casillas[0].value = '2';
+        casillas[1].value = '7';
+        doc.getElementById('guardarConteo')!.dispatchEvent(new doc.defaultView!.Event('click'));
+        await esperarA(() => enviados.length === 2, 'que se mandaran las dos tallas');
+
+        expect(enviados.map(e => [e.variant_id, e.contado])).toEqual([[5, 2], [6, 7]]);
+    });
+
+    it('una casilla vacía no cuenta como cero', async () => {
+        // "No la conté" y "conté cero" son cosas distintas: tratarlas igual
+        // borraría del inventario una talla que nadie miró.
+        const { doc, enviados } = await abrirEnConteo();
+        buscar(doc, 'blusa');
+        doc.querySelector<HTMLButtonElement>('#resultados button[data-i="0"]')!
+            .dispatchEvent(new doc.defaultView!.Event('click', { bubbles: true }));
+
+        const casillas = doc.querySelectorAll<HTMLInputElement>('#lineasConteo input');
+        casillas[0].value = '2';
+        // la segunda se deja como estaba
+        doc.getElementById('guardarConteo')!.dispatchEvent(new doc.defaultView!.Event('click'));
+        await esperarA(() => enviados.length === 1, 'que se mandara solo la contada');
+
+        await reposar(80);
+        expect(enviados).toHaveLength(1);
+        expect(enviados[0].variant_id).toBe(5);
+    });
+
+    it('contar sin la computadora prendida deja el conteo esperando', async () => {
+        const { doc } = await abrirEnConteo(false);
+        // Sin caja no hay catálogo que descargar, pero sí el que ya estaba.
+        expect(doc.getElementById('estadoCatalogo')!.textContent).toContain('Todavía no hay catálogo');
     });
 });

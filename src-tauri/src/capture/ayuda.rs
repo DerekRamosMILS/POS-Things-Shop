@@ -121,11 +121,18 @@ const HTML: &str = r####"
 
 <div class="card listo">
   <h2><span class="n">3</span> Listo</h2>
-  <a class="boton" href="https://{{IP}}:7423/">Abrir la captura</a>
+  <a class="boton" id="abrir" href="https://{{IP}}:7423/">Abrir la captura</a>
   <p class="hint">Guárdala en la pantalla de inicio y ábrela desde ahí: así funciona aunque la computadora esté apagada.</p>
 </div>
 
 <script>
+  // El código de emparejamiento viaja desde el QR hasta la aplicación, para que
+  // quien ya instaló el permiso solo tenga que tocar el botón de abajo.
+  (function () {
+    var c = new URLSearchParams(location.search).get('c');
+    if (c) document.getElementById('abrir').href = 'https://{{IP}}:7423/?c=' + encodeURIComponent(c);
+  })();
+
   function ver(cual) {
     var esAndroid = cual === 'android';
     document.getElementById('pasos-android').style.display = esAndroid ? '' : 'none';
@@ -151,6 +158,15 @@ mod tests {
         let html = pagina("192.168.0.55");
         assert!(html.contains("https://192.168.0.55:7423/"));
         assert!(!html.contains("{{IP}}"), "no debe quedar el hueco sin llenar");
+    }
+
+    #[test]
+    fn el_codigo_viaja_del_qr_a_la_captura() {
+        // Quien ya instaló el permiso no debería tener que escanear otra vez ni
+        // teclear el código: solo tocar el último botón.
+        let html = pagina("192.168.0.55");
+        assert!(html.contains("location.search).get('c')"));
+        assert!(html.contains("'https://192.168.0.55:7423/?c=' + encodeURIComponent(c)"));
     }
 
     #[test]

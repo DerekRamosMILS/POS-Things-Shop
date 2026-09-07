@@ -20,6 +20,7 @@
 //!   clientes ni ningún otro dato desde ahí.
 
 mod ayuda;
+pub mod conteo;
 mod page;
 mod pwa;
 pub mod server;

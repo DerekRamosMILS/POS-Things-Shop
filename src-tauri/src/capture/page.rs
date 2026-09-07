@@ -104,6 +104,27 @@ pub const HTML: &str = r####"
   }
   .pend p { margin: 0 0 10px; font-size: 14px; color: var(--t1); }
   .pend button { width: 100%; }
+  /* Las dos cosas que se hacen con el teléfono */
+  .modos { display: flex; gap: 6px; margin-bottom: 18px; }
+  .modos button {
+    flex: 1; padding: 12px; border-radius: 12px; font: inherit; font-size: 15px;
+    border: 1px solid var(--line); background: transparent; color: var(--t3); cursor: pointer;
+  }
+  .modos button[aria-selected="true"] {
+    background: rgba(139,120,245,.15); border-color: var(--primary);
+    color: var(--t1); font-weight: 700;
+  }
+  .renglon {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--line);
+  }
+  .renglon:last-child { border-bottom: none; }
+  .renglon .que { flex: 1; min-width: 0; }
+  .renglon .que b { display: block; font-size: 15px; color: var(--t1); font-weight: 600;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .renglon .que span { font-size: 12.5px; color: var(--t3); }
+  .renglon input { width: 78px; text-align: center; padding: 11px 6px; font-size: 17px; }
+  .vacio { color: var(--t3); font-size: 14px; text-align: center; padding: 26px 0; }
   .hist { font-size: 13px; color: var(--t3); }
   .hist div { padding: 7px 0; border-bottom: 1px solid var(--line); }
   .hist div:last-child { border-bottom: none; }
@@ -112,8 +133,13 @@ pub const HTML: &str = r####"
 </head>
 <body>
 
-<h1>Capturar producto</h1>
-<p class="sub">Se guarda directo en la computadora de la tienda.</p>
+<h1 id="titulo">Capturar producto</h1>
+<p class="sub" id="subtitulo">Se guarda directo en la computadora de la tienda.</p>
+
+<div class="modos" role="tablist">
+  <button role="tab" id="modoAlta" aria-selected="true" onclick="verModo('alta')">Dar de alta</button>
+  <button role="tab" id="modoConteo" aria-selected="false" onclick="verModo('conteo')">Contar</button>
+</div>
 
 <div id="aviso"></div>
 
@@ -121,6 +147,8 @@ pub const HTML: &str = r####"
   <p id="pendientesTexto"></p>
   <button type="button" class="sec" id="sincronizar">Mandar ahora</button>
 </div>
+
+<div id="pantallaAlta">
 
 <div class="card">
   <div class="campo">
@@ -193,6 +221,29 @@ pub const HTML: &str = r####"
   <button type="button" class="sec" id="limpiarTodo" style="margin-top:14px">
     Limpiar tallas y colores
   </button>
+</div>
+
+</div><!-- /pantallaAlta -->
+
+<div id="pantallaConteo" style="display:none">
+  <div class="card">
+    <label for="buscar">Busca la prenda</label>
+    <input id="buscar" placeholder="Vestido, o el código" autocomplete="off" enterkeyhint="search">
+    <p class="hint" id="estadoCatalogo"></p>
+  </div>
+
+  <div class="card" id="tarjetaResultados" style="display:none">
+    <div id="resultados"></div>
+  </div>
+
+  <div class="card" id="tarjetaContar" style="display:none">
+    <label id="contandoQue"></label>
+    <p class="hint">Anota cuántas piezas ves. Si mientras tanto se vende algo en la
+       tienda, la computadora lo toma en cuenta al recibir el conteo.</p>
+    <div id="lineasConteo"></div>
+    <button type="button" id="guardarConteo" style="margin-top:16px">Guardar conteo</button>
+    <button type="button" class="sec" id="cancelarConteo" style="margin-top:10px">Cancelar</button>
+  </div>
 </div>
 
 <script>
@@ -458,10 +509,20 @@ pub const HTML: &str = r####"
   $('camara').addEventListener('change', recibirFotos);
   $('galeriaInput').addEventListener('change', recibirFotos);
 
-  function agregarAlHistorial(sku, nombre) {
+  function agregarAlHistorial(izquierda, derecha, movido) {
     $('tarjetaHist').style.display = 'block';
     var fila = document.createElement('div');
-    fila.innerHTML = '<b>' + sku + '</b> &nbsp; ' + nombre;
+    // Escapado: el nombre lo teclea quien captura, y aquí se está armando HTML.
+    var texto = '<b>' + escapar(izquierda) + '</b> &nbsp; ' + escapar(derecha);
+    if (movido) {
+      // Lo que se vendió o devolvió entre el conteo y su llegada. Verlo es lo
+      // que permite confiar en el número: si no, parecería que la caja
+      // "corrigió" el conteo por su cuenta.
+      texto += ' <span style="color:var(--t3)">(' +
+        (movido < 0 ? 'se vendieron ' + Math.abs(movido) : 'entraron ' + movido) +
+        ' mientras tanto)</span>';
+    }
+    fila.innerHTML = texto;
     $('historial').prepend(fila);
   }
 
@@ -569,7 +630,8 @@ pub const HTML: &str = r####"
       for (var i = 0; i < cola.length; i++) {
         var item = cola[i];
         try {
-          var r = await fetch('/api/producto', {
+          var esConteo = item.tipo === 'conteo';
+          var r = await fetch(esConteo ? '/api/conteo' : '/api/producto', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Codigo': codigo },
             body: JSON.stringify(item.datos)
@@ -580,7 +642,16 @@ pub const HTML: &str = r####"
             // respuesta y esta línea, el reintento no duplica: el identificador
             // ya es conocido por la caja.
             await sacarDeLaCola(item.id);
-            agregarAlHistorial(data.sku, item.datos.nombre);
+            if (esConteo) {
+              var c = data.conteo || {};
+              agregarAlHistorial(
+                String(c.despues),
+                c.etiqueta || item.datos.sku,
+                c.movido_mientras
+              );
+            } else {
+              agregarAlHistorial(data.sku, item.datos.nombre);
+            }
             enviados++;
           } else {
             // La caja contestó que no. Reintentar no va a cambiar nada: se
@@ -601,8 +672,8 @@ pub const HTML: &str = r####"
         aviso(ultimoError, 'bad');
       } else if (enviados > 0) {
         aviso(enviados === 1
-          ? 'Se mandó 1 producto a la caja.'
-          : 'Se mandaron ' + enviados + ' productos a la caja.', 'ok');
+          ? 'Se mandó 1 a la caja.'
+          : 'Se mandaron ' + enviados + ' a la caja.', 'ok');
       } else if (quedan > 0 && !silencioso) {
         aviso('La caja no contesta. Lo capturado está guardado aquí y se manda solo cuando la prendan.', 'bad');
       }
@@ -620,10 +691,193 @@ pub const HTML: &str = r####"
     var caja = $('pendientes');
     if (!cuantos) { caja.style.display = 'none'; return; }
     caja.style.display = 'block';
+    // "Cosas" y no "productos": aquí caben altas y conteos.
     $('pendientesTexto').textContent = cuantos === 1
-      ? '1 producto esperando a que prendas la computadora'
-      : cuantos + ' productos esperando a que prendas la computadora';
+      ? 'Falta 1 por mandar a la computadora'
+      : 'Faltan ' + cuantos + ' por mandar a la computadora';
   }
+
+
+  // ── Contar la mercancía ───────────────────────────────────────────────────
+  //
+  // El catálogo se descarga cuando hay caja y se guarda en el teléfono, para
+  // poder buscar una prenda caminando la tienda con la computadora apagada. Solo
+  // trae lo justo para reconocerla: nombre, código y cuántas dice la caja que
+  // hay. Ni precios de compra ni ventas.
+  //
+  // Lo contado va a la misma cola que las altas y se manda igual. Lo que la
+  // vuelve segura es que se apunta *cuándo* se contó: la caja le suma lo que se
+  // vendió después, así que contar por la mañana y sincronizar por la tarde no
+  // deshace la venta del día.
+
+  var catalogo = [];
+  var contando = null;
+
+  function guardarCatalogo(productos) {
+    catalogo = productos;
+    try {
+      localStorage.setItem('catalogo', JSON.stringify({ cuando: Date.now(), productos: productos }));
+    } catch (e) { /* si no cabe, se sigue con el de esta sesión */ }
+  }
+
+  function cargarCatalogoGuardado() {
+    try {
+      var crudo = localStorage.getItem('catalogo');
+      if (!crudo) return null;
+      return JSON.parse(crudo);
+    } catch (e) { return null; }
+  }
+
+  function pintarEstadoCatalogo(guardado, recienBajado) {
+    var el = $('estadoCatalogo');
+    if (!catalogo.length) {
+      el.textContent = 'Todavía no hay catálogo en este teléfono. Conéctate una vez con la computadora prendida y se descarga solo.';
+      return;
+    }
+    if (recienBajado) {
+      el.textContent = catalogo.length + ' prendas, recién actualizadas.';
+      return;
+    }
+    var dias = guardado ? Math.floor((Date.now() - guardado.cuando) / 86400000) : 0;
+    el.textContent = catalogo.length + ' prendas' +
+      (dias >= 1 ? ' (lista de hace ' + dias + (dias === 1 ? ' día' : ' días') + ')' : '');
+  }
+
+  function refrescarCatalogo() {
+    return fetch('/api/catalogo', { headers: { 'X-Codigo': codigo } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok || !d.productos) return false;
+        guardarCatalogo(d.productos);
+        pintarEstadoCatalogo(null, true);
+        return true;
+      })
+      .catch(function () { return false; });
+  }
+
+  function buscarPrendas(texto) {
+    var q = texto.trim().toLowerCase();
+    if (q.length < 2) return [];
+    return catalogo.filter(function (p) {
+      return p.nombre.toLowerCase().indexOf(q) >= 0 || p.sku.toLowerCase().indexOf(q) >= 0;
+    }).slice(0, 12);
+  }
+
+  $('buscar').addEventListener('input', function () {
+    var encontradas = buscarPrendas(this.value);
+    var caja = $('tarjetaResultados');
+    if (!encontradas.length) { caja.style.display = 'none'; return; }
+    caja.style.display = 'block';
+    $('resultados').innerHTML = encontradas.map(function (p, i) {
+      return '<div class="renglon"><div class="que">' +
+             '<b>' + escapar(p.nombre) + '</b>' +
+             '<span>' + escapar(p.sku) + ' · ' + p.stock + ' según la caja</span>' +
+             '</div><button type="button" class="sec" data-i="' + i + '">Contar</button></div>';
+    }).join('');
+    $('resultados').dataset.encontradas = JSON.stringify(encontradas);
+  });
+
+  $('resultados').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-i]');
+    if (!b) return;
+    var encontradas = JSON.parse(this.dataset.encontradas || '[]');
+    abrirConteo(encontradas[Number(b.dataset.i)]);
+  });
+
+  function abrirConteo(prenda) {
+    if (!prenda) return;
+    contando = prenda;
+    $('contandoQue').textContent = prenda.nombre;
+    var lineas = (prenda.variantes && prenda.variantes.length)
+      ? prenda.variantes
+      : [{ id: null, etiqueta: 'Todas', stock: prenda.stock }];
+
+    $('lineasConteo').innerHTML = lineas.map(function (v, i) {
+      return '<div class="renglon"><div class="que">' +
+             '<b>' + escapar(v.etiqueta || 'Todas') + '</b>' +
+             '<span>la caja dice ' + v.stock + '</span>' +
+             '</div><input type="number" inputmode="numeric" min="0" step="1" ' +
+             'placeholder="0" data-i="' + i + '"></div>';
+    }).join('');
+    $('lineasConteo').dataset.lineas = JSON.stringify(lineas);
+    $('tarjetaContar').style.display = 'block';
+    $('tarjetaResultados').style.display = 'none';
+    $('tarjetaContar').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function cerrarConteo() {
+    contando = null;
+    $('tarjetaContar').style.display = 'none';
+    $('buscar').value = '';
+    $('tarjetaResultados').style.display = 'none';
+  }
+
+  $('cancelarConteo').addEventListener('click', cerrarConteo);
+
+  $('guardarConteo').addEventListener('click', async function () {
+    if (!contando) return;
+    var lineas = JSON.parse($('lineasConteo').dataset.lineas || '[]');
+    var casillas = $('lineasConteo').querySelectorAll('input');
+    // La hora en que se contó, que es lo que permite a la caja respetar lo que
+    // se venda de aquí a que reciba esto.
+    var ahora = new Date();
+    var cuando = ahora.getFullYear() + '-' +
+      String(ahora.getMonth() + 1).padStart(2, '0') + '-' +
+      String(ahora.getDate()).padStart(2, '0') + ' ' +
+      String(ahora.getHours()).padStart(2, '0') + ':' +
+      String(ahora.getMinutes()).padStart(2, '0') + ':' +
+      String(ahora.getSeconds()).padStart(2, '0');
+
+    var puestos = 0;
+    for (var i = 0; i < casillas.length; i++) {
+      var crudo = casillas[i].value.trim();
+      // Una casilla vacía no es un cero: es "esta no la conté".
+      if (crudo === '') continue;
+      var cantidad = parseInt(crudo, 10);
+      if (!isFinite(cantidad) || cantidad < 0) continue;
+
+      var id = idNuevo();
+      await encolar({
+        id: id,
+        capturado: Date.now() + i,
+        tipo: 'conteo',
+        datos: {
+          conteo_id: id,
+          sku: contando.sku,
+          variant_id: lineas[i].id,
+          contado: cantidad,
+          contado_en: cuando
+        }
+      });
+      puestos++;
+    }
+
+    if (!puestos) { aviso('No anotaste ninguna cantidad.', 'bad'); return; }
+    cerrarConteo();
+    aviso(puestos === 1 ? 'Conteo guardado.' : puestos + ' conteos guardados.', 'ok');
+    sincronizar(true);
+    // El resultado se apunta en la lista de la otra pantalla, que es donde se
+    // ve el historial de lo que se ha mandado.
+  });
+
+  function verModo(cual) {
+    var esAlta = cual === 'alta';
+    $('pantallaAlta').style.display = esAlta ? '' : 'none';
+    $('pantallaConteo').style.display = esAlta ? 'none' : '';
+    $('modoAlta').setAttribute('aria-selected', String(esAlta));
+    $('modoConteo').setAttribute('aria-selected', String(!esAlta));
+    $('titulo').textContent = esAlta ? 'Capturar producto' : 'Contar mercancía';
+    $('subtitulo').textContent = esAlta
+      ? 'Se guarda directo en la computadora de la tienda.'
+      : 'Anota lo que ves en el perchero. Se manda cuando prendas la computadora.';
+    if (!esAlta) {
+      var guardado = cargarCatalogoGuardado();
+      if (guardado && guardado.productos) catalogo = guardado.productos;
+      pintarEstadoCatalogo(guardado, false);
+      refrescarCatalogo();
+    }
+  }
+  window.verModo = verModo;
 
   $('guardar').addEventListener('click', async function () {
     if (enviando) return;
