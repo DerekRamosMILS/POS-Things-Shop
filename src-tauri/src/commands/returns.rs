@@ -181,9 +181,9 @@ pub fn registrar_devolucion(
             }
 
             db.execute(
-                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
-                 VALUES (?1, 'return', ?2, ?3, ?4, ?5, 'Devolución de venta', ?6)",
-                params![ri.product_id, ri.quantity, current_stock, new_stock, data.sale_id, user_id],
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
+                 VALUES (?1, ?2, 'return', ?3, ?4, ?5, ?6, 'Devolución de venta', ?7)",
+                params![ri.product_id, ri.variant_id, ri.quantity, current_stock, new_stock, data.sale_id, user_id],
             ).map_err(|e| e.to_string())?;
         }
 

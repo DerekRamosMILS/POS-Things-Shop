@@ -75,10 +75,14 @@ fn split_tender(
     let cash_applied = (total - non_cash).clamp_non_negative();
     let change = (cash - cash_applied).clamp_non_negative();
 
+    // Una pierna en cero no aporta nada y no debe quedar registrada: con ella,
+    // un cobro de un solo método aparecía con dos renglones de pago y el reporte
+    // por forma de pago lo contaba como mixto.
     let mut applied: Vec<(String, Cents)> = payments
         .iter()
         .filter(|p| p.method != "cash")
         .map(|p| (p.method.clone(), Cents::from_pesos(p.amount)))
+        .filter(|(_, amount)| amount.is_positive())
         .collect();
     if cash_applied.is_positive() {
         applied.push(("cash".to_string(), cash_applied));
@@ -432,10 +436,10 @@ pub fn registrar_venta(
 
             let reason = line.variant_label.as_ref().map(|l| format!("Venta ({})", l));
             db.execute(
-                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
-                 VALUES (?1, 'sale', ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
+                 VALUES (?1, ?2, 'sale', ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
-                    line.product_id, -line.quantity, prev_stock,
+                    line.product_id, line.variant_id, -line.quantity, prev_stock,
                     new_stock, sale_id, reason, user_id
                 ],
             ).map_err(|e| e.to_string())?;
@@ -554,9 +558,9 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
             }
 
             db.execute(
-                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
-                 VALUES (?1, 'cancellation', ?2, ?3, ?4, ?5, 'Cancelación de venta', ?6)",
-                params![product_id, quantity, current_stock, new_stock, sale_id, user_id],
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
+                 VALUES (?1, ?2, 'cancellation', ?3, ?4, ?5, ?6, 'Cancelación de venta', ?7)",
+                params![product_id, variant_id, quantity, current_stock, new_stock, sale_id, user_id],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -868,6 +872,40 @@ mod tests {
         ).unwrap();
         assert_eq!(change, Cents::ZERO);
         assert_eq!(applied.iter().map(|(_, a)| *a).sum::<Cents>(), pesos(0.6));
+    }
+
+    #[test]
+    fn a_zero_leg_does_not_become_a_payment_of_its_own() {
+        // Con la pierna en cero adentro, `applied` tenía dos renglones y el
+        // cobro quedaba marcado como mixto sin serlo.
+        let (applied, change) =
+            split_tender(&[split("card", 0.0), split("cash", 500.0)], pesos(249.0)).unwrap();
+
+        assert_eq!(applied.len(), 1, "sobra una pierna: {:?}", applied);
+        assert_eq!(applied[0].0, "cash");
+        assert_eq!(applied[0].1, pesos(249.0));
+        assert_eq!(change, pesos(251.0));
+    }
+
+    #[test]
+    fn a_zero_leg_does_not_turn_a_single_method_into_mixed() {
+        let (applied, _) =
+            split_tender(&[split("card", 249.0), split("transfer", 0.0)], pesos(249.0)).unwrap();
+
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "card");
+    }
+
+    #[test]
+    fn a_real_mixed_tender_still_keeps_both_legs() {
+        let (applied, _) =
+            split_tender(&[split("card", 100.0), split("transfer", 49.0), split("cash", 200.0)], pesos(249.0))
+                .unwrap();
+
+        assert_eq!(applied.len(), 3, "{:?}", applied);
+        assert_eq!(leg(&applied, "card"), pesos(100.0));
+        assert_eq!(leg(&applied, "transfer"), pesos(49.0));
+        assert_eq!(leg(&applied, "cash"), pesos(100.0));
     }
 
     #[test]

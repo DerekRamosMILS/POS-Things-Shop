@@ -235,7 +235,7 @@ pub fn create_product(state: State<DbState>, sessions: State<SessionState>, toke
 
 #[tauri::command]
 pub fn update_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateProductDto) -> Result<Product, String> {
-    require_admin(&sessions, &token)?;
+    let user_id = require_admin(&sessions, &token)?;
     let db = state.conn();
 
     let old_price: f64 = db
@@ -243,9 +243,12 @@ pub fn update_product(state: State<DbState>, sessions: State<SessionState>, toke
         .map_err(|e| e.to_string())?;
 
     if (old_price - data.sale_price).abs() > 0.001 {
+        // Quién lo cambió: la columna existía y la pantalla la mostraba, pero
+        // nadie la llenaba, así que el historial decía qué precio cambió y nunca
+        // de quién fue la mano.
         db.execute(
-            "INSERT INTO price_history (product_id, old_price, new_price) VALUES (?1, ?2, ?3)",
-            params![data.id, old_price, data.sale_price],
+            "INSERT INTO price_history (product_id, old_price, new_price, changed_by) VALUES (?1, ?2, ?3, ?4)",
+            params![data.id, old_price, data.sale_price, user_id],
         ).map_err(|e| e.to_string())?;
     }
 

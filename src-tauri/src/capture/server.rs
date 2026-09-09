@@ -37,9 +37,69 @@ const MAX_CUERPO: usize = 24 * 1024 * 1024;
 struct Encendido {
     codigo: String,
     ip: String,
-    apagar: tokio::sync::oneshot::Sender<()>,
+    /// Un solo aviso para los dos servidores: el cifrado y el del certificado.
+    apagar: tokio::sync::watch::Sender<bool>,
+    /// Las tareas de esos dos servidores, para poder esperar a que terminen.
+    tareas: Vec<tauri::async_runtime::JoinHandle<()>>,
     intentos_fallidos: u32,
     bloqueado_hasta: i64,
+}
+
+/// Cuánto se espera, como máximo, a que los servidores suelten los puertos.
+const ESPERA_APAGADO: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Levanta el servidor que entrega el certificado y devuelve su tarea.
+///
+/// Está aparte para que la prueba ejercite exactamente esto y no una copia
+/// parecida: el error era que este servidor se arrancaba **sin** apagado, así
+/// que lo que hay que comprobar es que obedece el aviso.
+fn servir_ayuda(
+    escucha: std::net::TcpListener,
+    ayuda: Router,
+    mut aviso: tokio::sync::watch::Receiver<bool>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let escucha = match tokio::net::TcpListener::from_std(escucha) {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("No se pudo abrir la página del certificado: {}", e);
+                return;
+            }
+        };
+        let _ = axum::serve(escucha, ayuda)
+            .with_graceful_shutdown(async move {
+                let _ = aviso.wait_for(|apagar| *apagar).await;
+            })
+            .await;
+        log::info!("Página del certificado apagada");
+    })
+}
+
+/// Apaga los dos servidores y **espera** a que suelten los puertos.
+///
+/// La espera no es cortesía. Mientras el socket viejo siga escuchando, volver a
+/// atar el mismo puerto falla: `SO_REUSEADDR` solo sirve para un puerto en
+/// `TIME_WAIT`, y en Windows el socket ni lo lleva puesto. Sin esperar, apagar y
+/// volver a encender la captura contestaba "No se pudo abrir el puerto 7423", y
+/// regenerar el código —que apaga y enciende de corrido— dejaba la captura
+/// apagada con el código ya rotado.
+fn apagar_y_esperar(estado: Encendido) {
+    let _ = estado.apagar.send(true);
+    let tareas = estado.tareas;
+
+    // `block_in_place` deja al hilo salir del runtime para poder esperar aquí.
+    // Fuera de un runtime —que es donde corren los comandos— no hace nada.
+    tokio::task::block_in_place(|| {
+        tauri::async_runtime::block_on(async move {
+            for tarea in tareas {
+                // El tope evita quedarse colgado si un servidor se atora con una
+                // conexión abierta: peor que tardar es no volver nunca.
+                if tokio::time::timeout(ESPERA_APAGADO, tarea).await.is_err() {
+                    log::warn!("Un servidor de la captura no terminó a tiempo; su puerto puede tardar en liberarse");
+                }
+            }
+        })
+    });
 }
 
 #[derive(Default)]
@@ -730,7 +790,7 @@ pub fn start_capture_server(
     escucha_ayuda.set_nonblocking(true).map_err(|e| e.to_string())?;
 
     let manija = axum_server::Handle::new();
-    let (apagar_tx, apagar_rx) = tokio::sync::oneshot::channel();
+    let (apagar_tx, apagar_rx) = tokio::sync::watch::channel(false);
 
     let config_tls = tokio::task::block_in_place(|| {
         tauri::async_runtime::block_on(axum_server::tls_rustls::RustlsConfig::from_pem(
@@ -742,14 +802,15 @@ pub fn start_capture_server(
 
     {
         let manija = manija.clone();
+        let mut aviso = apagar_rx.clone();
         tauri::async_runtime::spawn(async move {
-            // Un solo aviso apaga los dos servidores.
-            let _ = apagar_rx.await;
+            // El mismo aviso llega a los dos servidores.
+            let _ = aviso.wait_for(|apagar| *apagar).await;
             manija.graceful_shutdown(Some(std::time::Duration::from_secs(2)));
         });
     }
 
-    {
+    let tarea_captura = {
         let manija = manija.clone();
         tauri::async_runtime::spawn(async move {
             log::info!("Captura por celular escuchando en el puerto {} (cifrada)", PUERTO);
@@ -764,19 +825,13 @@ pub fn start_capture_server(
                 log::error!("La captura por celular terminó con error: {}", e);
             }
             log::info!("Captura por celular apagada");
-        });
-    }
+        })
+    };
 
-    tauri::async_runtime::spawn(async move {
-        let escucha_ayuda = match tokio::net::TcpListener::from_std(escucha_ayuda) {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("No se pudo abrir la página del certificado: {}", e);
-                return;
-            }
-        };
-        let _ = axum::serve(escucha_ayuda, ayuda).await;
-    });
+    // El servidor del certificado también tiene que obedecer el apagado. Sin
+    // esto se quedaba escuchando el 7424 hasta cerrar la aplicación, y el
+    // siguiente encendido moría ahí aunque el 7423 estuviera libre.
+    let tarea_ayuda = servir_ayuda(escucha_ayuda, ayuda, apagar_rx.clone());
 
     {
         let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
@@ -784,6 +839,7 @@ pub fn start_capture_server(
             codigo,
             ip,
             apagar: apagar_tx,
+            tareas: vec![tarea_captura, tarea_ayuda],
             intentos_fallidos: 0,
             bloqueado_hasta: 0,
         });
@@ -800,9 +856,14 @@ pub fn stop_capture_server(
 ) -> Result<EstadoCaptura, String> {
     require_admin(&sessions, &token)?;
 
-    let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
-    if let Some(estado) = guard.take() {
-        let _ = estado.apagar.send(());
+    let apagado = {
+        let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
+        guard.take()
+    };
+    // Fuera del candado: esperar con él tomado bloquearía cualquier petición que
+    // el celular tuviera a medias.
+    if let Some(estado) = apagado {
+        apagar_y_esperar(estado);
     }
     Ok(EstadoCaptura {
         encendido: false, url: None, codigo: None, qr_svg: None,
@@ -829,11 +890,12 @@ pub fn regenerar_codigo_captura(
         guard.as_ref().map(|e| e.ip.clone())
     };
 
-    {
+    let apagado = {
         let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
-        if let Some(estado) = guard.take() {
-            let _ = estado.apagar.send(());
-        }
+        guard.take()
+    };
+    if let Some(estado) = apagado {
+        apagar_y_esperar(estado);
     }
     {
         let db = state.conn();
@@ -1344,6 +1406,100 @@ mod tests {
     }
 }
 
+/// Apagado: que los puertos queden libres para el siguiente encendido.
+///
+/// Esta es la parte que no se podía probar desde `levantar`, que monta su propio
+/// servidor con su propio apagado. El error vivía justo aquí: el servidor del
+/// certificado se arrancaba sin apagado ninguno, así que el 7424 se quedaba
+/// tomado hasta cerrar la aplicación y el siguiente encendido moría ahí.
+#[cfg(test)]
+mod apagado {
+    use super::*;
+
+    fn puerto_libre() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    fn ocupado(puerto: u16) -> bool {
+        std::net::TcpListener::bind(("0.0.0.0", puerto)).is_err()
+    }
+
+    /// Levanta dos servidores del certificado con `servir_ayuda`, que es la
+    /// función que usa el encendido de verdad.
+    fn dos_servidores(a: u16, b: u16)
+        -> (tokio::sync::watch::Sender<bool>, Vec<tauri::async_runtime::JoinHandle<()>>)
+    {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let mut tareas = Vec::new();
+        for puerto in [a, b] {
+            let escucha = std::net::TcpListener::bind(("0.0.0.0", puerto)).unwrap();
+            escucha.set_nonblocking(true).unwrap();
+            let app: Router = Router::new().route("/", get(|| async { "ok" }));
+            tareas.push(servir_ayuda(escucha, app, rx.clone()));
+        }
+        // Espera breve a que los dos estén escuchando.
+        for _ in 0..200 {
+            if ocupado(a) && ocupado(b) { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        (tx, tareas)
+    }
+
+    /// Lo mismo que hace `apagar_y_esperar`, sobre las tareas sueltas.
+    fn apagar(tx: tokio::sync::watch::Sender<bool>, tareas: Vec<tauri::async_runtime::JoinHandle<()>>) -> usize {
+        let _ = tx.send(true);
+        tokio::task::block_in_place(|| {
+            tauri::async_runtime::block_on(async move {
+                let mut terminaron = 0;
+                for t in tareas {
+                    if tokio::time::timeout(ESPERA_APAGADO, t).await.is_ok() { terminaron += 1; }
+                }
+                terminaron
+            })
+        })
+    }
+
+    #[test]
+    fn apagar_libera_los_puertos_antes_de_volver() {
+        let (a, b) = (puerto_libre(), puerto_libre());
+        let (tx, tareas) = dos_servidores(a, b);
+        assert!(ocupado(a) && ocupado(b), "los dos deben estar escuchando");
+
+        apagar(tx, tareas);
+
+        // El punto: al volver de la espera, los puertos ya se pueden reatar. Sin
+        // la espera esto fallaba por carrera, y con este servidor arrancado sin
+        // apagado fallaba siempre, por más que se esperara.
+        assert!(!ocupado(a), "el primer puerto sigue tomado");
+        assert!(!ocupado(b), "el segundo puerto sigue tomado");
+    }
+
+    #[test]
+    fn volver_a_encender_en_los_mismos_puertos_funciona() {
+        // El ciclo completo: apagar y encender de corrido, que es lo que hace
+        // regenerar el código de emparejamiento.
+        let (a, b) = (puerto_libre(), puerto_libre());
+
+        let (tx, tareas) = dos_servidores(a, b);
+        apagar(tx, tareas);
+
+        let (tx2, tareas2) = dos_servidores(a, b);
+        assert!(ocupado(a) && ocupado(b), "el segundo encendido no tomó los puertos");
+        apagar(tx2, tareas2);
+    }
+
+    #[test]
+    fn una_sola_senal_apaga_a_los_dos() {
+        // El comentario del código lo prometía y no era verdad: la señal solo
+        // llegaba al servidor cifrado.
+        let (a, b) = (puerto_libre(), puerto_libre());
+        let (tx, tareas) = dos_servidores(a, b);
+
+        assert_eq!(apagar(tx, tareas), 2, "los dos deben terminar con un solo aviso");
+    }
+}
+
 /// Pruebas contra el servidor real, hablando HTTP por un socket.
 ///
 /// El resto de las pruebas cubren la lógica; estas confirman que las rutas, la
@@ -1369,13 +1525,14 @@ mod http {
         let db = Arc::new(Mutex::new(conn));
 
         let captura = Arc::new(CaptureState::default());
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
         {
             let mut guard = captura.activo.lock().unwrap();
             *guard = Some(Encendido {
                 codigo: codigo.to_string(),
                 ip: "127.0.0.1".into(),
                 apagar: tx,
+                tareas: Vec::new(),
                 intentos_fallidos: 0,
                 bloqueado_hasta: 0,
             });
@@ -1390,7 +1547,7 @@ mod http {
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
             let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async { let _ = rx.await; })
+                .with_graceful_shutdown(async move { let _ = rx.wait_for(|a| *a).await; })
                 .await;
         });
 

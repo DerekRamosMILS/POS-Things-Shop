@@ -103,14 +103,30 @@ pub fn aplicar_conteo(
 
     // Lo que se movió desde que se contó. Las ventas son negativas, las
     // devoluciones positivas: sumarlas al conteo lo trae al presente.
-    let movido: i32 = db
-        .query_row(
-            "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements
-             WHERE product_id = ?1 AND created_at > ?2",
-            params![product_id, entrada.contado_en],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    //
+    // Cuando se contó una talla, solo cuentan los movimientos de esa talla. Sin
+    // esa distinción, anotar "talla M: 5" y vender después tres piezas de la
+    // talla G dejaba la M en 2: el conteo absorbía ventas de mercancía que nadie
+    // había contado.
+    let movido: i32 = match entrada.variant_id {
+        Some(vid) => db
+            .query_row(
+                "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements
+                 WHERE product_id = ?1 AND variant_id = ?2 AND created_at > ?3",
+                params![product_id, vid, entrada.contado_en],
+                |r| r.get(0),
+            )
+            .unwrap_or(0),
+        // Sin talla se contó la prenda entera, así que todo su movimiento cuenta.
+        None => db
+            .query_row(
+                "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements
+                 WHERE product_id = ?1 AND created_at > ?2",
+                params![product_id, entrada.contado_en],
+                |r| r.get(0),
+            )
+            .unwrap_or(0),
+    };
 
     let stock_despues = (entrada.contado + movido).max(0);
 
@@ -145,9 +161,9 @@ pub fn aplicar_conteo(
             format!("Conteo desde el celular (se movieron {} mientras tanto)", movido)
         };
         db.execute(
-            "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
-             VALUES (?1, 'adjustment', ?2, ?3, ?4, ?5, ?6)",
-            params![product_id, stock_despues - stock_antes, stock_antes, stock_despues, razon, user_id],
+            "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
+             VALUES (?1, ?2, 'adjustment', ?3, ?4, ?5, ?6, ?7)",
+            params![product_id, entrada.variant_id, stock_despues - stock_antes, stock_antes, stock_despues, razon, user_id],
         ).map_err(|e| e.to_string())?;
 
         db.execute(
@@ -304,6 +320,116 @@ mod tests {
         let m: i32 = db.query_row("SELECT stock FROM product_variants WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(m, 5);
         assert_eq!(stock(&db), 17, "el total es la suma de las tallas");
+    }
+
+    /// Deja el producto con dos tallas y devuelve sus ids.
+    fn con_tallas(db: &Connection) -> (i64, i64) {
+        db.execute(
+            "INSERT INTO product_variants (id, product_id, size, stock) VALUES (1, 1, 'M', 8), (2, 1, 'G', 12)",
+            [],
+        ).unwrap();
+        db.execute("UPDATE products SET has_variants = 1, stock = 20 WHERE id = 1", []).unwrap();
+        (1, 2)
+    }
+
+    fn movimiento(db: &Connection, variant_id: Option<i64>, cantidad: i32, cuando: &str) {
+        db.execute(
+            "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, created_at)
+             VALUES (1, ?1, 'sale', ?2, 20, 20, ?3)",
+            params![variant_id, cantidad, cuando],
+        ).unwrap();
+    }
+
+    fn stock_de(db: &Connection, variant_id: i64) -> i32 {
+        db.query_row("SELECT stock FROM product_variants WHERE id = ?1", params![variant_id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn contar_una_talla_no_absorbe_lo_vendido_de_otra() {
+        // El caso que corrompía el inventario: se anotaba "talla M: 5", se
+        // vendían tres piezas de la talla G, y al llegar el conteo la M quedaba
+        // en 2. El conteo se comía ventas de mercancía que nadie había contado.
+        let db = tienda();
+        let (m, _g) = con_tallas(&db);
+        movimiento(&db, Some(2), -3, "2026-01-01 16:30:00");
+
+        let mut c = conteo(5, "2026-01-01 15:00:00");
+        c.variant_id = Some(m);
+        let r = aplicar_conteo(&db, Some(1), &c).unwrap();
+
+        assert_eq!(r.movido_mientras, 0, "lo de la talla G no es asunto de la M");
+        assert_eq!(stock_de(&db, m), 5, "la talla M queda en lo que se contó");
+        assert_eq!(stock_de(&db, 2), 12, "la talla G no se toca");
+    }
+
+    #[test]
+    fn contar_una_talla_si_respeta_lo_vendido_de_ella_misma() {
+        // La otra mitad: lo que sí se vendió de esa talla tiene que descontarse,
+        // o el conteo desharía la venta.
+        let db = tienda();
+        let (m, _) = con_tallas(&db);
+        movimiento(&db, Some(m), -3, "2026-01-01 16:30:00");
+
+        let mut c = conteo(5, "2026-01-01 15:00:00");
+        c.variant_id = Some(m);
+        let r = aplicar_conteo(&db, Some(1), &c).unwrap();
+
+        assert_eq!(r.movido_mientras, -3);
+        assert_eq!(stock_de(&db, m), 2, "cinco contados menos tres vendidos después");
+    }
+
+    #[test]
+    fn una_venta_de_verdad_queda_atada_a_su_talla() {
+        // Sin pasar por SQL a mano: se vende la talla G por el camino normal y se
+        // comprueba que el conteo de la M no se enteró.
+        let db = tienda();
+        let (m, g) = con_tallas(&db);
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0.0)", []).unwrap();
+        crate::commands::sales::registrar_venta(
+            &db,
+            1,
+            None,
+            crate::models::sale::CreateSaleDto {
+                items: vec![crate::models::sale::CreateSaleItemDto {
+                    product_id: 1, quantity: 3, unit_price: 499.0, discount: 0.0, variant_id: Some(g),
+                }],
+                payment_method: "cash".into(),
+                amount_paid: 2000.0,
+                payments: vec![],
+                discount_total: 0.0,
+                promotion_id: None,
+                notes: None,
+                customer_id: None,
+                client_request_id: None,
+                requiere_factura: false,
+            },
+        ).unwrap();
+
+        // Se contó la M *antes* de esa venta.
+        let mut c = conteo(5, "2000-01-01 00:00:00");
+        c.variant_id = Some(m);
+        let r = aplicar_conteo(&db, Some(1), &c).unwrap();
+
+        assert_eq!(r.movido_mientras, 0);
+        assert_eq!(stock_de(&db, m), 5);
+        assert_eq!(stock_de(&db, g), 9, "la venta de la G sigue descontada");
+    }
+
+    #[test]
+    fn el_conteo_deja_anotada_la_talla_que_se_contó() {
+        // Si el propio movimiento del conteo no llevara la talla, el siguiente
+        // conteo de esa talla no vería este ajuste.
+        let db = tienda();
+        let (m, _) = con_tallas(&db);
+        let mut c = conteo(5, "2026-01-01 15:00:00");
+        c.variant_id = Some(m);
+        aplicar_conteo(&db, Some(1), &c).unwrap();
+
+        let anotada: Option<i64> = db.query_row(
+            "SELECT variant_id FROM inventory_movements WHERE reason LIKE 'Conteo%'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(anotada, Some(m));
     }
 
     #[test]

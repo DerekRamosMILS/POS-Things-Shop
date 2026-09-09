@@ -509,6 +509,18 @@ pub const HTML: &str = r####"
   $('camara').addEventListener('change', recibirFotos);
   $('galeriaInput').addEventListener('change', recibirFotos);
 
+  /// Renglón de algo que la caja rechazó de plano y salió de la cola.
+  ///
+  /// Tiene que verse: es lo único que se captura y no llega, así que
+  /// desaparecer en silencio sería lo peor que podría hacer.
+  function agregarRechazoAlHistorial(que, motivo) {
+    $('tarjetaHist').style.display = 'block';
+    var fila = document.createElement('div');
+    fila.innerHTML = '<b style="color:var(--bad)">✕ ' + escapar(que) + '</b> &nbsp; ' +
+      '<span style="color:var(--t3)">' + escapar(motivo) + '</span>';
+    $('historial').prepend(fila);
+  }
+
   function agregarAlHistorial(izquierda, derecha, movido) {
     $('tarjetaHist').style.display = 'block';
     var fila = document.createElement('div');
@@ -626,11 +638,15 @@ pub const HTML: &str = r####"
       if (!cola.length) { pintarPendientes(0); return 0; }
 
       var enviados = 0;
+      var descartados = 0;
       var ultimoError = '';
       for (var i = 0; i < cola.length; i++) {
         var item = cola[i];
+        var esConteo = item.tipo === 'conteo';
+        var comoSeLlama = esConteo
+          ? (item.datos.sku || 'un conteo')
+          : (item.datos.nombre || 'un producto');
         try {
-          var esConteo = item.tipo === 'conteo';
           var r = await fetch(esConteo ? '/api/conteo' : '/api/producto', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Codigo': codigo },
@@ -653,9 +669,22 @@ pub const HTML: &str = r####"
               agregarAlHistorial(data.sku, item.datos.nombre);
             }
             enviados++;
+          } else if (r.status === 400) {
+            // La caja dice que **este dato** no sirve: el producto que se contó
+            // ya no existe, la talla se borró, faltan campos. Reintentar va a
+            // fallar igual mañana, y dejarlo al frente de la cola tapaba todo lo
+            // que viniera detrás: se capturaba durante días sin que nada llegara.
+            //
+            // Sale de la cola y se dice en voz alta, con nombre, para que se
+            // pueda volver a capturar a mano.
+            await sacarDeLaCola(item.id);
+            agregarRechazoAlHistorial(comoSeLlama, data.mensaje || 'La caja no lo aceptó.');
+            descartados++;
+            ultimoError = '"' + comoSeLlama + '": ' + (data.mensaje || 'la caja no lo aceptó') +
+              ' No se pudo guardar; hay que capturarlo otra vez.';
           } else {
-            // La caja contestó que no. Reintentar no va a cambiar nada: se
-            // queda en la cola y se avisa, para que no desaparezca en silencio.
+            // Código vencido, captura apagada, bloqueo por intentos o un fallo de
+            // la caja. Aquí sí reintentar sirve: se queda en la cola y se avisa.
             ultimoError = data.mensaje || 'La caja no lo aceptó.';
             break;
           }
@@ -676,6 +705,11 @@ pub const HTML: &str = r####"
           : 'Se mandaron ' + enviados + ' a la caja.', 'ok');
       } else if (quedan > 0 && !silencioso) {
         aviso('La caja no contesta. Lo capturado está guardado aquí y se manda solo cuando la prendan.', 'bad');
+      }
+      if (enviados > 0 && descartados > 0) {
+        // Que se hayan mandado otros no puede tapar que uno se quedó fuera.
+        aviso('Se mandaron ' + enviados + ', pero ' + descartados +
+              ' no se pudieron guardar. Míralos abajo.', 'bad');
       }
       return quedan;
     } finally {

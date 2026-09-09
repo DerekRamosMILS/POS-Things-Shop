@@ -59,3 +59,53 @@ describe('miniaturas del listado', () => {
         expect(getProductImages).toHaveBeenCalledTimes(2);
     });
 });
+
+describe('desalojo de miniaturas', () => {
+    beforeEach(() => {
+        vi.resetModules();
+        getProductImages.mockReset();
+        getProductImages.mockResolvedValue([]);
+    });
+
+    it('olvida las que ya nadie está mirando', async () => {
+        const mod = await import('../hooks/useProductImages');
+        for (let id = 1; id <= 500; id++) mod.recordar(id, `data:foto-${id}`);
+
+        // El tope es 400: pasando de ahí se olvidan las más viejas.
+        expect(mod.recordadas()).toBeLessThanOrEqual(400);
+        expect(mod.estaRecordada(1)).toBe(false);
+    });
+
+    it('nunca olvida una que está en pantalla', async () => {
+        // La rejilla del punto de venta no está paginada: con un catálogo grande
+        // se montan todas de golpe y las últimas desalojaban a las primeras, que
+        // se quedaban con las iniciales porque solo se vuelven a pedir al
+        // montarse. Lo visible no se olvida.
+        const mod = await import('../hooks/useProductImages');
+        const soltar = mod.marcarEnPantalla(1);
+        for (let id = 1; id <= 500; id++) mod.recordar(id, `data:foto-${id}`);
+
+        expect(mod.estaRecordada(1)).toBe(true);
+
+        // Al salir de pantalla vuelve a ser desalojable.
+        soltar();
+        for (let id = 501; id <= 900; id++) mod.recordar(id, `data:foto-${id}`);
+        expect(mod.estaRecordada(1)).toBe(false);
+    });
+
+    it('deja de protegerla solo cuando la suelta el último que la muestra', async () => {
+        // El mismo producto se dibuja dos veces: en la rejilla y en el ticket.
+        const mod = await import('../hooks/useProductImages');
+        const soltarRejilla = mod.marcarEnPantalla(1);
+        const soltarTicket = mod.marcarEnPantalla(1);
+        mod.recordar(1, 'data:foto-1');
+
+        soltarRejilla();
+        for (let id = 2; id <= 600; id++) mod.recordar(id, `data:foto-${id}`);
+        expect(mod.estaRecordada(1)).toBe(true);
+
+        soltarTicket();
+        for (let id = 601; id <= 1100; id++) mod.recordar(id, `data:foto-${id}`);
+        expect(mod.estaRecordada(1)).toBe(false);
+    });
+});

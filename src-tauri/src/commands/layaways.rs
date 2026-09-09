@@ -207,9 +207,9 @@ pub fn registrar_apartado(
             }
             let reason = line.variant_label.as_ref().map(|l| format!("Apartado reservado ({})", l)).unwrap_or_else(|| "Apartado reservado".to_string());
             db.execute(
-                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
-                 VALUES (?1, 'adjustment', ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![line.product_id, -line.quantity, prev_stock, new_stock, layaway_id, reason, user_id],
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
+                 VALUES (?1, ?2, 'adjustment', ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![line.product_id, line.variant_id, -line.quantity, prev_stock, new_stock, layaway_id, reason, user_id],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -527,9 +527,9 @@ pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i6
                 ).map_err(|e| e.to_string())?;
             }
             db.execute(
-                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
-                 VALUES (?1, 'cancellation', ?2, ?3, ?4, ?5, 'Apartado cancelado', ?6)",
-                params![product_id, quantity, current_stock, new_stock, layaway_id, user_id],
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reference_id, reason, user_id)
+                 VALUES (?1, ?2, 'cancellation', ?3, ?4, ?5, ?6, 'Apartado cancelado', ?7)",
+                params![product_id, variant_id, quantity, current_stock, new_stock, layaway_id, user_id],
             ).map_err(|e| e.to_string())?;
         }
 

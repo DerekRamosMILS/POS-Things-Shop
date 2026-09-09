@@ -26,11 +26,21 @@ interface Caja {
     encendida: boolean;
     /** Cuando se pone, la caja contesta que no con este mensaje. */
     rechazaCon: string | null;
+    /**
+     * Con qué código contesta al rechazar. 400 significa "este dato no sirve" y
+     * reintentar no va a cambiar nada; el resto —401, 429, 503— sí se reintenta.
+     */
+    rechazaConEstado: number;
+    /** Nombres que la caja rechaza de plano; el resto pasa. */
+    rechazaSolo: string[] | null;
 }
 
 /** Abre la página con una caja simulada y devuelve con qué jugar. */
 async function abrirCaptura() {
-    const caja: Caja = { recibidos: [], encendida: true, rechazaCon: null };
+    const caja: Caja = {
+        recibidos: [], encendida: true, rechazaCon: null,
+        rechazaConEstado: 401, rechazaSolo: null,
+    };
     const skus = { n: 0 };
 
     const fetchFalso = vi.fn(async (url: string, init?: { body?: string }) => {
@@ -39,8 +49,15 @@ async function abrirCaptura() {
             return { ok: true, json: async () => ({ ok: true }) };
         }
         const enviado = JSON.parse(init?.body ?? '{}') as Envio;
-        if (caja.rechazaCon) {
-            return { ok: false, json: async () => ({ ok: false, mensaje: caja.rechazaCon }) };
+        const señalado = caja.rechazaSolo === null
+            || caja.rechazaSolo.includes(enviado.nombre)
+            || caja.rechazaSolo.includes((enviado as unknown as { sku?: string }).sku ?? '');
+        if (caja.rechazaCon && señalado) {
+            return {
+                ok: false,
+                status: caja.rechazaConEstado,
+                json: async () => ({ ok: false, mensaje: caja.rechazaCon }),
+            };
         }
         caja.recibidos.push(enviado);
         // La caja no da de alta dos veces lo que ya conoce: devuelve el mismo
@@ -178,6 +195,75 @@ describe('capturar con la caja apagada', () => {
         doc.getElementById('sincronizar')!.dispatchEvent(new doc.defaultView!.Event('click'));
         await esperarA(() => caja.recibidos.length === 1, 'que se mandara al arreglar el código');
         expect(caja.recibidos.map(r => r.nombre)).toEqual(['Chamarra']);
+    });
+
+    it('un dato que la caja nunca va a aceptar no tapa la cola', async () => {
+        // El caso que dejaba el teléfono mudo: la caja contesta 400 —"el producto
+        // ya no existe", por ejemplo— y ese renglón se quedaba al frente de la
+        // cola para siempre. Todo lo que se capturara después quedaba atrapado
+        // detrás y no llegaba nunca, sin forma de sacarlo desde el teléfono.
+        const { doc, caja } = await abrirCaptura();
+        caja.encendida = false;
+        await capturar(doc, 'Imposible');
+        await capturar(doc, 'Blusa buena');
+
+        caja.encendida = true;
+        caja.rechazaCon = 'El producto ya no existe';
+        caja.rechazaConEstado = 400;
+        caja.rechazaSolo = ['Imposible'];
+        doc.getElementById('sincronizar')!.dispatchEvent(new doc.defaultView!.Event('click'));
+
+        // La buena sí llega, aunque venga detrás de la imposible.
+        await esperarA(() => caja.recibidos.length === 1, 'que la blusa pasara de largo');
+        expect(caja.recibidos.map(r => r.nombre)).toEqual(['Blusa buena']);
+
+        // Y la cola queda vacía: el renglón imposible salió en vez de atorarse.
+        await esperarA(
+            () => doc.getElementById('pendientes')!.style.display === 'none',
+            'que la cola quedara vacía',
+        );
+    });
+
+    it('lo que la caja rechaza de plano se dice con nombre, no se esfuma', async () => {
+        // Sacarlo de la cola en silencio sería igual de malo: hay que poder
+        // volver a capturarlo, y para eso hay que saber cuál fue.
+        const { doc, caja } = await abrirCaptura();
+        caja.encendida = false;
+        await capturar(doc, 'Vestido raro');
+
+        caja.encendida = true;
+        caja.rechazaCon = 'Ponle nombre al producto';
+        caja.rechazaConEstado = 400;
+        doc.getElementById('sincronizar')!.dispatchEvent(new doc.defaultView!.Event('click'));
+
+        await esperarA(
+            () => doc.getElementById('historial')!.textContent!.includes('Vestido raro'),
+            'que el rechazo quedara a la vista con su nombre',
+        );
+        expect(doc.getElementById('historial')!.textContent).toContain('Ponle nombre');
+        expect(doc.getElementById('aviso')!.textContent).toContain('Vestido raro');
+    });
+
+    it('un código vencido sigue siendo motivo para esperar, no para tirar', async () => {
+        // La otra mitad: no todo "no" es definitivo. Un 401 se reintenta, y lo
+        // capturado tiene que seguir ahí cuando el código se arregle.
+        const { doc, caja } = await abrirCaptura();
+        caja.encendida = false;
+        await capturar(doc, 'Chamarra');
+
+        caja.encendida = true;
+        caja.rechazaCon = 'Código incorrecto';
+        caja.rechazaConEstado = 401;
+        doc.getElementById('sincronizar')!.dispatchEvent(new doc.defaultView!.Event('click'));
+        await esperarA(
+            () => doc.getElementById('aviso')!.textContent!.includes('Código incorrecto'),
+            'que avisara del código',
+        );
+        expect(doc.getElementById('pendientesTexto')!.textContent).toContain('Falta 1');
+
+        caja.rechazaCon = null;
+        doc.getElementById('sincronizar')!.dispatchEvent(new doc.defaultView!.Event('click'));
+        await esperarA(() => caja.recibidos.length === 1, 'que saliera al arreglar el código');
     });
 
     it('capturar con la caja apagada deja el formulario listo para el siguiente', async () => {

@@ -2,8 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useSessionStore } from '../../stores/useSessionStore';
 import * as api from '../../api';
-import { useCartStore } from '../../stores/useCartStore';
-import { useHoldsStore } from '../../stores/useHoldsStore';
 import NotificationBell from './NotificationBell';
 import GlobalSearch from './GlobalSearch';
 const IcoLogOut = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>;
@@ -119,9 +117,26 @@ const PAGE_META: Record<string, { title: string; sub: string }> = {
 };
 
 export default function MainLayout() {
-  const { user, cashRegisterId, logout } = useSessionStore();
+  const { user, cashRegisterId, setCashRegisterId, logout } = useSessionStore();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Qué turno está abierto lo sabe la base, no la sesión de quien entra.
+  //
+  // Antes solo se averiguaba al visitar la pantalla de Caja. Como salir borra el
+  // id, la persona del siguiente turno entraba, caía en el punto de venta y se
+  // encontraba el botón de cobrar apagado con un "la caja no está abierta" que
+  // era falso: la caja seguía abierta, y al intentar abrirla de nuevo el sistema
+  // contestaba que ya lo estaba. Se quedaba encerrada sin poder vender hasta que
+  // alguien atinaba a entrar a Caja, que lo arreglaba de rebote.
+  useEffect(() => {
+    if (!user) return;
+    let cancelado = false;
+    api.getOpenRegister()
+      .then((reg) => { if (!cancelado) setCashRegisterId(reg?.id ?? null); })
+      .catch(() => { /* se reintenta al entrar a Caja */ });
+    return () => { cancelado = true; };
+  }, [user?.id, setCashRegisterId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The nav is taller than the sidebar on short screens; the fade only shows
   // while there is still something below the fold.
@@ -143,12 +158,8 @@ export default function MainLayout() {
   const handleLogout = async () => {
     // Revoke server-side first so the token cannot be replayed.
     try { await api.logout(); } catch { /* logging out locally regardless */ }
-    // El carrito y las órdenes en espera sobreviven a cerrar la aplicación, que
-    // es lo que se quiere para un corte de luz. Pero son de quien las armó: al
-    // cambiar de turno, la siguiente persona no debe encontrarse el ticket a
-    // medias de la anterior y cobrarlo sin darse cuenta.
-    useCartStore.getState().clear();
-    useHoldsStore.getState().setHolds([null, null, null]);
+    // `logout` se encarga de vaciar el carrito y las órdenes en espera: hay más
+    // de una salida y todas pasan por ahí.
     logout();
     navigate('/login');
   };

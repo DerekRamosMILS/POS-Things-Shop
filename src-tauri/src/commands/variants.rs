@@ -56,9 +56,42 @@ pub fn get_variant_by_barcode(state: State<DbState>, sessions: State<SessionStat
 /// product's aggregate stock and has_variants flag are recomputed.
 #[tauri::command]
 pub fn save_variants(state: State<DbState>, sessions: State<SessionState>, token: String, product_id: i64, variants: Vec<SaveVariantDto>) -> Result<Vec<ProductVariant>, String> {
-    require_admin(&sessions, &token)?;
+    let user_id = require_admin(&sessions, &token)?;
     let db = state.conn();
+    guardar_variantes(&db, user_id, product_id, variants)
+}
 
+/// Cambio de existencia de una talla que hay que dejar anotado.
+struct Movida {
+    variant_id: i64,
+    etiqueta: String,
+    delta: i32,
+}
+
+fn etiqueta_de(size: &Option<String>, color: &Option<String>) -> String {
+    let partes: Vec<&str> = [size.as_deref(), color.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    if partes.is_empty() { "Único".to_string() } else { partes.join(" / ") }
+}
+
+/// Núcleo del guardado, con la conexión explícita.
+///
+/// Ajustar la existencia de una talla se hace desde aquí —`adjust_stock` la
+/// rechaza a propósito y manda a esta pantalla—, y hasta ahora no dejaba ningún
+/// movimiento de inventario. El único lugar al que el propio sistema mandaba a
+/// corregir existencias era justo el que no quedaba auditado: una talla podía
+/// pasar de ocho a cero, o desaparecer con su mercancía dentro, sin un renglón
+/// que dijera quién y cuándo.
+pub fn guardar_variantes(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    product_id: i64,
+    variants: Vec<SaveVariantDto>,
+) -> Result<Vec<ProductVariant>, String> {
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let norm = |s: &Option<String>| -> Option<String> {
@@ -66,19 +99,41 @@ pub fn save_variants(state: State<DbState>, sessions: State<SessionState>, token
     };
 
     let result = (|| -> Result<(), String> {
+        // Existencia del producto antes de tocar nada: los movimientos que se
+        // anoten abajo encadenan desde aquí.
+        let stock_antes: i32 = db
+            .query_row("SELECT stock FROM products WHERE id = ?1", params![product_id], |r| r.get(0))
+            .map_err(|_| "El producto no existe".to_string())?;
+        let mut movidas: Vec<Movida> = Vec::new();
+
         // Soft-delete variants that are no longer present.
         let incoming_ids: Vec<i64> = variants.iter().filter_map(|v| v.id).collect();
-        let mut stmt = db.prepare("SELECT id FROM product_variants WHERE product_id = ?1 AND is_active = 1")
-            .map_err(|e| e.to_string())?;
-        let existing: Vec<i64> = stmt
-            .query_map(params![product_id], |r| r.get(0))
+        let mut stmt = db.prepare(
+            "SELECT id, size, color, stock FROM product_variants WHERE product_id = ?1 AND is_active = 1"
+        ).map_err(|e| e.to_string())?;
+        let existing: Vec<(i64, Option<String>, Option<String>, i32)> = stmt
+            .query_map(params![product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
-        for id in existing {
-            if !incoming_ids.contains(&id) {
+        drop(stmt);
+
+        let previo: std::collections::HashMap<i64, i32> =
+            existing.iter().map(|(id, _, _, stock)| (*id, *stock)).collect();
+
+        for (id, size, color, stock) in &existing {
+            if !incoming_ids.contains(id) {
                 db.execute("UPDATE product_variants SET is_active = 0, updated_at = datetime('now','localtime') WHERE id = ?1", params![id])
                     .map_err(|e| e.to_string())?;
+                // Quitar la talla se lleva su mercancía del total del producto.
+                // Sin este renglón, esas piezas se esfumaban sin explicación.
+                if *stock != 0 {
+                    movidas.push(Movida {
+                        variant_id: *id,
+                        etiqueta: format!("Talla quitada ({})", etiqueta_de(size, color)),
+                        delta: -*stock,
+                    });
+                }
             }
         }
 
@@ -99,12 +154,27 @@ pub fn save_variants(state: State<DbState>, sessions: State<SessionState>, token
                         "UPDATE product_variants SET size=?1, color=?2, sku=?3, barcode=?4, stock=?5, is_active=1, updated_at=datetime('now','localtime') WHERE id=?6 AND product_id=?7",
                         params![size, color, sku, barcode, stock, id, product_id],
                     ).map_err(dup_err)?;
+                    let antes = previo.get(&id).copied().unwrap_or(0);
+                    if stock != antes {
+                        movidas.push(Movida {
+                            variant_id: id,
+                            etiqueta: format!("Ajuste de talla ({})", etiqueta_de(&size, &color)),
+                            delta: stock - antes,
+                        });
+                    }
                 }
                 None => {
                     db.execute(
                         "INSERT INTO product_variants (product_id, size, color, sku, barcode, stock) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![product_id, size, color, sku, barcode, stock],
                     ).map_err(dup_err)?;
+                    if stock != 0 {
+                        movidas.push(Movida {
+                            variant_id: db.last_insert_rowid(),
+                            etiqueta: format!("Talla nueva ({})", etiqueta_de(&size, &color)),
+                            delta: stock,
+                        });
+                    }
                 }
             }
         }
@@ -125,6 +195,30 @@ pub fn save_variants(state: State<DbState>, sessions: State<SessionState>, token
             db.execute(
                 "UPDATE products SET has_variants = 0, updated_at = datetime('now','localtime') WHERE id = ?1",
                 params![product_id],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        // Los renglones van al final, encadenados: cada uno dice de qué talla es,
+        // cuánto se movió y en qué dejó el total del producto.
+        let mut corriendo = stock_antes;
+        for m in &movidas {
+            let nuevo = corriendo + m.delta;
+            db.execute(
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
+                 VALUES (?1, ?2, 'adjustment', ?3, ?4, ?5, ?6, ?7)",
+                params![product_id, m.variant_id, m.delta, corriendo, nuevo, m.etiqueta, user_id],
+            ).map_err(|e| e.to_string())?;
+            corriendo = nuevo;
+        }
+
+        // Una prenda que hasta ahora no tenía tallas trae existencia propia que
+        // no pertenece a ninguna. Al pasar a tallas, esa diferencia también tiene
+        // que quedar dicha en vez de aparecer como un descuadre.
+        if count > 0 && corriendo != sum {
+            db.execute(
+                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
+                 VALUES (?1, 'adjustment', ?2, ?3, ?4, 'Existencia repartida en tallas', ?5)",
+                params![product_id, sum - corriendo, corriendo, sum, user_id],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -329,5 +423,149 @@ mod tests {
             requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
         });
         assert!(r.is_err(), "una variante debe pertenecer al producto que se vende");
+    }
+
+    // ── Rastro de los cambios de existencia por talla ────────────────────────
+    //
+    // `adjust_stock` rechaza los productos con tallas y manda aquí. Si aquí no se
+    // anota nada, el único lugar al que el sistema manda a corregir existencias
+    // es el único sin auditoría.
+
+    fn variante(id: Option<i64>, size: &str, stock: i32) -> SaveVariantDto {
+        SaveVariantDto {
+            id,
+            size: Some(size.to_string()),
+            color: None,
+            sku: None,
+            barcode: None,
+            stock,
+        }
+    }
+
+    /// Movimientos anotados para un producto: (talla, cantidad, motivo).
+    fn movimientos(db: &rusqlite::Connection, product_id: i64) -> Vec<(Option<i64>, i32, String)> {
+        let mut stmt = db.prepare(
+            "SELECT variant_id, quantity, COALESCE(reason, '') FROM inventory_movements
+             WHERE product_id = ?1 ORDER BY id",
+        ).unwrap();
+        stmt.query_map(params![product_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn ajustar_la_existencia_de_una_talla_deja_movimiento() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![variante(Some(m), "M", 2), variante(Some(l), "L", 5)]).unwrap();
+
+        let movs = movimientos(&db, p);
+        assert_eq!(movs.len(), 1, "se esperaba un solo renglón: {:?}", movs);
+        assert_eq!(movs[0].0, Some(m), "el renglón tiene que decir de qué talla es");
+        assert_eq!(movs[0].1, -3, "cinco piezas pasaron a dos");
+        assert!(movs[0].2.contains('M'), "el motivo nombra la talla: {}", movs[0].2);
+        invariante(&db, p, "tras ajustar una talla");
+    }
+
+    #[test]
+    fn quitar_una_talla_no_desaparece_su_mercancia_en_silencio() {
+        // Al desactivar la talla, su existencia salía del total del producto sin
+        // un renglón que lo explicara: diez piezas se volvían cinco y nadie sabía
+        // por qué.
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![variante(Some(m), "M", 5)]).unwrap();
+
+        let movs = movimientos(&db, p);
+        assert_eq!(movs.len(), 1, "{:?}", movs);
+        assert_eq!(movs[0].0, Some(l));
+        assert_eq!(movs[0].1, -5);
+        assert!(movs[0].2.contains("quitada"), "{}", movs[0].2);
+        invariante(&db, p, "tras quitar una talla");
+    }
+
+    #[test]
+    fn una_talla_nueva_entra_como_movimiento() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(
+            &db, 1, p,
+            vec![variante(Some(m), "M", 5), variante(Some(l), "L", 5), variante(None, "XL", 4)],
+        ).unwrap();
+
+        let movs = movimientos(&db, p);
+        assert_eq!(movs.len(), 1, "{:?}", movs);
+        assert_eq!(movs[0].1, 4);
+        assert!(movs[0].2.contains("nueva"), "{}", movs[0].2);
+        assert!(movs[0].0.is_some(), "la talla nueva ya tiene id y debe quedar anotada");
+        invariante(&db, p, "tras agregar una talla");
+    }
+
+    #[test]
+    fn guardar_sin_cambiar_nada_no_ensucia_el_historial() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![variante(Some(m), "M", 5), variante(Some(l), "L", 5)]).unwrap();
+
+        assert!(movimientos(&db, p).is_empty(), "solo se anota lo que se movió");
+    }
+
+    #[test]
+    fn los_renglones_encadenan_hasta_el_total_del_producto() {
+        // Cada renglón dice en qué dejó el total; el último tiene que coincidir
+        // con lo que quedó en el catálogo, o el historial no se puede leer.
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![variante(Some(m), "M", 1), variante(Some(l), "L", 9)]).unwrap();
+
+        let ultimo: (i32, i32) = db.query_row(
+            "SELECT previous_stock, new_stock FROM inventory_movements
+             WHERE product_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![p], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        let total: i32 = db.query_row("SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(ultimo.1, total, "el último renglón debe cerrar en el total real");
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn quien_hizo_el_ajuste_queda_anotado() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![variante(Some(m), "M", 2), variante(Some(l), "L", 5)]).unwrap();
+
+        let quien: Option<i64> = db.query_row(
+            "SELECT user_id FROM inventory_movements WHERE product_id = ?1", params![p], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(quien, Some(1));
+    }
+
+    #[test]
+    fn pasar_una_prenda_sin_tallas_a_tallas_explica_la_diferencia() {
+        // La prenda tenía siete piezas propias y ahora se reparten en dos tallas
+        // de dos. Esa diferencia tiene que quedar dicha en vez de verse como un
+        // descuadre del catálogo.
+        let db = tienda();
+        db.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock) VALUES ('SIN', 'Blusa', 10.0, 20.0, 7)",
+            [],
+        ).unwrap();
+        let p = db.last_insert_rowid();
+
+        guardar_variantes(&db, 1, p, vec![variante(None, "M", 2), variante(None, "L", 2)]).unwrap();
+
+        let movs = movimientos(&db, p);
+        assert!(
+            movs.iter().any(|(_, _, motivo)| motivo.contains("repartida")),
+            "falta el renglón que explica la diferencia: {:?}", movs
+        );
+        invariante(&db, p, "tras pasar a tallas");
     }
 }
