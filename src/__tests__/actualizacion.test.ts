@@ -7,11 +7,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@tauri-apps/plugin-updater', () => ({ check: vi.fn() }));
+const check = vi.fn();
+vi.mock('@tauri-apps/plugin-updater', () => ({ check: (...a: unknown[]) => check(...a) }));
 vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }));
 vi.mock('../api', () => ({ registrarEventoActualizacion: vi.fn(async () => {}) }));
 
-import { esMomentoSeguro, motivoDeEspera } from '../stores/useActualizacionStore';
+import { esMomentoSeguro, motivoDeEspera, useActualizacionStore } from '../stores/useActualizacionStore';
 import { useCartStore } from '../stores/useCartStore';
 import { useSessionStore } from '../stores/useSessionStore';
 import type { Product, User } from '../types';
@@ -128,5 +129,57 @@ describe('el momento de instalar', () => {
         useSessionStore.getState().logout();
 
         expect(esMomentoSeguro()).toBe(true);
+    });
+});
+
+describe('el botón de actualizar a mano', () => {
+    beforeEach(() => {
+        check.mockReset();
+        useCartStore.getState().clear();
+        useSessionStore.setState({ user: null, token: null, cashRegisterId: null });
+        useActualizacionStore.setState({ fase: 'inactivo', version: null, error: null, ultimaRevision: null });
+    });
+
+    /** Una actualización de mentira que anota lo que le piden. */
+    function actualizacionFalsa() {
+        const hecho = { descargada: false, instalada: false };
+        check.mockResolvedValue({
+            version: '9.9.9',
+            download: async () => { hecho.descargada = true; },
+            install: async () => { hecho.instalada = true; },
+        });
+        return hecho;
+    }
+
+    it('instala aunque la política diga que hay que esperar', async () => {
+        // Lo pide una persona que está mirando la pantalla: la política, que
+        // existe para decidir sola, no tiene nada que opinar. Es la salida para
+        // cuando la automática se queda esperando por algo que no previmos.
+        const hecho = actualizacionFalsa();
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
+        useCartStore.getState().addItem(producto());
+        expect(esMomentoSeguro()).toBe(false);
+
+        await useActualizacionStore.getState().forzar();
+
+        expect(hecho.descargada).toBe(true);
+        expect(hecho.instalada).toBe(true);
+    });
+
+    it('cuando ya está al día lo dice y no instala nada', async () => {
+        check.mockResolvedValue(null);
+
+        const mensaje = await useActualizacionStore.getState().forzar();
+
+        expect(mensaje).toContain('más reciente');
+    });
+
+    it('cuando falla la búsqueda devuelve el motivo, no un silencio', async () => {
+        // "No se actualizó" sin explicación es lo que nos costó dos rondas.
+        check.mockRejectedValue(new Error('Network unreachable'));
+
+        const mensaje = await useActualizacionStore.getState().forzar();
+
+        expect(mensaje).toContain('Network unreachable');
     });
 });

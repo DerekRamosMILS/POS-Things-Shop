@@ -1,9 +1,7 @@
 import { useEffect, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { check } from '@tauri-apps/plugin-updater';
 import { getVersion } from '@tauri-apps/api/app';
 import { useActualizacionStore, motivoDeEspera } from '../stores/useActualizacionStore';
-import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
 import CaptureSettings from '../components/CaptureSettings';
 import CategorySettings from '../components/CategorySettings';
@@ -58,6 +56,7 @@ export default function SettingsPage() {
     const ultimaRevision = useActualizacionStore(s => s.ultimaRevision);
     const faseActualizacion = useActualizacionStore(s => s.fase);
     const versionDisponible = useActualizacionStore(s => s.version);
+    const forzarActualizacion = useActualizacionStore(s => s.forzar);
     useEffect(() => { getVersion().then(setVersionApp).catch(() => setVersionApp('—')); }, []);
     const [pwCurrent, setPwCurrent] = useState('');
     const [pwNext, setPwNext] = useState('');
@@ -140,22 +139,27 @@ export default function SettingsPage() {
         finally { setExporting(false); }
     };
 
+    /// Actualizar por orden de una persona, saltándose la espera automática.
+    ///
+    /// La automática puede quedarse esperando por un motivo que no previmos —ya
+    /// pasó—, y entonces hace falta poder forzarla sin depender de que nosotros
+    /// hayamos acertado. Va junto a la versión instalada, que es donde alguien
+    /// que se pregunta "¿estoy al día?" va a mirar.
     const handleCheckUpdate = async () => {
-        setCheckingUpdate(true);
-        try {
-            const update = await check();
-            if (!update) { showToast('Ya tienes la versión más reciente'); return; }
-
+        const espera = motivoDeEspera();
+        if (espera) {
             const ok = await confirm({
-                title: `Actualizar a la versión ${update.version}`,
-                message: `${update.body || 'Hay una nueva versión disponible.'}\n\nLa aplicación se reiniciará al terminar. Cierra la caja antes de continuar.`,
-                confirmLabel: 'Instalar',
+                title: 'Actualizar ahora',
+                message: `${espera}. La aplicación se va a cerrar y abrir sola para instalar. ¿Continuar?`,
+                variant: 'danger',
+                confirmLabel: 'Actualizar de todos modos',
             });
             if (!ok) return;
-
-            await update.downloadAndInstall();
-            await relaunch();
-        } catch (err) { showToast(`No se pudo buscar actualizaciones: ${err}`, 'error'); }
+        }
+        setCheckingUpdate(true);
+        try {
+            showToast(await forzarActualizacion());
+        } catch (err) { showToast(`No se pudo actualizar: ${err}`, 'error'); }
         finally { setCheckingUpdate(false); }
     };
 
@@ -376,9 +380,16 @@ export default function SettingsPage() {
                         background: 'rgba(255,255,255,0.04)',
                     }}>
                         <span style={{ fontSize: 12, color: 'var(--t3)', fontWeight: 600 }}>Versión instalada</span>
-                        <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
-                            {versionApp || '—'}
-                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                                {versionApp || '—'}
+                            </span>
+                            <button onClick={handleCheckUpdate} disabled={checkingUpdate}
+                                className="btn btn-primary btn-sm" style={{ gap: 7 }}>
+                                {checkingUpdate ? <IcoLoader /> : null}
+                                {checkingUpdate ? 'Buscando…' : 'Actualizar ahora'}
+                            </button>
+                        </div>
                     </div>
                     <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
                         {faseActualizacion === 'descargando'
@@ -392,9 +403,6 @@ export default function SettingsPage() {
                     <input readOnly value={logPath || '—'} className="input" style={{ fontFamily: 'monospace', fontSize: 11, marginBottom: 14 }}
                         onFocus={e => e.currentTarget.select()} />
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <button onClick={handleCheckUpdate} disabled={checkingUpdate} className="btn btn-ghost btn-sm" style={{ gap: 7 }}>
-                            {checkingUpdate ? <IcoLoader /> : null} Buscar actualizaciones
-                        </button>
                         <button onClick={handleDiagnostics} className="btn btn-ghost btn-sm">
                             Reporte de diagnóstico
                         </button>

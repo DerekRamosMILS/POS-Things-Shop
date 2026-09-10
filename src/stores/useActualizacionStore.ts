@@ -66,6 +66,16 @@ interface ActualizacionStore {
     buscar: () => Promise<boolean>;
     /** Instala lo que ya está listo. La aplicación se cierra sola. */
     instalar: () => Promise<void>;
+    /**
+     * Busca, descarga e instala ahora, sin consultar la política de momentos.
+     *
+     * Es la orden de una persona que está mirando la pantalla, así que la
+     * política —pensada para decidir sola— no tiene nada que opinar. Existe
+     * porque la automática puede quedarse esperando por un motivo que no
+     * previmos, y entonces hace falta una salida que no dependa de que nosotros
+     * hayamos acertado.
+     */
+    forzar: () => Promise<string>;
 }
 
 /** El handle vive fuera del estado: no es serializable ni hay que redibujarlo. */
@@ -177,6 +187,22 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
             ? `Versión ${update.version} descargada; esperando porque ${espera.toLowerCase()}`
             : `Versión ${update.version} descargada; instalando`);
         return true;
+    },
+
+    forzar: async () => {
+        // Si ya está descargada no se vuelve a bajar.
+        if (get().fase !== 'lista') {
+            if (get().fase !== 'inactivo') return 'Ya hay una actualización en curso.';
+            const hay = await get().buscar();
+            if (!hay) {
+                return get().error
+                    ? `No se pudo buscar: ${get().error}`
+                    : 'Ya tienes la versión más reciente.';
+            }
+        }
+        anotar('Actualización forzada a mano desde Ajustes');
+        await get().instalar();
+        return get().error ?? 'Instalando; la aplicación se va a reiniciar.';
     },
 
     instalar: async () => {

@@ -94,11 +94,23 @@ es lo único que no puede pasar. Por eso hay dos ventanas:
 
 | Cuándo | Qué hace |
 |---|---|
-| Al abrir la app, antes de que alguien entre | Instala sin preguntar. Nadie está vendiendo: es la ventana limpia, y la que atrapa casi todas las versiones porque la caja se abre todos los días. |
-| Cada 4 horas | Descarga en silencio y espera. Instala solo si el carrito está vacío **y** la caja está cerrada; mientras tanto muestra un aviso discreto en la barra. |
+| Los primeros 3 minutos desde que abre | Instala sin preguntar, salvo que haya un ticket a medias. Recién arrancada nadie está a media operación, y es la ventana que atrapa casi todas las versiones porque la caja se abre todos los días. |
+| Cada 4 horas | Descarga en silencio y espera. Instala solo si el carrito está vacío **y** la caja está cerrada; mientras tanto muestra un aviso en la barra. |
 
-**Ajustes → Buscar actualizaciones** sigue ahí para cuando quieras que la
-instalen en el momento.
+**No es instantáneo, y no está fallando.** El instalador pesa casi cuatro megas:
+entre que se encuentra la versión y que se instala pasan minutos, más en el
+internet de una tienda. La barra lateral muestra el avance de la descarga para
+que se note que está trabajando.
+
+La ventana de arranque tiene que ser por tiempo y no por "que no haya nadie
+dentro": la sesión y el turno sobreviven a cerrar la aplicación, así que al
+reabrirla el usuario ya está dentro y la caja sigue abierta. Pedir que no
+hubiera turno abierto era pedir algo que en una tienda no pasa nunca.
+
+**Ajustes → Actualizar ahora**, junto a la versión instalada, la instala en el
+momento saltándose esa espera. Existe porque la automática puede quedarse
+esperando por un motivo que no previmos, y entonces hace falta una salida que no
+dependa de que hayamos acertado.
 
 El instalador es **NSIS por usuario** (`installMode: currentUser`), y eso no es un
 detalle: el `.msi` de WiX se instala por máquina y pide permiso de Administrador

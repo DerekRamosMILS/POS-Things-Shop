@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useActualizacionStore, esMomentoSeguro, INTERVALO_MS } from '../stores/useActualizacionStore';
+import { useActualizacionStore, esMomentoSeguro, motivoDeEspera, INTERVALO_MS } from '../stores/useActualizacionStore';
 import { useCartStore } from '../stores/useCartStore';
 import { useSessionStore } from '../stores/useSessionStore';
 
@@ -80,11 +80,37 @@ export function PantallaActualizando() {
 export function AvisoActualizacion() {
     const fase = useActualizacionStore(s => s.fase);
     const version = useActualizacionStore(s => s.version);
+    const progreso = useActualizacionStore(s => s.progreso);
+
+    // También mientras baja, no solo cuando ya está lista. Son casi cuatro megas
+    // por el internet de una tienda: entre que se encuentra y que se instala pasan
+    // minutos en los que antes no se veía absolutamente nada, y eso se parece
+    // demasiado a que no esté pasando nada.
+    if (fase === 'descargando') {
+        const pct = progreso > 0 ? ` ${Math.round(progreso * 100)}%` : '';
+        return (
+            <div
+                className="nav-item"
+                style={{
+                    color: 'var(--t2)', background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.10)', cursor: 'default',
+                    fontSize: 11, lineHeight: 1.35, display: 'block',
+                }}
+            >
+                Bajando la versión {version}{pct}
+                <span style={{ display: 'block', color: 'var(--t3)', fontWeight: 600 }}>
+                    Se instala sola al terminar
+                </span>
+            </div>
+        );
+    }
+
     if (fase !== 'lista') return null;
 
+    const espera = motivoDeEspera();
     return (
         <div
-            title={`La versión ${version} ya está descargada. Se instala en cuanto cierres la caja.`}
+            title={`La versión ${version} ya está descargada.`}
             className="nav-item"
             style={{
                 color: 'var(--primary)', background: 'rgba(139,120,245,0.08)',
@@ -94,7 +120,7 @@ export function AvisoActualizacion() {
         >
             Actualización {version} lista
             <span style={{ display: 'block', color: 'var(--t3)', fontWeight: 600 }}>
-                Se instala al cerrar la caja
+                {espera ?? 'Se instala en un momento'}
             </span>
         </div>
     );
