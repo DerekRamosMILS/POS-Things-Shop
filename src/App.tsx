@@ -6,6 +6,8 @@ import { setCurrencySymbol } from './utils';
 import { ToastProvider } from './contexts/ToastContext';
 import { ConfirmProvider } from './contexts/ConfirmContext';
 import ErrorBoundary from './components/ErrorBoundary';
+import { useActualizacionAutomatica, PantallaActualizando } from './components/Actualizacion';
+import { useActualizacionStore } from './stores/useActualizacionStore';
 import MainLayout from './components/layout/MainLayout';
 import LoginPage from './pages/LoginPage';
 import ChangePasswordPage from './pages/ChangePasswordPage';
@@ -37,6 +39,12 @@ export default function App() {
   // before the shell is rendered with stale credentials.
   const [checkingSession, setCheckingSession] = useState(Boolean(token));
 
+  // La tienda está lejos: los arreglos llegan solos. Se busca desde aquí —fuera
+  // del router— para que valga también con la sesión cerrada, que es la mejor
+  // ventana para reiniciar: nadie está vendiendo todavía.
+  useActualizacionAutomatica();
+  const instalando = useActualizacionStore(s => s.fase === 'instalando');
+
   useEffect(() => {
     if (!token) { setCheckingSession(false); return; }
     let cancelled = false;
@@ -52,6 +60,9 @@ export default function App() {
     if (!user) return;
     api.getConfig('currency_symbol').then(setCurrencySymbol).catch(() => {});
   }, [user]);
+
+  // Gana a todo lo demás: la aplicación está a punto de cerrarse sola.
+  if (instalando) return <PantallaActualizando />;
 
   if (checkingSession) {
     return (

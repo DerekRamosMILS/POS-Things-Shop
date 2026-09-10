@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "publicar": "node scripts/publicar.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

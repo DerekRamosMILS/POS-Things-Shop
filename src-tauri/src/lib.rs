@@ -125,6 +125,9 @@ pub fn run() {
             }
 
             purge_old_logs(&conn);
+            // Deja constancia de si esta apertura vino de una actualización. Es
+            // lo que permite saber a distancia qué versión trae la tienda.
+            config::registrar_version_instalada(&conn);
             product_photos::migrar_fotos_incrustadas(&conn);
             product_photos::incorporar_fotos_en_archivos(&conn);
 

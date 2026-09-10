@@ -34,56 +34,101 @@ cd src-tauri && cargo test        # pruebas del backend
 cd src-tauri && cargo clippy      # linter de Rust
 ```
 
-## Compilar el instalador (Windows)
+## Publicar una versión
 
 **El instalador se construye en GitHub Actions, no en local.** El código de la
 impresora y el cajón usa la API de Windows y no compila desde macOS ni Linux
 (`ring`, dependencia del actualizador, necesita el SDK de Microsoft).
 
-Para publicar una versión:
+Desde la Mac, todo el proceso es un comando:
 
 ```bash
-git tag v0.2.0 && git push --tags
+pnpm publicar 0.2.0        # o: patch / minor / major
 ```
 
-Eso dispara `.github/workflows/release.yml`, que en un runner de Windows corre
-las pruebas, construye el `.msi`, lo firma si hay certificado, genera el
-manifiesto del actualizador y publica todo en GitHub Releases.
+Eso sube la versión en los tres archivos que la llevan, commitea, etiqueta y
+empuja. `release.yml` corre las pruebas en un runner de Windows, construye el
+instalador, lo firma y publica el release con su `latest.json`. Unos diez
+minutos. La tienda lo recibe sola (ver la sección siguiente).
+
+**No etiquetes a mano.** La versión vive en `package.json`, `tauri.conf.json` y
+`Cargo.toml`, y el actualizador compara la que trae horneada el binario contra la
+que anuncia el manifiesto. Si la etiqueta va por delante de los archivos, se
+publica una versión que la app cree más nueva que sí misma: instala, arranca, se
+cree vieja y se reinstala **en un bucle infinito**. El script los mueve juntos y
+el CI se niega a publicar si no coinciden, pero un `git tag` a secas se salta las
+dos protecciones.
 
 Cada push a `main` también compila y prueba en Windows (`ci.yml`), así que una
 regresión en el código específico de esa plataforma se detecta enseguida.
-
-Si tienes Windows a la mano, el equivalente local es:
-
-```bash
-pnpm tauri build
-```
 
 ### Secretos del repositorio
 
 | Secreto | Para qué | Sin él |
 |---|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | Firma del actualizador | El `.msi` sale sin `.sig` y el actualizador lo rechaza |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Contraseña de esa llave | Solo si la llave la tiene |
-| `WINDOWS_CERT_BASE64` | Certificado de firma en base64 | Windows advierte "editor desconocido" al instalar |
+| `TAURI_SIGNING_PRIVATE_KEY` | Firma del actualizador | El instalador sale sin `.sig` y la app rechaza la versión |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Contraseña de esa llave | El build falla al firmar |
+| `WINDOWS_CERT_BASE64` | Certificado de firma de código, en base64 | Windows advierte "editor desconocido" al instalar |
 | `WINDOWS_CERT_PASSWORD` | Contraseña del `.pfx` | — |
 
-El contenido de `TAURI_SIGNING_PRIVATE_KEY` es el archivo
-`~/.things-shop-updater.key`. La firma de código es opcional: sin ella el
-instalador funciona, pero SmartScreen muestra una advertencia en cada
-instalación. Un certificado estándar la reduce con el tiempo; uno EV la elimina
-desde el primer día.
+Los dos primeros ya están cargados. **La llave privada del actualizador es
+irreemplazable**: la pública queda horneada dentro de cada instalador, así que si
+se pierde la privada, las computadoras que ya tengan la app instalada no aceptan
+ninguna actualización más y hay que reinstalar a mano en cada una. Guárdala en un
+gestor de contraseñas y nunca en el repositorio, que es público.
+
+Las dos firmas son cosas distintas y es fácil confundirlas: la del actualizador
+(minisign) prueba que la versión salió de aquí y es gratis; la de código
+(certificado de Windows) es lo que evita la advertencia de SmartScreen y cuesta.
+Sin la segunda el sistema funciona, pero la primera instalación muestra "Windows
+protegió su PC" y hay que entrar en *Más información → Ejecutar de todas formas*.
 
 ## Actualizaciones automáticas
 
-Ya está todo conectado: `plugins.updater.endpoints` apunta al `latest.json` de
-la última release de GitHub, y el flujo de publicación lo genera con la firma
-correcta. Desde **Ajustes → Buscar actualizaciones** la tienda instala la
-versión nueva y la app se reinicia sola.
+La tienda está lejos y de allá nadie va a instalar nada: publicas desde la Mac y
+la aplicación se actualiza sola.
 
-La llave pública está en `src-tauri/tauri.conf.json`; **la privada vive fuera
-del repositorio** en `~/.things-shop-updater.key` y no debe versionarse ni
-perderse: sin ella no se pueden firmar versiones nuevas.
+Lo delicado no es bajar el instalador, es **cuándo** dejarlo correr: en Windows el
+instalador cierra la aplicación para poder reemplazarla, y reiniciar a media venta
+es lo único que no puede pasar. Por eso hay dos ventanas:
+
+| Cuándo | Qué hace |
+|---|---|
+| Al abrir la app, antes de que alguien entre | Instala sin preguntar. Nadie está vendiendo: es la ventana limpia, y la que atrapa casi todas las versiones porque la caja se abre todos los días. |
+| Cada 4 horas | Descarga en silencio y espera. Instala solo si el carrito está vacío **y** la caja está cerrada; mientras tanto muestra un aviso discreto en la barra. |
+
+**Ajustes → Buscar actualizaciones** sigue ahí para cuando quieras que la
+instalen en el momento.
+
+El instalador es **NSIS por usuario** (`installMode: currentUser`), y eso no es un
+detalle: el `.msi` de WiX se instala por máquina y pide permiso de Administrador
+en cada actualización — un UAC en la cara de la cajera, que además no puede
+aceptarlo si su cuenta de Windows no es administradora. NSIS por usuario instala
+en `%LOCALAPPDATA%` sin pedir nada, lo que además encaja con que la base de datos
+ya vive en `%APPDATA%`: la app ya era por usuario en sus datos.
+
+La contrapartida: si en esa computadora se usaran **varias cuentas de Windows**,
+cada una tendría su instalación y su propia base de datos. Con una sola cuenta
+—el caso de una tienda— no aplica.
+
+### Cómo saber a distancia si una versión llegó
+
+La app anota en la bitácora cuándo cambió de versión, comparando el binario
+contra la última versión que vio. Se detecta **después** de que la actualización
+ocurrió, que es lo único fiable: durante la instalación la aplicación muere, así
+que lo que se escribiera antes podría no guardarse.
+
+Ese renglón sale en **Ajustes → Reporte de diagnóstico**, el archivo que el
+encargado de la tienda puede mandar sin entender nada de lo que contiene.
+
+### Dos cosas de las que depende
+
+- **El repositorio tiene que seguir público.** Es lo que permite que el
+  actualizador lea el `latest.json` sin credenciales. Si se pone privado, el
+  endpoint devuelve 404 y las actualizaciones dejan de llegar **en silencio**.
+- **El actualizador solo avanza.** No sabe bajar de versión. Para deshacer un
+  cambio no se republica la anterior: se publica una **más alta** con la
+  corrección (`pnpm publicar patch`).
 
 ## Dónde viven los datos
 

@@ -1,14 +1,21 @@
 name: Release
 
 # Publica el instalador de Windows y el manifiesto que consume el actualizador.
-# Se dispara al empujar una etiqueta de versión: git tag v0.2.0 && git push --tags
+#
+# El disparo normal es una etiqueta de versión, que la crea `pnpm publicar`:
+#   pnpm publicar 0.2.0
+#
+# Ese script sube la versión en los tres archivos que la llevan, commitea y
+# etiqueta. La reja de abajo confirma que la etiqueta y `tauri.conf.json` dicen
+# lo mismo: si no coincidieran, la app instalaría una versión que se cree más
+# vieja que el manifiesto y se reinstalaría en un bucle infinito.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Versión a publicar (ej. 0.2.0)'
+        description: 'Versión a publicar (ej. 0.2.0). Debe coincidir con tauri.conf.json'
         required: true
 
 permissions:
@@ -19,6 +26,28 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ── La reja contra el bucle de actualización ──────────────────────────
+      #
+      # El actualizador compara la versión horneada en el binario contra la del
+      # manifiesto. Si la etiqueta va por delante de `tauri.conf.json`, publica
+      # un manifiesto que anuncia una versión que el instalador no trae: la app
+      # se instala, arranca, se cree vieja y se vuelve a instalar, para siempre.
+      # En una tienda a distancia eso es un ladrillo, así que no se publica.
+      - name: Comprobar que la versión cuadra
+        shell: pwsh
+        run: |
+          $etiqueta = "${{ github.event.inputs.version }}"
+          if (-not $etiqueta) { $etiqueta = "${{ github.ref_name }}".TrimStart('v') }
+          $config = (Get-Content src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri\Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $paquete = (Get-Content package.json -Raw | ConvertFrom-Json).version
+
+          Write-Host "etiqueta=$etiqueta  tauri.conf.json=$config  Cargo.toml=$cargo  package.json=$paquete"
+          if ($config -ne $etiqueta -or $cargo -ne $etiqueta -or $paquete -ne $etiqueta) {
+            throw "La versión no coincide en todos lados. Usa 'pnpm publicar $etiqueta' en vez de etiquetar a mano."
+          }
+          echo "VERSION=$etiqueta" >> $env:GITHUB_ENV
 
       - uses: pnpm/action-setup@v4
         with:
@@ -35,13 +64,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # Verificación previa: no se publica un instalador que no pase pruebas.
+      # Lo que llega aquí se instala solo en la tienda, sin que nadie lo revise.
       - name: Pruebas
         run: |
           pnpm test
           cargo test --manifest-path src-tauri/Cargo.toml
 
-      # El certificado es opcional: sin él el instalador sale sin firmar y
-      # Windows muestra la advertencia de editor desconocido, pero funciona.
+      - name: Construir instalador
+        env:
+          # Firma del actualizador: sin esto el instalador no lleva .sig y la app
+          # rechaza la versión por no poder comprobar de dónde viene.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      # El certificado de Windows es opcional y es otra cosa que la firma del
+      # actualizador: sirve para que SmartScreen no muestre "editor desconocido".
       - name: Preparar certificado de firma
         if: env.WINDOWS_CERT_BASE64 != ''
         env:
@@ -52,51 +90,52 @@ jobs:
             [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
           echo "WINDOWS_CERTIFICATE_PATH=$env:RUNNER_TEMP\cert.pfx" >> $env:GITHUB_ENV
 
-      - name: Construir instalador
-        env:
-          # Firma del actualizador: sin esto el .msi no lleva .sig y el
-          # actualizador rechazará la versión.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build
-
-      - name: Firmar el instalador
+      # Firmar cambia los bytes del instalador, así que la firma del actualizador
+      # que `tauri build` acabó de calcular deja de cuadrar y la app rechazaría la
+      # actualización. Hay que volver a firmarla DESPUÉS de signtool, no antes.
+      - name: Firmar el instalador y rehacer su firma
         if: env.WINDOWS_CERTIFICATE_PATH != ''
         env:
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: pwsh
         run: |
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1
-          Get-ChildItem src-tauri\target\release\bundle\msi\*.msi | ForEach-Object {
+          Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | ForEach-Object {
             & $signtool.FullName sign /fd SHA256 /f $env:WINDOWS_CERTIFICATE_PATH `
               /p $env:CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "signtool falló" }
+            pnpm tauri signer sign $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "no se pudo rehacer la firma del actualizador" }
           }
 
       - name: Generar manifiesto del actualizador
         shell: pwsh
         run: |
-          $version = "${{ github.event.inputs.version }}"
-          if (-not $version) { $version = "${{ github.ref_name }}".TrimStart('v') }
+          $exe = Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw "No se encontró el instalador de NSIS" }
 
-          $msi = Get-ChildItem src-tauri\target\release\bundle\msi\*.msi | Select-Object -First 1
-          $sig = Get-Content "$($msi.FullName).sig" -Raw -ErrorAction SilentlyContinue
+          $sig = Get-Content "$($exe.FullName).sig" -Raw -ErrorAction SilentlyContinue
           if (-not $sig) { throw "Falta el .sig: revisa el secreto TAURI_SIGNING_PRIVATE_KEY" }
 
-          $url = "https://github.com/${{ github.repository }}/releases/download/v$version/$($msi.Name)"
+          $url = "https://github.com/${{ github.repository }}/releases/download/v$env:VERSION/$($exe.Name)"
           $manifest = @{
-            version   = $version
+            version   = $env:VERSION
             notes     = "Consulta las notas de la versión en GitHub Releases."
             pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             platforms = @{ "windows-x86_64" = @{ signature = $sig.Trim(); url = $url } }
           }
           $manifest | ConvertTo-Json -Depth 5 | Set-Content latest.json -Encoding utf8
+          Get-Content latest.json
 
       - name: Publicar release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
           files: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/msi/*.msi.sig
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
             latest.json
           generate_release_notes: true
