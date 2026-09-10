@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
+import { getVersion } from '@tauri-apps/api/app';
+import { useActualizacionStore, motivoDeEspera } from '../stores/useActualizacionStore';
 import { relaunch } from '@tauri-apps/plugin-process';
 import * as api from '../api';
 import CaptureSettings from '../components/CaptureSettings';
@@ -48,6 +50,15 @@ export default function SettingsPage() {
     const [logPath, setLogPath] = useState('');
     const [exporting, setExporting] = useState(false);
     const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+    // Qué versión corre este equipo y qué hizo el actualizador la última vez.
+    // Sin esto, "no se actualizó" era imposible de depurar a distancia: no llegar,
+    // llegar y quedarse esperando, y fallar al descargar se veían las tres igual.
+    const [versionApp, setVersionApp] = useState('');
+    const ultimaRevision = useActualizacionStore(s => s.ultimaRevision);
+    const faseActualizacion = useActualizacionStore(s => s.fase);
+    const versionDisponible = useActualizacionStore(s => s.version);
+    useEffect(() => { getVersion().then(setVersionApp).catch(() => setVersionApp('—')); }, []);
     const [pwCurrent, setPwCurrent] = useState('');
     const [pwNext, setPwNext] = useState('');
     const [pwSaving, setPwSaving] = useState(false);
@@ -359,6 +370,24 @@ export default function SettingsPage() {
                     <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
                         Si algo falla, este es el archivo que hay que enviar a soporte.
                     </p>
+                    <div style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                        gap: 12, padding: '10px 12px', marginBottom: 14, borderRadius: 10,
+                        background: 'rgba(255,255,255,0.04)',
+                    }}>
+                        <span style={{ fontSize: 12, color: 'var(--t3)', fontWeight: 600 }}>Versión instalada</span>
+                        <span style={{ fontSize: 13, color: 'var(--t1)', fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                            {versionApp || '—'}
+                        </span>
+                    </div>
+                    <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
+                        {faseActualizacion === 'descargando'
+                            ? `Descargando la versión ${versionDisponible}…`
+                            : faseActualizacion === 'lista'
+                                ? `Versión ${versionDisponible} lista. ${motivoDeEspera() ?? 'Se instala en un momento.'}`
+                                : ultimaRevision ?? 'Todavía no se ha buscado ninguna actualización.'}
+                    </p>
+
                     <label className="form-label">Bitácora de la aplicación</label>
                     <input readOnly value={logPath || '—'} className="input" style={{ fontFamily: 'monospace', fontSize: 11, marginBottom: 14 }}
                         onFocus={e => e.currentTarget.select()} />

@@ -3,6 +3,7 @@ import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { useCartStore } from './useCartStore';
 import { useSessionStore } from './useSessionStore';
+import * as api from '../api';
 
 /**
  * Actualizaciones automáticas.
@@ -31,7 +32,24 @@ const TIMEOUT_MS = 15_000;
 /** Cada cuánto se vuelve a mirar si hay algo nuevo. */
 export const INTERVALO_MS = 4 * 60 * 60 * 1000;
 
+/** Cuándo arrancó esta ejecución de la aplicación. */
+const ARRANQUE = Date.now();
+
+/**
+ * Cuánto dura la ventana de arranque.
+ *
+ * Tiene que aguantar lo que tarda buscar y descargar el instalador —unos cuatro
+ * megas por el WiFi de una tienda—, o la ventana se cierra antes de que haya
+ * algo que instalar.
+ */
+const VENTANA_ARRANQUE_MS = 3 * 60 * 1000;
+
 export type Fase = 'inactivo' | 'buscando' | 'descargando' | 'lista' | 'instalando';
+
+/** Deja el rastro en la bitácora sin dejar que un fallo ahí rompa nada. */
+function anotar(mensaje: string) {
+    api.registrarEventoActualizacion(mensaje).catch(() => { /* la bitácora no manda */ });
+}
 
 interface ActualizacionStore {
     fase: Fase;
@@ -41,6 +59,8 @@ interface ActualizacionStore {
     progreso: number;
     /** Último fallo, solo para poder decirlo si alguien pregunta. */
     error: string | null;
+    /** Qué pasó la última vez que se buscó, en palabras, para Ajustes. */
+    ultimaRevision: string | null;
 
     /** Busca y, si hay algo, la deja descargada y lista. */
     buscar: () => Promise<boolean>;
@@ -52,19 +72,40 @@ interface ActualizacionStore {
 let pendiente: Update | null = null;
 
 /**
- * Si este es un momento en el que se puede reiniciar la aplicación.
+ * Por qué no se puede instalar ahora, o null si sí se puede.
  *
- * Un carrito con algo dentro es una venta a medias. Una caja abierta es un turno
- * en curso: reiniciar no perdería datos —el corte vive en la base— pero deja al
- * mostrador mirando una pantalla que se fue, y eso frente a un cliente no.
+ * Devuelve el motivo en vez de un sí o no para poder decirlo en Ajustes: una
+ * actualización que se queda esperando sin explicar por qué es indistinguible de
+ * una que no llegó, y eso a distancia no se puede depurar.
  */
-export function esMomentoSeguro(): boolean {
-    const { items } = useCartStore.getState();
+export function motivoDeEspera(): string | null {
+    // Un carrito con algo dentro es una venta a medias, siempre y en todo caso.
+    if (useCartStore.getState().items.length > 0) {
+        return 'Hay un ticket a medias';
+    }
+
+    // Recién arrancada nadie está a media operación, aunque haya sesión y turno.
+    //
+    // Antes esta ventana pedía además que no hubiera caja abierta, y era un error
+    // de bulto: la sesión y el turno sobreviven a cerrar la aplicación, así que al
+    // reabrirla el usuario ya está dentro y la caja sigue abierta. La condición
+    // "nadie ha entrado todavía" no se cumplía nunca. Una tienda que deja la caja
+    // abierta de la mañana a la noche —o sea, cualquier tienda— no se actualizaba
+    // jamás: la versión se descargaba y se quedaba esperando un momento que no
+    // llegaba, en silencio.
+    if (Date.now() - ARRANQUE < VENTANA_ARRANQUE_MS) return null;
+
     const { cashRegisterId, user } = useSessionStore.getState();
-    if (items.length > 0) return false;
-    // Nadie dentro: la ventana más limpia que hay.
-    if (!user) return true;
-    return cashRegisterId === null;
+    if (!user) return null;
+    if (cashRegisterId !== null) {
+        return 'Hay un turno abierto; se instala al cerrar la caja';
+    }
+    return null;
+}
+
+/** Si este es un momento en el que se puede reiniciar la aplicación. */
+export function esMomentoSeguro(): boolean {
+    return motivoDeEspera() === null;
 }
 
 export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
@@ -72,6 +113,7 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
     version: null,
     progreso: 0,
     error: null,
+    ultimaRevision: null,
 
     buscar: async () => {
         // Ya hay una lista o una en curso: no se pisa.
@@ -83,15 +125,21 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
             update = await check({ timeout: TIMEOUT_MS });
         } catch (err) {
             // Sin internet, GitHub caído, o todavía no hay ningún release: el
-            // endpoint contesta 404 y esto lanza. Ninguno es motivo de alarma.
-            set({ fase: 'inactivo', error: String(err) });
+            // endpoint contesta 404 y esto lanza. Ninguno es motivo de alarma,
+            // pero sí queda anotado: desde lejos, "no llegó" y "no se pudo
+            // buscar" se ven igual y hay que poder distinguirlos.
+            const motivo = `No se pudo buscar actualizaciones: ${err}`;
+            set({ fase: 'inactivo', error: String(err), ultimaRevision: motivo });
+            anotar(motivo);
             return false;
         }
 
         if (!update) {
-            set({ fase: 'inactivo', version: null });
+            set({ fase: 'inactivo', version: null, ultimaRevision: 'Ya tiene la versión más reciente' });
             return false;
         }
+
+        anotar(`Encontrada la versión ${update.version}; descargando`);
 
         set({ fase: 'descargando', version: update.version, progreso: 0 });
         try {
@@ -111,18 +159,30 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
         } catch (err) {
             // Se descarta el handle: reintentar con uno a medias no funciona.
             pendiente = null;
-            set({ fase: 'inactivo', error: String(err), progreso: 0 });
+            const motivo = `No se pudo descargar la versión ${update.version}: ${err}`;
+            set({ fase: 'inactivo', error: String(err), progreso: 0, ultimaRevision: motivo });
+            anotar(motivo);
             return false;
         }
 
         pendiente = update;
-        set({ fase: 'lista' });
+        const espera = motivoDeEspera();
+        set({
+            fase: 'lista',
+            ultimaRevision: espera
+                ? `Versión ${update.version} lista, esperando: ${espera.toLowerCase()}`
+                : `Versión ${update.version} lista para instalar`,
+        });
+        anotar(espera
+            ? `Versión ${update.version} descargada; esperando porque ${espera.toLowerCase()}`
+            : `Versión ${update.version} descargada; instalando`);
         return true;
     },
 
     instalar: async () => {
         if (!pendiente || get().fase !== 'lista') return;
         set({ fase: 'instalando' });
+        anotar(`Instalando la versión ${get().version}`);
         try {
             await pendiente.install();
             // En Windows el instalador cierra la aplicación por su cuenta, así
@@ -130,7 +190,9 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
             // no lo hace, sin esto la app se quedaría cerrada.
             await relaunch();
         } catch (err) {
-            set({ fase: 'lista', error: String(err) });
+            const motivo = `Falló la instalación: ${err}`;
+            set({ fase: 'lista', error: String(err), ultimaRevision: motivo });
+            anotar(motivo);
         }
     },
 }));

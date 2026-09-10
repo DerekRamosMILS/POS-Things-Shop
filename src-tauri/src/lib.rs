@@ -226,6 +226,7 @@ pub fn run() {
             config::get_all_config,
             config::get_config,
             config::set_config,
+            config::registrar_evento_actualizacion,
             // Notifications
             notifications::get_notifications,
             notifications::mark_notification_read,

@@ -385,6 +385,9 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_log_path':
             return '(no disponible en modo web)' as unknown as T;
 
+        case 'registrar_evento_actualizacion':
+            return undefined as unknown as T;
+
         case 'logout':
             return undefined as unknown as T;
 
@@ -600,6 +603,8 @@ export const seedDemoData = () => invoke<string>('seed_demo_data');
 export const getAllConfig = () => invoke<SystemConfig[]>('get_all_config');
 export const getConfig = (key: string) => invoke<string>('get_config', { key });
 export const setConfig = (key: string, value: string) => invoke<void>('set_config', { key, value });
+export const registrarEventoActualizacion = (mensaje: string) =>
+    invoke<void>('registrar_evento_actualizacion', { mensaje });
 
 // Notifications
 export const getNotifications = () => invoke<Notification[]>('get_notifications');

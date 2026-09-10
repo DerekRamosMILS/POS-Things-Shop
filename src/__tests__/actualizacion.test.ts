@@ -5,12 +5,13 @@
  * decisión es lo único que separa "se actualiza solo" de "se cerró a media
  * venta". Es la pieza que hay que tener amarrada.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@tauri-apps/plugin-updater', () => ({ check: vi.fn() }));
 vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }));
+vi.mock('../api', () => ({ registrarEventoActualizacion: vi.fn(async () => {}) }));
 
-import { esMomentoSeguro } from '../stores/useActualizacionStore';
+import { esMomentoSeguro, motivoDeEspera } from '../stores/useActualizacionStore';
 import { useCartStore } from '../stores/useCartStore';
 import { useSessionStore } from '../stores/useSessionStore';
 import type { Product, User } from '../types';
@@ -30,9 +31,12 @@ const cajera = (): User => ({
 
 describe('el momento de instalar', () => {
     beforeEach(() => {
+        vi.useFakeTimers({ shouldAdvanceTime: true });
         useCartStore.getState().clear();
         useSessionStore.setState({ user: null, token: null, cashRegisterId: null });
     });
+
+    afterEach(() => { vi.useRealTimers(); });
 
     it('con nadie dentro es el mejor momento', () => {
         // La ventana limpia: la app acaba de abrir y nadie ha entrado.
@@ -54,15 +58,49 @@ describe('el momento de instalar', () => {
         expect(esMomentoSeguro()).toBe(false);
     });
 
-    it('no en medio de un turno abierto', () => {
-        // El corte no se pierde —vive en la base— pero reiniciar deja al
-        // mostrador mirando una pantalla que se fue, y eso frente a un cliente no.
+    it('recién arrancada instala aunque el turno siga abierto', () => {
+        // EL BUG QUE SE REPORTÓ. La sesión y el turno sobreviven a cerrar la
+        // aplicación: al reabrirla el usuario ya está dentro y la caja sigue
+        // abierta. Pedir "que no haya turno abierto" en el arranque era pedir algo
+        // que no pasa nunca en una tienda que deja la caja abierta todo el día, y
+        // la actualización se quedaba esperando un momento que no llegaba.
         useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
 
+        expect(motivoDeEspera()).toBeNull();
+        expect(esMomentoSeguro()).toBe(true);
+    });
+
+    it('pasada la ventana de arranque sí respeta el turno abierto', () => {
+        // Ya en plena jornada, con gente trabajando, se vuelve conservador.
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+
+        expect(motivoDeEspera()).toContain('turno abierto');
         expect(esMomentoSeguro()).toBe(false);
     });
 
+    it('un ticket a medias manda incluso recién arrancada', () => {
+        // Lo único que nunca se puede interrumpir.
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
+        useCartStore.getState().addItem(producto());
+
+        expect(motivoDeEspera()).toContain('ticket a medias');
+        expect(esMomentoSeguro()).toBe(false);
+    });
+
+    it('el motivo se puede leer, para poder decirlo en Ajustes', () => {
+        // Una actualización que espera sin explicar por qué es indistinguible de
+        // una que no llegó, y eso a distancia no se depura.
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
+        expect(motivoDeEspera()).toBe('Hay un turno abierto; se instala al cerrar la caja');
+
+        useCartStore.getState().addItem(producto());
+        expect(motivoDeEspera()).toBe('Hay un ticket a medias');
+    });
+
     it('sí en cuanto se cierra la caja', () => {
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000);
         useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
         expect(esMomentoSeguro()).toBe(false);
 
@@ -71,9 +109,10 @@ describe('el momento de instalar', () => {
         expect(esMomentoSeguro()).toBe(true);
     });
 
-    it('vaciar el ticket sin cerrar la caja no alcanza', () => {
+    it('en plena jornada, vaciar el ticket sin cerrar la caja no alcanza', () => {
         // Justo después de cobrar el carrito queda vacío, pero el turno sigue
         // abierto y va a llegar la siguiente clienta. No es el momento.
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000);
         useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: 7 });
         useCartStore.getState().addItem(producto());
         useCartStore.getState().clear();

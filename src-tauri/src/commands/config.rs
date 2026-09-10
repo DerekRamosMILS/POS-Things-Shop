@@ -53,6 +53,34 @@ pub fn set_config(state: State<DbState>, sessions: State<SessionState>, token: S
     Ok(())
 }
 
+/// Deja un renglón en la bitácora sobre lo que hizo el actualizador.
+///
+/// Sin esto, una actualización que no llega es indistinguible de una que llegó y
+/// se quedó esperando, y de una que falló al descargar. Las tres se ven igual
+/// desde lejos: nada. Con la tienda a 2000 km y sin nadie técnico enfrente, eso
+/// convierte cualquier problema en una conversación de horas.
+///
+/// Sale en el reporte de diagnóstico junto al resto de la bitácora.
+#[tauri::command]
+pub fn registrar_evento_actualizacion(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    mensaje: String,
+) -> Result<(), String> {
+    let user_id = require_auth(&sessions, &token)?;
+    let db = state.conn();
+
+    // Se recorta: el mensaje puede traer el error del sistema, que a veces es una
+    // página entera, y la bitácora tiene que seguir siendo legible.
+    let mensaje: String = mensaje.chars().take(400).collect();
+    db.execute(
+        "INSERT INTO app_logs (level, module, message, user_id) VALUES ('info', 'actualizacion', ?1, ?2)",
+        params![mensaje, user_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Clave donde se recuerda con qué versión se abrió la aplicación la última vez.
 const CLAVE_VERSION: &str = "version_instalada";
 
@@ -127,6 +155,13 @@ mod tests {
             params![CLAVE_VERSION],
             |r| r.get(0),
         ).ok()
+    }
+
+    #[test]
+    fn un_mensaje_larguisimo_no_hace_ilegible_la_bitacora() {
+        // El error del sistema a veces es una página entera.
+        let recortado: String = "x".repeat(5000).chars().take(400).collect();
+        assert_eq!(recortado.chars().count(), 400);
     }
 
     #[test]
