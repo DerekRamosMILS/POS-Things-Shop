@@ -21,7 +21,7 @@ const ICONO_180: &[u8] = include_bytes!("iconos/icono-180.png");
 
 /// Sube cuando cambia la página. El service worker viejo se da cuenta, guarda
 /// la nueva y la sirve al siguiente arranque.
-const VERSION: &str = "3";
+const VERSION: &str = "4";
 
 const MANIFIESTO: &str = r##"{
   "name": "Capturar productos - Things Shop",
@@ -44,12 +44,27 @@ fn service_worker() -> String {
 const CACHE = 'things-shop-captura-v{version}';
 const CONCHA = '/';
 
+// Lo que se guarda de entrada. La página es lo único imprescindible; el resto
+// hace que la aplicación instalada se vea bien sin conexión.
+const TESOROS = ['/', '/manifest.webmanifest', '/icono-192.png', '/icono-512.png'];
+
 self.addEventListener('install', (e) => {{
-  // Se guarda la página en cuanto se instala, sin esperar a nada: si el teléfono
-  // se sale del WiFi en el siguiente minuto, ya está a salvo.
-  e.waitUntil(
-    caches.open(CACHE).then((c) => c.add(CONCHA)).then(() => self.skipWaiting())
-  );
+  // Se guarda en cuanto se instala, sin esperar a nada: si el teléfono se sale
+  // del WiFi en el siguiente minuto, ya está a salvo.
+  //
+  // Cada uno por separado y sin rendirse. Con un solo `addAll`, que fallara la
+  // descarga de un icono hacía fracasar la instalación entera: el service worker
+  // no llegaba a activarse y el teléfono se quedaba sin **nada** guardado, que es
+  // justo el escenario que esto existe para evitar. Si la página no se pudo
+  // guardar ahora, el manejador de abajo la guarda en la primera visita que
+  // funcione.
+  e.waitUntil((async () => {{
+    const c = await caches.open(CACHE);
+    await Promise.all(TESOROS.map((ruta) => c.add(ruta).catch((err) => {{
+      console.warn('No se pudo guardar', ruta, err);
+    }})));
+    await self.skipWaiting();
+  }})());
 }});
 
 self.addEventListener('activate', (e) => {{
@@ -144,6 +159,32 @@ mod tests {
         let sw = service_worker();
         assert!(sw.contains("url.pathname.startsWith('/api/')"));
         assert!(sw.contains("return;"));
+    }
+
+    #[test]
+    fn guardar_un_icono_a_medias_no_tumba_la_instalacion() {
+        // Con un `addAll`, que fallara un icono hacía fracasar la instalación
+        // completa y el teléfono se quedaba sin nada guardado —el escenario
+        // exacto que el guardado existe para evitar.
+        let sw = service_worker();
+        assert!(sw.contains(".catch("), "cada recurso tiene que poder fallar solo");
+        assert!(!sw.contains(".addAll("), "addAll es todo o nada");
+        assert!(sw.contains("skipWaiting"), "tiene que activarse igual");
+    }
+
+    #[test]
+    fn se_guarda_la_pagina_y_lo_que_la_hace_verse_bien() {
+        let sw = service_worker();
+        for ruta in ["'/'", "/manifest.webmanifest", "/icono-192.png", "/icono-512.png"] {
+            assert!(sw.contains(ruta), "falta {} en lo que se guarda", ruta);
+        }
+    }
+
+    #[test]
+    fn subir_la_version_cambia_el_nombre_del_guardado() {
+        // Es lo que hace que el service worker viejo suelte lo que tenía.
+        let sw = service_worker();
+        assert!(sw.contains(&format!("things-shop-captura-v{}", VERSION)));
     }
 
     #[test]

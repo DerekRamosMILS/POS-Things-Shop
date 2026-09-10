@@ -122,7 +122,9 @@ const HTML: &str = r####"
 <div class="card listo">
   <h2><span class="n">3</span> Listo</h2>
   <a class="boton" id="abrir" href="https://{{IP}}:7423/">Abrir la captura</a>
-  <p class="hint">Guárdala en la pantalla de inicio y ábrela desde ahí: así funciona aunque la computadora esté apagada.</p>
+  <p class="hint"><b>Esta página ya no la necesitas.</b> Toca el botón: la captura se
+     abre y ahí mismo te ofrece instalarla en la pantalla de inicio. Guarda <b>esa</b>,
+     que es la que funciona con la computadora apagada — esta de aquí no.</p>
 </div>
 
 <script>
@@ -167,6 +169,17 @@ mod tests {
         let html = pagina("192.168.0.55");
         assert!(html.contains("location.search).get('c')"));
         assert!(html.contains("'https://192.168.0.55:7423/?c=' + encodeURIComponent(c)"));
+    }
+
+    #[test]
+    fn no_invita_a_guardar_esta_pagina_sino_la_otra() {
+        // Guardar esta página en la pantalla de inicio no sirve de nada: va sin
+        // cifrar, no tiene service worker y con la computadora apagada no abre.
+        // El "guárdala" de antes se leía como si hablara de esta, que es la que
+        // se tiene enfrente al leerlo.
+        let html = pagina("192.168.0.55");
+        assert!(html.contains("Esta página ya no la necesitas"));
+        assert!(html.contains("esta de aquí no"));
     }
 
     #[test]

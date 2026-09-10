@@ -143,6 +143,14 @@ pub const HTML: &str = r####"
 
 <div id="aviso"></div>
 
+<div class="card" id="tarjetaSinConexion" style="display:none">
+  <p id="estadoSinConexion" style="margin:0; font-size:14px"></p>
+  <p class="hint" id="detalleSinConexion" style="margin-top:8px"></p>
+  <button type="button" class="sec" id="instalarApp" style="margin-top:12px; display:none">
+    Instalar en la pantalla de inicio
+  </button>
+</div>
+
 <div class="pend" id="pendientes" style="display:none">
   <p id="pendientesTexto"></p>
   <button type="button" class="sec" id="sincronizar">Mandar ahora</button>
@@ -986,13 +994,114 @@ pub const HTML: &str = r####"
   // un producto para descubrirlo al guardar.
   $('limpiarTodo').addEventListener('click', function () { limpiar(false); });
 
-  // Guarda la aplicación en el teléfono. Es lo que la deja abrir con la
-  // computadora apagada; si el navegador no lo permite, todo lo demás sigue
-  // funcionando mientras haya conexión.
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(function (e) {
-      console.warn('Sin guardado sin conexión:', e);
+  // ── Guardado para trabajar sin la computadora ─────────────────────────────
+  //
+  // Esta es la parte que sostiene la promesa de "captura aunque la caja esté
+  // apagada", y la que más callada fallaba: el error del registro se iba a la
+  // consola, que en un teléfono no ve nadie. La encargada instalaba todo, se
+  // llevaba el teléfono, y descubría que no servía cuando ya no había forma de
+  // arreglarlo. Ahora lo dice aquí, mientras todavía se está a tiempo.
+
+  var errorDelGuardado = '';
+
+  /** Si la página quedó guardada, mirando en todos los almacenes que haya. */
+  function paginaGuardada() {
+    if (!('caches' in window)) return Promise.resolve(false);
+    return caches.keys().then(function (claves) {
+      return claves.reduce(function (antes, clave) {
+        return antes.then(function (hallada) {
+          if (hallada) return true;
+          return caches.open(clave)
+            .then(function (c) { return c.match('/', { ignoreSearch: true }); })
+            .then(function (r) { return Boolean(r); })
+            .catch(function () { return false; });
+        });
+      }, Promise.resolve(false));
+    }).catch(function () { return false; });
+  }
+
+  /** Si se está corriendo como aplicación instalada y no como pestaña. */
+  function esAplicacionInstalada() {
+    return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+        || window.navigator.standalone === true;
+  }
+
+  function pintarEstadoSinConexion() {
+    var caja = $('tarjetaSinConexion');
+    var titulo = $('estadoSinConexion');
+    var detalle = $('detalleSinConexion');
+    caja.style.display = 'block';
+
+    if (!('serviceWorker' in navigator)) {
+      titulo.innerHTML = '<b style="color:var(--bad)">No va a funcionar sin la computadora</b>';
+      detalle.textContent = 'Este navegador no puede guardar la página. Ábrela con Chrome.';
+      return;
+    }
+
+    paginaGuardada().then(function (guardada) {
+      var instalada = esAplicacionInstalada();
+
+      if (guardada) {
+        titulo.innerHTML = '<b style="color:var(--ok)">✓ Lista para trabajar sin la computadora</b>';
+        detalle.textContent = instalada
+          ? 'Estás usando la aplicación instalada. Puedes capturar con la caja apagada.'
+          : 'La página ya está guardada. Instálala en la pantalla de inicio y ábrela desde ahí.';
+        // Ya guardada pero todavía en el navegador: falta el último paso.
+        $('instalarApp').style.display = (!instalada && promesaDeInstalar) ? 'block' : 'none';
+        return;
+      }
+
+      titulo.innerHTML = '<b style="color:var(--bad)">Todavía NO funciona sin la computadora</b>';
+      detalle.textContent = errorDelGuardado
+        ? 'La página no se pudo guardar: ' + errorDelGuardado
+        : 'La página aún no se termina de guardar. Espera unos segundos con la caja '
+          + 'encendida y vuelve a entrar; si sigue así, avísale a quien te lo instaló.';
+      $('instalarApp').style.display = 'none';
     });
+  }
+
+  // Chrome avisa cuando la aplicación se puede instalar de verdad. Guardar la
+  // invitación permite ofrecer el botón en el momento correcto, en vez de pedirle
+  // a la gente que encuentre "Instalar" en el menú de tres puntos.
+  var promesaDeInstalar = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    promesaDeInstalar = e;
+    pintarEstadoSinConexion();
+  });
+  window.addEventListener('appinstalled', function () {
+    promesaDeInstalar = null;
+    pintarEstadoSinConexion();
+  });
+
+  $('instalarApp').addEventListener('click', function () {
+    if (!promesaDeInstalar) return;
+    promesaDeInstalar.prompt();
+    promesaDeInstalar.userChoice.finally(function () {
+      promesaDeInstalar = null;
+      pintarEstadoSinConexion();
+    });
+  });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js')
+      .then(function (reg) {
+        // El guardado tarda un momento en quedar hecho; se vuelve a mirar cuando
+        // el service worker termina de instalarse, no solo al registrarse.
+        if (reg.installing) {
+          reg.installing.addEventListener('statechange', pintarEstadoSinConexion);
+        }
+        return navigator.serviceWorker.ready;
+      })
+      .then(pintarEstadoSinConexion)
+      .catch(function (e) {
+        errorDelGuardado = String((e && e.message) || e);
+        console.warn('Sin guardado sin conexión:', e);
+        pintarEstadoSinConexion();
+      });
+    pintarEstadoSinConexion();
+  } else {
+    pintarEstadoSinConexion();
   }
 
   fetch('/api/verificar', { headers: { 'X-Codigo': codigo } })
