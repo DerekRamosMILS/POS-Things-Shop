@@ -74,6 +74,47 @@ const titulo = (doc: Document) => doc.getElementById('estadoSinConexion')!.textC
 const detalle = (doc: Document) => doc.getElementById('detalleSinConexion')!.textContent || '';
 const visible = (doc: Document) => doc.getElementById('tarjetaSinConexion')!.style.display !== 'none';
 
+describe('la salida de emergencia', () => {
+    it('borra el service worker y todo lo guardado', async () => {
+        // Un guardado a medias se sirve una y otra vez, y desde la aplicación
+        // instalada no hay barra de direcciones ni menú para borrar datos del
+        // sitio. Sin este botón, la única salida es desinstalar.
+        const desregistrado: boolean[] = [];
+        const borrados: string[] = [];
+
+        const dom = new JSDOM(HTML, {
+            runScripts: 'dangerously',
+            url: 'https://192.168.0.10:7423/?c=123456',
+            beforeParse(win) {
+                const w = win as unknown as Record<string, unknown>;
+                w.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }));
+                w.indexedDB = undefined;
+                w.caches = {
+                    keys: async () => ['things-shop-captura-v4', 'viejo'],
+                    open: async () => ({ match: async () => undefined }),
+                    delete: async (k: string) => { borrados.push(k); return true; },
+                };
+                (win.navigator as unknown as Record<string, unknown>).serviceWorker = {
+                    register: async () => ({ installing: null }),
+                    ready: Promise.resolve({}),
+                    getRegistrations: async () => [
+                        { unregister: async () => { desregistrado.push(true); return true; } },
+                    ],
+                };
+            },
+        });
+
+        const doc = dom.window.document;
+        await reposar();
+        doc.getElementById('repararGuardado')!
+            .dispatchEvent(new dom.window.Event('click'));
+
+        await esperarA(() => borrados.length === 2, 'que borrara los dos almacenes');
+        expect(desregistrado).toHaveLength(1);
+        expect(borrados).toEqual(['things-shop-captura-v4', 'viejo']);
+    });
+});
+
 describe('el aviso de "funciona sin la computadora"', () => {
     it('dice que sí cuando la página ya quedó guardada', async () => {
         const { doc } = await abrir({ yaGuardada: true });

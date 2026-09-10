@@ -149,6 +149,9 @@ pub const HTML: &str = r####"
   <button type="button" class="sec" id="instalarApp" style="margin-top:12px; display:none">
     Instalar en la pantalla de inicio
   </button>
+  <button type="button" class="sec" id="repararGuardado" style="margin-top:8px">
+    Borrar lo guardado y empezar de cero
+  </button>
 </div>
 
 <div class="pend" id="pendientes" style="display:none">
@@ -1072,6 +1075,35 @@ pub const HTML: &str = r####"
   window.addEventListener('appinstalled', function () {
     promesaDeInstalar = null;
     pintarEstadoSinConexion();
+  });
+
+  // Salida de emergencia.
+  //
+  // Un guardado que quedó a medias —o de una versión con un error— se sirve al
+  // teléfono una y otra vez, y desde ahí no hay forma de salir: la aplicación
+  // instalada no tiene barra de direcciones ni menú donde borrar datos del sitio.
+  // Esto es lo único que hace falta, y funciona siempre que la caja esté
+  // encendida, porque con red la página se pide fresca antes que la guardada.
+  $('repararGuardado').addEventListener('click', async function () {
+    var boton = $('repararGuardado');
+    boton.disabled = true;
+    boton.textContent = 'Borrando...';
+    try {
+      if ('serviceWorker' in navigator) {
+        var registros = await navigator.serviceWorker.getRegistrations();
+        for (var i = 0; i < registros.length; i++) await registros[i].unregister();
+      }
+      if ('caches' in window) {
+        var claves = await caches.keys();
+        for (var j = 0; j < claves.length; j++) await caches.delete(claves[j]);
+      }
+      aviso('Listo. Se va a recargar para guardarla de nuevo.', 'ok');
+      setTimeout(function () { location.reload(); }, 900);
+    } catch (e) {
+      boton.disabled = false;
+      boton.textContent = 'Borrar lo guardado y empezar de cero';
+      aviso('No se pudo borrar: ' + ((e && e.message) || e), 'bad');
+    }
   });
 
   $('instalarApp').addEventListener('click', function () {
