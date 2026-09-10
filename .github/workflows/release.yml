@@ -78,6 +78,29 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build
 
+      # `productName` lleva espacios, así que el instalador sale como
+      # "Things Shop POS_0.2.1_x64-setup.exe" — y GitHub, al publicarlo, cambia
+      # los espacios por puntos. El manifiesto quedaba apuntando al nombre local,
+      # a una URL que no existe, y la actualización fallaba callada.
+      #
+      # Se renombra aquí, antes de firmar y de armar el manifiesto, para que no
+      # haya que adivinar cómo normaliza GitHub: el nombre ya no tiene nada que
+      # normalizar. La firma es sobre el contenido, así que renombrar no la afecta.
+      - name: Renombrar el instalador a un nombre sin espacios
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw "No se encontró el instalador de NSIS" }
+
+          $nombre = "things-shop-pos_${env:VERSION}_x64-setup.exe"
+          $destino = Join-Path $exe.Directory $nombre
+          Move-Item $exe.FullName $destino -Force
+          if (Test-Path "$($exe.FullName).sig") {
+            Move-Item "$($exe.FullName).sig" "$destino.sig" -Force
+          }
+          Write-Host "$($exe.Name) -> $nombre"
+          echo "INSTALADOR=$nombre" >> $env:GITHUB_ENV
+
       # El certificado de Windows es opcional y es otra cosa que la firma del
       # actualizador: sirve para que SmartScreen no muestre "editor desconocido".
       - name: Preparar certificado de firma
@@ -103,24 +126,30 @@ jobs:
         run: |
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1
-          Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | ForEach-Object {
-            & $signtool.FullName sign /fd SHA256 /f $env:WINDOWS_CERTIFICATE_PATH `
-              /p $env:CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_.FullName
-            if ($LASTEXITCODE -ne 0) { throw "signtool falló" }
-            pnpm tauri signer sign $_.FullName
-            if ($LASTEXITCODE -ne 0) { throw "no se pudo rehacer la firma del actualizador" }
-          }
+          $exe = Join-Path "src-tauri\target\release\bundle\nsis" $env:INSTALADOR
+          & $signtool.FullName sign /fd SHA256 /f $env:WINDOWS_CERTIFICATE_PATH `
+            /p $env:CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool falló" }
+          # Firmar cambió los bytes: la firma del actualizador hay que rehacerla.
+          pnpm tauri signer sign $exe
+          if ($LASTEXITCODE -ne 0) { throw "no se pudo rehacer la firma del actualizador" }
 
       - name: Generar manifiesto del actualizador
         shell: pwsh
         run: |
-          $exe = Get-ChildItem src-tauri\target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
-          if (-not $exe) { throw "No se encontró el instalador de NSIS" }
+          $exe = Join-Path "src-tauri\target\release\bundle\nsis" $env:INSTALADOR
+          if (-not (Test-Path $exe)) { throw "No se encontró $env:INSTALADOR" }
 
-          $sig = Get-Content "$($exe.FullName).sig" -Raw -ErrorAction SilentlyContinue
+          $sig = Get-Content "$exe.sig" -Raw -ErrorAction SilentlyContinue
           if (-not $sig) { throw "Falta el .sig: revisa el secreto TAURI_SIGNING_PRIVATE_KEY" }
 
-          $url = "https://github.com/${{ github.repository }}/releases/download/v$env:VERSION/$($exe.Name)"
+          # Un nombre con algo que una URL tenga que escapar vuelve a meternos en
+          # el problema que este renombrado resuelve.
+          if ($env:INSTALADOR -notmatch '^[A-Za-z0-9._-]+$') {
+            throw "El nombre '$env:INSTALADOR' lleva caracteres que GitHub va a cambiar en la URL"
+          }
+
+          $url = "https://github.com/${{ github.repository }}/releases/download/v$env:VERSION/$env:INSTALADOR"
           $manifest = @{
             version   = $env:VERSION
             notes     = "Consulta las notas de la versión en GitHub Releases."
@@ -139,3 +168,40 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe.sig
             latest.json
           generate_release_notes: true
+
+      # La única comprobación que vale: pedir el manifiesto por donde lo pide la
+      # app y bajar lo que anuncia. Un release "exitoso" con una URL que no
+      # resuelve deja a la tienda sin actualizarse y sin decir nada — es
+      # exactamente lo que pasó la primera vez, y lo que este paso no deja pasar.
+      - name: Comprobar que la tienda puede descargarlo
+        shell: pwsh
+        run: |
+          $endpoint = "https://github.com/${{ github.repository }}/releases/latest/download/latest.json"
+
+          $manifiesto = $null
+          foreach ($intento in 1..6) {
+            try {
+              $manifiesto = Invoke-RestMethod -Uri $endpoint -MaximumRedirection 10
+              break
+            } catch {
+              Write-Host "El manifiesto todavía no responde (intento $intento). Esperando..."
+              Start-Sleep -Seconds 10
+            }
+          }
+          if (-not $manifiesto) { throw "El endpoint del actualizador no responde: $endpoint" }
+
+          if ($manifiesto.version -ne $env:VERSION) {
+            throw "El manifiesto publicado dice $($manifiesto.version) y esta versión es $env:VERSION"
+          }
+
+          $url = $manifiesto.platforms.'windows-x86_64'.url
+          Write-Host "Instalador anunciado: $url"
+          if (-not $manifiesto.platforms.'windows-x86_64'.signature) {
+            throw "El manifiesto no lleva firma"
+          }
+
+          $respuesta = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 10
+          if ($respuesta.StatusCode -ne 200) {
+            throw "El instalador anunciado no se puede descargar (HTTP $($respuesta.StatusCode))"
+          }
+          Write-Host "✓ La tienda puede bajar la versión $env:VERSION"
