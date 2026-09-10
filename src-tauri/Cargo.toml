@@ -1,6 +1,6 @@
 [package]
 name = "things-shop"
-version = "0.2.4"
+version = "0.2.5"
 description = "Things Shop - Professional POS System"
 authors = ["Things Shop"]
 edition = "2021"
