@@ -75,6 +75,76 @@ fn servir_ayuda(
     })
 }
 
+/// Los dos servidores encendidos y la forma de apagarlos.
+struct Servidores {
+    apagar: tokio::sync::watch::Sender<bool>,
+    tareas: Vec<tauri::async_runtime::JoinHandle<()>>,
+}
+
+/// Levanta la captura cifrada y la página del certificado.
+///
+/// Está aparte de la orden de encender para poder ejercitar **esta** secuencia en
+/// una prueba: los dos servidores, la señal compartida que los apaga y las tareas
+/// que hay que esperar. Es donde vivía el error de que el 7424 se quedara tomado,
+/// y es donde una equivocación deja la pantalla diciendo que la captura está
+/// encendida mientras el teléfono se queda intentando conectar con nada — que es
+/// el peor sitio posible para no tener una prueba.
+fn levantar_servidores(
+    escucha: std::net::TcpListener,
+    escucha_ayuda: std::net::TcpListener,
+    app: Router,
+    ayuda: Router,
+    config_tls: axum_server::tls_rustls::RustlsConfig,
+) -> Servidores {
+    let manija = axum_server::Handle::new();
+    let (apagar_tx, apagar_rx) = tokio::sync::watch::channel(false);
+
+    {
+        let manija = manija.clone();
+        let mut aviso = apagar_rx.clone();
+        tauri::async_runtime::spawn(async move {
+            // El mismo aviso llega a los dos servidores.
+            //
+            // Que el emisor se caiga sin avisar significa que el estado de la
+            // captura se perdió: nadie va a poder apagarla nunca, así que se
+            // apaga aquí. Se distingue del apagado normal a propósito, porque uno
+            // es lo esperado y el otro es un error que hay que poder ver.
+            match aviso.wait_for(|apagar| *apagar).await {
+                Ok(_) => {}
+                Err(_) => log::warn!(
+                    "El estado de la captura se perdió sin apagarla; se apaga para no dejar el puerto tomado"
+                ),
+            }
+            manija.graceful_shutdown(Some(std::time::Duration::from_secs(2)));
+        });
+    }
+
+    let tarea_captura = {
+        let manija = manija.clone();
+        tauri::async_runtime::spawn(async move {
+            let servidor = match axum_server::from_tcp_rustls(escucha, config_tls) {
+                Ok(s) => s.handle(manija).serve(app.into_make_service()),
+                Err(e) => {
+                    log::error!("No se pudo iniciar la captura cifrada: {}", e);
+                    return;
+                }
+            };
+            log::info!("Captura por celular escuchando (cifrada)");
+            if let Err(e) = servidor.await {
+                log::error!("La captura por celular terminó con error: {}", e);
+            }
+            log::info!("Captura por celular apagada");
+        })
+    };
+
+    // El servidor del certificado también tiene que obedecer el apagado. Sin
+    // esto se quedaba escuchando el 7424 hasta cerrar la aplicación, y el
+    // siguiente encendido moría ahí aunque el 7423 estuviera libre.
+    let tarea_ayuda = servir_ayuda(escucha_ayuda, ayuda, apagar_rx);
+
+    Servidores { apagar: apagar_tx, tareas: vec![tarea_captura, tarea_ayuda] }
+}
+
 /// Apaga los dos servidores y **espera** a que suelten los puertos.
 ///
 /// La espera no es cortesía. Mientras el socket viejo siga escuchando, volver a
@@ -789,9 +859,6 @@ pub fn start_capture_server(
     .map_err(|e| format!("No se pudo abrir el puerto {}: {}", PUERTO_AYUDA, e))?;
     escucha_ayuda.set_nonblocking(true).map_err(|e| e.to_string())?;
 
-    let manija = axum_server::Handle::new();
-    let (apagar_tx, apagar_rx) = tokio::sync::watch::channel(false);
-
     let config_tls = tokio::task::block_in_place(|| {
         tauri::async_runtime::block_on(axum_server::tls_rustls::RustlsConfig::from_pem(
             identidad.cert_pem.into_bytes(),
@@ -800,46 +867,15 @@ pub fn start_capture_server(
     })
     .map_err(|e| format!("El certificado de la captura no se pudo usar: {}", e))?;
 
-    {
-        let manija = manija.clone();
-        let mut aviso = apagar_rx.clone();
-        tauri::async_runtime::spawn(async move {
-            // El mismo aviso llega a los dos servidores.
-            let _ = aviso.wait_for(|apagar| *apagar).await;
-            manija.graceful_shutdown(Some(std::time::Duration::from_secs(2)));
-        });
-    }
-
-    let tarea_captura = {
-        let manija = manija.clone();
-        tauri::async_runtime::spawn(async move {
-            log::info!("Captura por celular escuchando en el puerto {} (cifrada)", PUERTO);
-            let servidor = match axum_server::from_tcp_rustls(escucha, config_tls) {
-                Ok(s) => s.handle(manija).serve(app.into_make_service()),
-                Err(e) => {
-                    log::error!("No se pudo iniciar la captura cifrada: {}", e);
-                    return;
-                }
-            };
-            if let Err(e) = servidor.await {
-                log::error!("La captura por celular terminó con error: {}", e);
-            }
-            log::info!("Captura por celular apagada");
-        })
-    };
-
-    // El servidor del certificado también tiene que obedecer el apagado. Sin
-    // esto se quedaba escuchando el 7424 hasta cerrar la aplicación, y el
-    // siguiente encendido moría ahí aunque el 7423 estuviera libre.
-    let tarea_ayuda = servir_ayuda(escucha_ayuda, ayuda, apagar_rx.clone());
+    let servidores = levantar_servidores(escucha, escucha_ayuda, app, ayuda, config_tls);
 
     {
         let mut guard = captura.activo.lock().map_err(|e| e.to_string())?;
         *guard = Some(Encendido {
             codigo,
             ip,
-            apagar: apagar_tx,
-            tareas: vec![tarea_captura, tarea_ayuda],
+            apagar: servidores.apagar,
+            tareas: servidores.tareas,
             intentos_fallidos: 0,
             bloqueado_hasta: 0,
         });
@@ -1497,6 +1533,182 @@ mod apagado {
         let (tx, tareas) = dos_servidores(a, b);
 
         assert_eq!(apagar(tx, tareas), 2, "los dos deben terminar con un solo aviso");
+    }
+}
+
+/// El encendido completo, por el camino de verdad.
+///
+/// Aquí no se imita nada: se llama a `levantar_servidores` con el certificado que
+/// emite la tienda y se habla con los dos puertos como hablaría el teléfono —TLS
+/// real en la captura, HTTP plano en la página del permiso—. Es la prueba que
+/// faltaba: todo lo demás verificaba las piezas por separado, y los tres errores
+/// de este servidor vivieron justo en cómo encajan.
+#[cfg(test)]
+mod encendido {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+    use tokio_rustls::TlsConnector;
+
+    fn base() -> Arc<Mutex<rusqlite::Connection>> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn escuchar() -> (std::net::TcpListener, u16) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let puerto = l.local_addr().unwrap().port();
+        l.set_nonblocking(true).unwrap();
+        (l, puerto)
+    }
+
+    /// Un teléfono con la autoridad de la tienda instalada.
+    fn telefono(ca_pem: &str) -> ClientConfig {
+        let mut raiz = RootCertStore::empty();
+        let mut cursor = std::io::Cursor::new(ca_pem.as_bytes());
+        for cert in rustls_pemfile::certs(&mut cursor) {
+            raiz.add(cert.unwrap()).unwrap();
+        }
+        ClientConfig::builder().with_root_certificates(raiz).with_no_client_auth()
+    }
+
+    async fn pedir_cifrado(puerto: u16, ca_pem: &str, ruta: &str, codigo: &str) -> String {
+        let conector = TlsConnector::from(Arc::new(telefono(ca_pem)));
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", puerto)).await
+            .expect("no se pudo abrir el socket de la captura");
+        let mut flujo = conector
+            .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+            .await
+            .expect("el teléfono no confió en la caja");
+        let peticion = format!(
+            "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nX-Codigo: {}\r\n\r\n",
+            ruta, codigo
+        );
+        flujo.write_all(peticion.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        flujo.read_to_end(&mut buf).await.ok();
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    async fn pedir_plano(puerto: u16) -> String {
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", puerto)).await
+            .expect("no se pudo abrir el socket del permiso");
+        tcp.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await.unwrap();
+        let mut buf = Vec::new();
+        tcp.read_to_end(&mut buf).await.ok();
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// Enciende como lo hace la aplicación y devuelve con qué hablarle.
+    async fn encender() -> (Servidores, u16, u16, String, String) {
+        let db = base();
+        let (identidad, codigo) = {
+            let conn = db.lock().unwrap();
+            (super::super::tls::identidad_para(&conn, "127.0.0.1").unwrap(),
+             codigo_de_la_tienda(&conn))
+        };
+        let ca = identidad.ca_pem.clone();
+
+        let captura = Arc::new(CaptureState::default());
+        let app = construir_router(Contexto { db: Arc::clone(&db), captura: Arc::clone(&captura) });
+        let ayuda = super::super::ayuda::router(identidad.ca_pem.clone(), "127.0.0.1".to_string());
+
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem(
+            identidad.cert_pem.into_bytes(),
+            identidad.key_pem.into_bytes(),
+        ).await.unwrap();
+
+        let (l1, p1) = escuchar();
+        let (l2, p2) = escuchar();
+        let servidores = levantar_servidores(l1, l2, app, ayuda, config);
+
+        // El estado tiene que quedar encendido o `autorizado` rechaza todo.
+        {
+            let (tx_falso, _rx) = tokio::sync::watch::channel(false);
+            let mut guard = captura.activo.lock().unwrap();
+            *guard = Some(Encendido {
+                codigo: codigo.clone(), ip: "127.0.0.1".into(),
+                apagar: tx_falso, tareas: Vec::new(),
+                intentos_fallidos: 0, bloqueado_hasta: 0,
+            });
+        }
+
+        // Espera a que los dos acepten conexiones.
+        for _ in 0..200 {
+            if std::net::TcpStream::connect(("127.0.0.1", p1)).is_ok()
+                && std::net::TcpStream::connect(("127.0.0.1", p2)).is_ok() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        (servidores, p1, p2, ca, codigo)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn los_dos_puertos_sirven_de_verdad() {
+        // Lo que el teléfono hace al escanear el QR: primero la página del
+        // permiso, sin cifrar; después la captura, cifrada.
+        let (servidores, puerto_captura, puerto_ayuda, ca, codigo) = encender().await;
+
+        let permiso = pedir_plano(puerto_ayuda).await;
+        assert!(permiso.contains("200 OK"), "el permiso no contestó: {}", &permiso[..permiso.len().min(200)]);
+        assert!(permiso.contains("Preparar el teléfono"));
+
+        let pagina = pedir_cifrado(puerto_captura, &ca, "/", &codigo).await;
+        assert!(pagina.contains("200 OK"), "la captura no contestó: {}", &pagina[..pagina.len().min(200)]);
+        assert!(pagina.contains("Capturar producto"));
+
+        let _ = servidores.apagar.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn siguen_sirviendo_un_rato_despues_de_encender() {
+        // El apagado lo dispara una señal compartida. Una equivocación ahí apaga
+        // los servidores solos justo después de arrancar, y la pantalla sigue
+        // diciendo que la captura está encendida mientras el teléfono se queda
+        // intentando conectar con nada.
+        let (servidores, puerto_captura, puerto_ayuda, ca, codigo) = encender().await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        assert!(pedir_plano(puerto_ayuda).await.contains("200 OK"), "el permiso se apagó solo");
+        assert!(pedir_cifrado(puerto_captura, &ca, "/", &codigo).await.contains("200 OK"),
+                "la captura se apagó sola");
+
+        let _ = servidores.apagar.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn el_service_worker_se_sirve_por_el_puerto_cifrado() {
+        // Sin esto no hay guardado en el teléfono: los service workers solo corren
+        // en un origen seguro, así que tiene que salir por el 7423 y no por el
+        // 7424, que va sin cifrar.
+        let (servidores, puerto_captura, _p, ca, codigo) = encender().await;
+
+        let sw = pedir_cifrado(puerto_captura, &ca, "/sw.js", &codigo).await;
+        assert!(sw.contains("200 OK"), "no se sirvió el service worker");
+        assert!(sw.contains("things-shop-captura-v"), "no es el service worker");
+
+        let manifiesto = pedir_cifrado(puerto_captura, &ca, "/manifest.webmanifest", &codigo).await;
+        assert!(manifiesto.contains("200 OK"), "no se sirvió el manifiesto");
+        assert!(manifiesto.contains("standalone"));
+
+        let _ = servidores.apagar.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn el_apagado_libera_los_dos_puertos() {
+        let (servidores, p1, p2, _ca, _c) = encender().await;
+
+        let _ = servidores.apagar.send(true);
+        for tarea in servidores.tareas {
+            let _ = tokio::time::timeout(ESPERA_APAGADO, tarea).await;
+        }
+
+        assert!(std::net::TcpListener::bind(("127.0.0.1", p1)).is_ok(), "el 7423 sigue tomado");
+        assert!(std::net::TcpListener::bind(("127.0.0.1", p2)).is_ok(), "el 7424 sigue tomado");
     }
 }
 
