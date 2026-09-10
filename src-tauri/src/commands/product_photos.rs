@@ -512,9 +512,17 @@ mod tests {
     }
 
     #[test]
-    fn una_foto_rechazada_no_deja_archivos_sueltos() {
+    fn una_foto_rechazada_no_deja_rastro() {
+        // Antes esto contaba los archivos de la carpeta real de la aplicación,
+        // antes y después. Dos problemas: desde que las fotos viven en la base,
+        // `agregar_foto` no escribe ningún archivo, así que no comprobaba nada; y
+        // esa carpeta la comparten todas las pruebas, que corren en paralelo.
+        // `una_foto_de_archivo_se_incorpora_a_la_base` escribe y borra archivos
+        // ahí mismo, así que el conteo cambiaba por debajo y esta prueba fallaba
+        // sola, cada tantas corridas, tumbando publicaciones enteras.
+        //
+        // Lo que de verdad importa es que la fila no quede a medias.
         let db = tienda();
-        let antes = std::fs::read_dir(photos::photos_dir()).map(|d| d.count()).unwrap_or(0);
 
         let dto = NuevaFotoDto {
             product_id: 1,
@@ -523,8 +531,10 @@ mod tests {
         };
         assert!(agregar_foto(&db, &dto).is_err());
 
-        let despues = std::fs::read_dir(photos::photos_dir()).map(|d| d.count()).unwrap_or(0);
-        assert_eq!(antes, despues, "no debe quedar basura en la carpeta");
+        let filas: i64 = db
+            .query_row("SELECT COUNT(*) FROM product_images", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(filas, 0, "una foto rechazada no debe dejar fila");
     }
 
     #[test]
