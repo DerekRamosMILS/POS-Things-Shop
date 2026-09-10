@@ -15,6 +15,11 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+/** Si esto se está corriendo como comando y no importando desde una prueba. */
+const esComando = Boolean(process.argv[1]) &&
+    import.meta.url === pathToFileURL(process.argv[1]).href;
 
 const ARCHIVOS = {
     paquete: 'package.json',
@@ -22,10 +27,27 @@ const ARCHIVOS = {
     cargo: 'src-tauri/Cargo.toml',
 };
 
+/** Corre un comando y devuelve su salida. */
 const sh = (cmd, args, opts = {}) =>
-    execFileSync(cmd, args, { encoding: 'utf8', ...opts }).trim();
+    (execFileSync(cmd, args, { encoding: 'utf8', ...opts }) ?? '').trim();
 
+/**
+ * Corre un comando dejando que escriba en la terminal.
+ *
+ * Va aparte de `sh` porque con `stdio` heredado `execFileSync` no captura nada y
+ * devuelve null: mezclar las dos cosas en una sola función reventaba justo aquí.
+ */
+const correr = (cmd, args, opts = {}) =>
+    execFileSync(cmd, args, { stdio: 'inherit', ...opts });
+
+/**
+ * Aborta con un mensaje legible.
+ *
+ * Cuando el módulo se importa —las pruebas— lanza en vez de salir del proceso:
+ * un `process.exit` ahí se llevaría al corredor de pruebas por delante.
+ */
 function morir(mensaje) {
+    if (!esComando) throw new Error(mensaje);
     console.error(`\n  ✕ ${mensaje}\n`);
     process.exit(1);
 }
@@ -35,7 +57,7 @@ function versionActual() {
 }
 
 /** Traduce "patch"/"minor"/"major" o valida un número explícito. */
-function resolverVersion(pedida, actual) {
+export function resolverVersion(pedida, actual) {
     const salto = { major: 0, minor: 1, patch: 2 }[pedida];
     if (salto !== undefined) {
         const partes = actual.split('.').map(Number);
@@ -53,7 +75,7 @@ function resolverVersion(pedida, actual) {
 }
 
 /** Compara x.y.z numéricamente. Devuelve true si `a` es mayor que `b`. */
-function esMayor(a, b) {
+export function esMayor(a, b) {
     const [x, y] = [a.split('.').map(Number), b.split('.').map(Number)];
     for (let i = 0; i < 3; i++) {
         if (x[i] !== y[i]) return x[i] > y[i];
@@ -83,18 +105,22 @@ function escribirVersion(nueva) {
 
 // ── Comprobaciones antes de tocar nada ───────────────────────────────────────
 
-const pedida = process.argv[2];
-if (!pedida) {
-    console.error(`
-  Uso:  pnpm publicar <versión|patch|minor|major>
+if (!esComando) {
+    // Importado desde una prueba: solo se exponen las funciones de arriba.
+} else {
 
-  Versión actual: ${versionActual()}
+    const pedida = process.argv[2];
+    if (!pedida) {
+        console.error(`
+      Uso:  pnpm publicar <versión|patch|minor|major>
 
-  Sube el número en los tres archivos, commitea, etiqueta y empuja. El CI
-  construye el instalador de Windows y publica el release que la tienda
-  descarga sola.
-`);
-    process.exit(1);
+      Versión actual: ${versionActual()}
+
+      Sube el número en los tres archivos, commitea, etiqueta y empuja. El CI
+      construye el instalador de Windows y publica el release que la tienda
+      descarga sola.
+    `);
+        process.exit(1);
 }
 
 const rama = sh('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -135,9 +161,8 @@ escribirVersion(nueva);
 // Cargo.lock lleva la versión del paquete adentro; sin esto el build en el CI
 // falla con el lockfile desactualizado.
 console.log('  · Actualizando Cargo.lock');
-sh('cargo', ['update', '--package', 'things-shop', '--precise', nueva], {
+correr('cargo', ['update', '--package', 'things-shop', '--precise', nueva], {
     cwd: 'src-tauri',
-    stdio: ['ignore', 'ignore', 'inherit'],
 });
 
 console.log('  · Commit y etiqueta');
@@ -159,3 +184,4 @@ console.log(`
     Seguimiento:  ${repo}/actions
     Release:      ${repo}/releases/tag/v${nueva}
 `);
+}
