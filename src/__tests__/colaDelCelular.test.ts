@@ -146,7 +146,13 @@ describe('capturar con la caja apagada', () => {
         // En el orden en que se capturaron: así los códigos de producto siguen
         // el orden en que se fotografió la mercancía.
         expect(caja.recibidos.map(r => r.nombre)).toEqual(['Vestido amarillo', 'Blusa roja']);
-        expect(doc.getElementById('pendientes')!.style.display).toBe('none');
+        // El aviso se oculta un paso después de mandar: la página vuelve a leer la
+        // cola para saber cuántas quedan. Esperarlo y no suponerlo, o en un runner
+        // lento la prueba pierde la carrera y falla sin que nada esté roto.
+        await esperarA(
+            () => doc.getElementById('pendientes')!.style.display === 'none',
+            'que el aviso de pendientes se ocultara',
+        );
     });
 
     it('mandar dos veces no manda dos veces lo mismo', async () => {
