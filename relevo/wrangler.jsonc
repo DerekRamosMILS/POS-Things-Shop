@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "things-shop-relevo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+
+  // La página de captura se sirve desde aquí mismo. Un solo origen para la
+  // página y para la API significa que no hay CORS que configurar ni un segundo
+  // despliegue que se pueda quedar atrás.
+  "assets": {
+    "directory": "./public",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application",
+    // Todo lo que es API lo atiende el Worker; el resto son archivos.
+    "run_worker_first": ["/api/*"]
+  },
+
+  "kv_namespaces": [
+    { "binding": "CAPTURAS", "id": "080abf860c5946d691966cfd5bb4eded" }
+  ],
+
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
