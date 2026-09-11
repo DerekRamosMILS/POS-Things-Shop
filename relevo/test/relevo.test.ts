@@ -172,3 +172,56 @@ describe('rutas', () => {
         expect(res.headers.get('cache-control')).toBe('no-store');
     });
 });
+
+describe('el catálogo para contar', () => {
+    const catalogo = [
+        { sku: 'TS-000001', nombre: 'Vestido amarillo', variantes: [] },
+        { sku: 'TS-000002', nombre: 'Blusa roja', variantes: [{ id: 5, etiqueta: 'M' }] },
+    ];
+    const publicar = (s: string, productos: unknown) =>
+        llamar('/api/catalogo', { method: 'PUT', secreto: s, body: JSON.stringify({ productos }) });
+    const leer = async (s: string) =>
+        (await (await llamar('/api/catalogo', { secreto: s })).json()) as { productos: unknown[]; cuando: string | null };
+
+    it('la tienda lo publica y el teléfono lo baja', async () => {
+        const s = secreto();
+        expect((await publicar(s, catalogo)).status).toBe(200);
+
+        const bajado = await leer(s);
+        expect(bajado.productos).toEqual(catalogo);
+        expect(bajado.cuando).toBeTruthy();
+    });
+
+    it('sin catálogo publicado se contesta vacío, no con error', async () => {
+        // El teléfono de una tienda recién emparejada tiene que poder decir
+        // "todavía no hay catálogo" en vez de fallar.
+        const vacio = await leer(secreto());
+        expect(vacio.productos).toEqual([]);
+        expect(vacio.cuando).toBeNull();
+    });
+
+    it('una tienda no ve el catálogo de otra', async () => {
+        const tienda = secreto();
+        await publicar(tienda, catalogo);
+        expect((await leer(secreto())).productos).toEqual([]);
+    });
+
+    it('no se mezcla con lo pendiente de recoger', async () => {
+        // Viven en prefijos distintos. Si el catálogo apareciera en el listado,
+        // el punto de venta intentaría darlo de alta como si fuera un producto.
+        const s = secreto();
+        await publicar(s, catalogo);
+        expect((await pendientes(s)).pendientes).toHaveLength(0);
+    });
+
+    it('rechaza algo que no es una lista de productos', async () => {
+        const s = secreto();
+        expect((await publicar(s, 'no es una lista')).status).toBe(400);
+        expect((await llamar('/api/catalogo', { method: 'PUT', secreto: s, body: 'basura' })).status).toBe(400);
+    });
+
+    it('sin secreto no se publica ni se lee', async () => {
+        expect((await llamar('/api/catalogo')).status).toBe(401);
+        expect((await llamar('/api/catalogo', { method: 'PUT', body: JSON.stringify({ productos: [] }) })).status).toBe(401);
+    });
+});

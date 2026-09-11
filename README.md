@@ -142,6 +142,39 @@ encargado de la tienda puede mandar sin entender nada de lo que contiene.
   cambio no se republica la anterior: se publica una **más alta** con la
   corrección (`pnpm publicar patch`).
 
+## Captura desde el celular
+
+El teléfono captura productos y conteos **sin conexión** y los deja en un buzón
+en internet —el relevo, en [`relevo/`](relevo/)—. El punto de venta pasa a
+recogerlos solo cada 3 minutos mientras esté abierto. No se hablan directo.
+
+Antes el teléfono se conectaba a un servidor que esta computadora levantaba en
+el WiFi de la tienda. Funcionaba en la mesa de pruebas y no en la tienda: el
+router aísla a los clientes entre sí y ningún permiso de firewall lo cambia.
+Hacia internet los dos salen sin problema, así que el buzón vive ahí.
+
+**Emparejar un teléfono:** Ajustes → Capturar desde el celular, escanear el QR,
+e instalar la página en la pantalla de inicio cuando la ofrezca. Es una vez por
+teléfono y no hay que instalar ningún certificado.
+
+| | |
+|---|---|
+| Qué pasa por el relevo | Lo capturado: nombre, precio, tallas, piezas, fotos. Y el catálogo para contar: nombres, códigos y tallas, **sin existencias** |
+| Qué no pasa nunca | Ventas, clientes, caja, inventario |
+| Cuánto se queda | Hasta que el punto de venta lo recoge. Lo que nadie recoja caduca solo a los 30 días |
+| Quién puede entrar | Quien tenga el secreto de la tienda (32 bytes al azar, viaja en el QR después del `#`). **Generar código nuevo** lo cambia |
+
+Lo que llega y no se puede dar de alta —un conteo de una prenda que se borró, un
+producto sin nombre— sale del buzón para no tapar lo demás, pero se guarda
+completo en la tabla `capturas_rechazadas` y se enseña en la misma pantalla.
+
+El intervalo de 3 minutos y el catálogo que solo se publica cuando cambia salen
+del cupo gratuito de KV (1 000 escrituras al día). Si se sondea más seguido, el
+cupo se acaba antes de cerrar la tienda.
+
+El relevo se despliega aparte, desde su carpeta: `cd relevo && pnpm deploy`.
+Ver [`relevo/README.md`](relevo/README.md).
+
 ## Dónde viven los datos
 
 | | Ruta |

@@ -1,29 +1,19 @@
-//! Captura de productos desde el celular, por red local.
+//! Captura de productos desde el celular.
 //!
-//! La app de escritorio levanta un servidor en la red de la tienda. El celular
-//! abre esa dirección en su navegador, toma las fotos y las manda. No hay nube,
-//! ni servidor externo, ni cuenta que pagar: la caja *es* el servidor y los
-//! datos nunca salen del local.
+//! El teléfono captura sin conexión y deja lo capturado en un buzón en internet
+//! (el relevo, `relevo/` en la raíz del repositorio). Este punto de venta pasa a
+//! recogerlo cada pocos minutos. Nunca se hablan directo.
 //!
-//! Va por HTTPS con un certificado que la propia caja emite (ver `tls`). No es
-//! por paranoia: la página tiene que poder quedarse guardada en el teléfono para
-//! seguir funcionando con la computadora apagada, y el navegador solo se lo
-//! permite a un origen seguro.
+//! Antes el teléfono se conectaba a un servidor que esta computadora levantaba
+//! en el WiFi de la tienda. Funcionaba en la mesa de pruebas y no en la tienda:
+//! el router aísla a los clientes entre sí, y ningún permiso de firewall lo
+//! cambia. Hacia internet, en cambio, los dos salen sin problema. El buzón vive
+//! donde los dos llegan.
 //!
-//! Eso también significa que cualquiera conectado al mismo WiFi podría alcanzar
-//! el puerto, así que:
-//!
-//! - el servidor está apagado por defecto y hay que encenderlo a propósito;
-//! - cada encendido genera un código de emparejamiento nuevo;
-//! - sin código no se acepta nada, y los intentos fallidos bloquean por un rato;
-//! - solo se expone dar de alta un producto: no hay forma de leer ventas,
-//!   clientes ni ningún otro dato desde ahí.
+//! - `producto`: da de alta lo capturado —tallas, colores, piezas, fotos—.
+//! - `conteo`: aplica un conteo respetando lo vendido mientras tanto.
+//! - `relevo`: el emparejamiento, el QR y la recogida.
 
-mod ayuda;
 pub mod conteo;
-mod page;
-mod pwa;
-pub mod server;
-pub mod tls;
-
-pub use server::CaptureState;
+pub mod producto;
+pub mod relevo;

@@ -213,17 +213,20 @@ export default function ProductsPage() {
 
     const photoRequestFor = useRef<number | null>(null);
     const [showCaptura, setShowCaptura] = useState(false);
-    const [capturaActiva, setCapturaActiva] = useState(false);
+    const [capturaEstado, setCapturaEstado] = useState<'al-dia' | 'error' | 'sin-revisar'>('sin-revisar');
 
-    // El botón dice si la captura está prendida: sin eso, la única forma de
-    // saberlo es abrir la ventana.
+    // El botón dice si la recogida del celular va bien: sin eso, la única forma
+    // de saberlo es abrir la ventana. Solo lee el estado local, no la red.
     useEffect(() => {
         let vivo = true;
-        const revisar = () => api.captureServerStatus()
-            .then(e => { if (vivo) setCapturaActiva(e.encendido); })
+        const revisar = () => api.relevoEstado()
+            .then(v => {
+                if (!vivo) return;
+                setCapturaEstado(v.estado.ultimo_error ? 'error' : v.estado.ultima_vez ? 'al-dia' : 'sin-revisar');
+            })
             .catch(() => {});
         revisar();
-        const t = setInterval(revisar, 5000);
+        const t = setInterval(revisar, 15000);
         return () => { vivo = false; clearInterval(t); };
     }, []);
 
@@ -432,11 +435,11 @@ export default function ProductsPage() {
                     <button onClick={() => setShowCaptura(true)} className="btn btn-ghost" style={{ gap: 9 }}>
                         <span style={{
                             width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                            background: capturaActiva ? 'var(--success)' : 'var(--t3)',
+                            background: capturaEstado === 'al-dia' ? 'var(--success)' : capturaEstado === 'error' ? 'var(--danger)' : 'var(--t3)',
                         }} />
                         Capturar desde el celular
-                        <span style={{ fontSize: 11, color: capturaActiva ? 'var(--success)' : 'var(--t3)', fontWeight: 600 }}>
-                            {capturaActiva ? 'Prendido' : 'Apagado'}
+                        <span style={{ fontSize: 11, color: capturaEstado === 'al-dia' ? 'var(--success)' : capturaEstado === 'error' ? 'var(--danger)' : 'var(--t3)', fontWeight: 600 }}>
+                            {capturaEstado === 'al-dia' ? 'Al día' : capturaEstado === 'error' ? 'Sin conexión' : 'Sin revisar'}
                         </span>
                     </button>
                     <button onClick={openCreateForm} className="btn btn-primary">

@@ -43,6 +43,26 @@ jobs:
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+  # El relevo guarda lo que el celular captura mientras la tienda lo recoge. Va
+  # aparte del punto de venta —se despliega en Cloudflare—, así que tiene su
+  # propio lockfile y sus propias pruebas, contra el runtime real de Workers.
+  relevo:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relevo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - name: Pruebas del relevo
+        run: pnpm test
+
   # El código de impresora y cajón usa la API de Windows y no compila en otro
   # sistema, así que se verifica en un runner de Windows en cada cambio.
   windows:

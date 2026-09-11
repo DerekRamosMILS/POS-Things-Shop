@@ -15,7 +15,7 @@ import type {
     Promotion, CreatePromotionDto,
     Notification, CreateReminderDto,
     Customer, CreateCustomerDto, UpdateCustomerDto, CatalogoFiscal,
-    CaptureStatus, ProductImage,
+    VistaRelevo, ProductImage,
     PriceHistoryEntry, CreateReturnDto,
     Layaway, CreateLayawayDto,
 } from '../types';
@@ -566,11 +566,9 @@ export const marcarFacturada = (saleId: number, uuid: string) =>
     invoke<void>('marcar_facturada', { saleId, uuid });
 
 // Captura desde el celular
-export const startCaptureServer = (ipPreferida?: string) =>
-    invoke<CaptureStatus>('start_capture_server', { ipPreferida });
-export const stopCaptureServer = () => invoke<CaptureStatus>('stop_capture_server');
-export const captureServerStatus = () => invoke<CaptureStatus>('capture_server_status');
-export const regenerarCodigoCaptura = () => invoke<CaptureStatus>('regenerar_codigo_captura');
+export const relevoEstado = () => invoke<VistaRelevo>('relevo_estado');
+export const relevoSincronizar = () => invoke<VistaRelevo>('relevo_sincronizar');
+export const relevoRegenerar = () => invoke<VistaRelevo>('relevo_regenerar');
 
 // Fotos de producto
 export const addProductImage = (data: { product_id: number; photo: string; thumbnail: string }) =>

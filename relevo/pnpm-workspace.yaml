@@ -1,0 +1,8 @@
+# El relevo es su propio proyecto: se despliega en Cloudflare, aparte del punto
+# de venta, así que no hereda la configuración ni el lockfile de la raíz.
+allowBuilds:
+  # Empaqueta el Worker.
+  esbuild: true
+  # El runtime de Workers con el que corren las pruebas. Sin su script de
+  # instalación no hay binario y las pruebas no arrancan.
+  workerd: true

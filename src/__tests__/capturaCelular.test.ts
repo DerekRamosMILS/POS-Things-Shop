@@ -11,11 +11,10 @@ import { JSDOM } from 'jsdom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
-const fuente = readFileSync('src-tauri/src/capture/page.rs', 'utf-8');
-const HTML = fuente.slice(
-    fuente.indexOf('r####"') + 'r####"'.length,
-    fuente.lastIndexOf('"####;'),
-);
+// La página vive en el relevo, que es desde donde se sirve al teléfono.
+const HTML = readFileSync('relevo/public/index.html', 'utf-8');
+/** Un secreto con la forma de los que emite el punto de venta. */
+const SECRETO = 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk';
 
 type Enviado = { piezas: { talla: string | null; color: string | null; cantidad: number }[]; existencia: number };
 
@@ -23,7 +22,10 @@ type Enviado = { piezas: { talla: string | null; color: string | null; cantidad:
 async function capturar(llenar: (d: Document) => void): Promise<Enviado> {
     const enviados: Enviado[] = [];
     const fetchFalso = vi.fn(async (_url: string, init?: { body?: string }) => {
-        if (init?.body) enviados.push(JSON.parse(init.body));
+        if (init?.body) {
+            const cuerpo = JSON.parse(init.body);
+            enviados.push(cuerpo.datos ?? cuerpo);
+        }
         return {
             ok: true,
             json: async () => ({ ok: true, sku: 'TS-000001' }),
@@ -32,7 +34,7 @@ async function capturar(llenar: (d: Document) => void): Promise<Enviado> {
 
     const dom = new JSDOM(HTML, {
         runScripts: 'dangerously',
-        url: 'https://192.168.0.10:7423/?c=123456',
+        url: `https://relevo.test/#k=${SECRETO}`,
         beforeParse(win) {
             const w = win as unknown as Record<string, unknown>;
             w.fetch = fetchFalso;
@@ -107,7 +109,7 @@ describe('captura desde el celular', () => {
     });
 
     it('el total que ve quien captura es la suma, no un múltiplo', async () => {
-        const dom = new JSDOM(HTML, { runScripts: 'dangerously', url: 'https://x/?c=1', beforeParse(win) {
+        const dom = new JSDOM(HTML, { runScripts: 'dangerously', url: `https://relevo.test/#k=${SECRETO}`, beforeParse(win) {
             const w = win as unknown as Record<string, unknown>;
             w.fetch = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
             w.indexedDB = new IDBFactory();

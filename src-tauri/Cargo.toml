@@ -10,9 +10,10 @@ name = "things_shop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dev-dependencies]
-rustls-pemfile = "2.2.0"
 tempfile = "3"
-tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "logging", "tls12"] }
+# Un relevo de mentira que habla HTTP de verdad, para probar la vuelta completa.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -32,16 +33,13 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 log = { version = "0.4", features = ["std"] }
 
-# Servidor de captura en red local: el celular sube fotos directo a la caja,
-# sin nube ni backend externo.
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+# QR del emparejamiento con el relevo.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
-# Enumera las interfaces de red: con un VPN activo, preguntar "¿por dónde salgo
-# a internet?" devuelve el túnel, que el celular no puede alcanzar.
-local-ip-address = "0.6"
-rcgen = { version = "0.14.10", default-features = false, features = ["pem", "crypto", "ring"] }
-axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+# El relevo: el punto de venta recoge lo capturado con el celular. El mismo
+# cliente y el mismo TLS que ya compila el actualizador: no es una segunda pila.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["time"] }
 
 [profile.release]
 strip = true

@@ -373,21 +373,30 @@ export interface CreatePromotionDto {
 }
 
 // Customer types
-export interface DireccionRed {
-    interfaz: string;
-    ip: string;
+/** Cómo va la recogida de lo capturado con el celular. */
+export interface EstadoRelevo {
+    ultima_vez: string | null;
+    ultimo_error: string | null;
+    recibidas: number;
+    rechazadas: number;
+    trayendo: boolean;
 }
 
-export interface CaptureStatus {
-    encendido: boolean;
-    url: string | null;
-    codigo: string | null;
-    /** QR con la dirección ya emparejada, listo para insertar. */
+/** Algo que llegó del celular y no se pudo dar de alta. Se guarda completo. */
+export interface CapturaRechazada {
+    captura_id: string;
+    tipo: string;
+    motivo: string;
+    recibida_en: string;
+}
+
+export interface VistaRelevo {
+    /** El enlace con el secreto de la tienda: lo que va en el QR. */
+    enlace: string;
     qr_svg: string | null;
-    /** Interfaz en uso, para reconocer si es la del WiFi de la tienda. */
-    interfaz: string | null;
-    /** Otras direcciones del equipo, por si el celular no alcanza la elegida. */
-    alternativas: DireccionRed[];
+    estado: EstadoRelevo;
+    rechazadas: CapturaRechazada[];
+    rechazadas_total: number;
 }
 
 export interface ProductImage {

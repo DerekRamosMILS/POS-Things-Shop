@@ -10,11 +10,10 @@ import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 
-const fuente = readFileSync('src-tauri/src/capture/page.rs', 'utf-8');
-const HTML = fuente.slice(
-    fuente.indexOf('r####"') + 'r####"'.length,
-    fuente.lastIndexOf('"####;'),
-);
+// La página vive en el relevo, que es desde donde se sirve al teléfono.
+const HTML = readFileSync('relevo/public/index.html', 'utf-8');
+/** Un secreto con la forma de los que emite el punto de venta. */
+const SECRETO = 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk';
 
 const reposar = (ms = 60) => new Promise(r => setTimeout(r, ms));
 
@@ -42,7 +41,7 @@ async function abrir(op: Opciones = {}) {
 
     const dom = new JSDOM(HTML, {
         runScripts: 'dangerously',
-        url: 'https://192.168.0.10:7423/?c=123456',
+        url: `https://relevo.test/#k=${SECRETO}`,
         beforeParse(win) {
             const w = win as unknown as Record<string, unknown>;
             w.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }));
@@ -84,7 +83,7 @@ describe('la salida de emergencia', () => {
 
         const dom = new JSDOM(HTML, {
             runScripts: 'dangerously',
-            url: 'https://192.168.0.10:7423/?c=123456',
+            url: `https://relevo.test/#k=${SECRETO}`,
             beforeParse(win) {
                 const w = win as unknown as Record<string, unknown>;
                 w.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) }));
@@ -121,7 +120,7 @@ describe('el aviso de "funciona sin la computadora"', () => {
 
         await esperarA(() => titulo(doc).includes('Lista'), 'que confirmara que está lista');
         expect(visible(doc)).toBe(true);
-        expect(titulo(doc)).toContain('Lista para trabajar sin la computadora');
+        expect(titulo(doc)).toContain('Lista para trabajar sin señal');
     });
 
     it('avisa cuando NO quedó guardada, en vez de callarse', async () => {
@@ -129,7 +128,7 @@ describe('el aviso de "funciona sin la computadora"', () => {
         const { doc } = await abrir({ yaGuardada: false });
 
         await esperarA(() => titulo(doc).includes('NO funciona'), 'que avisara del problema');
-        expect(titulo(doc)).toContain('Todavía NO funciona sin la computadora');
+        expect(titulo(doc)).toContain('Todavía NO funciona sin señal');
     });
 
     it('enseña el error de verdad cuando el registro falla', async () => {

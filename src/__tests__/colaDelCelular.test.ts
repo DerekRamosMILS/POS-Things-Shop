@@ -11,11 +11,10 @@ import { JSDOM } from 'jsdom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
-const fuente = readFileSync('src-tauri/src/capture/page.rs', 'utf-8');
-const HTML = fuente.slice(
-    fuente.indexOf('r####"') + 'r####"'.length,
-    fuente.lastIndexOf('"####;'),
-);
+// La página vive en el relevo, que es desde donde se sirve al teléfono.
+const HTML = readFileSync('relevo/public/index.html', 'utf-8');
+/** Un secreto con la forma de los que emite el punto de venta. */
+const SECRETO = 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk';
 
 type Envio = { captura_id: string; nombre: string };
 
@@ -48,7 +47,8 @@ async function abrirCaptura() {
         if (String(url).includes('/api/verificar')) {
             return { ok: true, json: async () => ({ ok: true }) };
         }
-        const enviado = JSON.parse(init?.body ?? '{}') as Envio;
+        const cuerpo = JSON.parse(init?.body ?? '{}');
+        const enviado = { captura_id: cuerpo.captura_id, ...(cuerpo.datos ?? {}) } as Envio;
         const señalado = caja.rechazaSolo === null
             || caja.rechazaSolo.includes(enviado.nombre)
             || caja.rechazaSolo.includes((enviado as unknown as { sku?: string }).sku ?? '');
@@ -74,7 +74,7 @@ async function abrirCaptura() {
 
     const dom = new JSDOM(HTML, {
         runScripts: 'dangerously',
-        url: 'https://192.168.0.10:7423/?c=123456',
+        url: `https://relevo.test/#k=${SECRETO}`,
         beforeParse(win) {
             const w = win as unknown as Record<string, unknown>;
             w.fetch = fetchFalso;
@@ -301,8 +301,8 @@ describe('contar mercancía', () => {
             if (String(url).includes('/api/catalogo')) {
                 return { ok: true, json: async () => ({ ok: true, productos: catalogo }) };
             }
-            if (String(url).includes('/api/conteo')) {
-                const cuerpo = JSON.parse(init?.body ?? '{}');
+            if (String(url).includes('/api/subir')) {
+                const cuerpo = JSON.parse(init?.body ?? '{}').datos ?? {};
                 enviados.push(cuerpo);
                 return {
                     ok: true,
@@ -317,7 +317,7 @@ describe('contar mercancía', () => {
 
         const dom = new JSDOM(HTML, {
             runScripts: 'dangerously',
-            url: 'https://192.168.0.10:7423/?c=123456',
+            url: `https://relevo.test/#k=${SECRETO}`,
             beforeParse(win) {
                 const w = win as unknown as Record<string, unknown>;
                 w.fetch = fetchFalso;

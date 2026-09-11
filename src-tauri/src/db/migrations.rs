@@ -100,6 +100,10 @@ fn migration_list() -> Vec<(&'static str, &'static str)> {
             "024_movimientos_por_talla",
             include_str!("../../migrations/024_movimientos_por_talla.sql"),
         ),
+        (
+            "025_captura_por_el_relevo",
+            include_str!("../../migrations/025_captura_por_el_relevo.sql"),
+        ),
     ]
 }
 
@@ -157,7 +161,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 24);
+        assert_eq!(applied, 25);
     }
 
     #[test]
@@ -167,7 +171,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 24);
+        assert_eq!(applied, 25);
     }
 
     /// La 017 reconstruye `sales` para corregir su restricción. Una reconstrucción

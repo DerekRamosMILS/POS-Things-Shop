@@ -22,11 +22,14 @@ interface Env {
 /** Cuánto aguanta una captura sin que nadie la recoja. */
 const CADUCIDAD_SEGUNDOS = 30 * 24 * 60 * 60;
 
-/** Tope de capturas sin recoger por tienda. Freno contra un teléfono en bucle. */
-const MAX_PENDIENTES = 600;
+/** Cuánto aguanta el catálogo publicado sin que la tienda lo renueve. */
+const CADUCIDAD_CATALOGO_SEGUNDOS = 60 * 24 * 60 * 60;
 
 /** Tope de una captura: un producto con sus fotos ronda el medio mega. */
 const MAX_BYTES = 8 * 1024 * 1024;
+
+/** Tope del catálogo. Sin fotos, cinco mil prendas caben en menos de uno. */
+const MAX_BYTES_CATALOGO = 5 * 1024 * 1024;
 
 const json = (cuerpo: unknown, status = 200): Response =>
 	new Response(JSON.stringify(cuerpo), {
@@ -47,11 +50,10 @@ const error = (status: number, mensaje: string): Response => json({ ok: false, m
  * la que nombra la carpeta. Quien no lo tenga no puede ni leer ni escribir, y
  * quien vea este código o el contenido de KV tampoco puede deducirlo.
  */
-async function carpetaDe(secreto: string): Promise<string> {
+async function huellaDe(secreto: string): Promise<string> {
 	const bytes = new TextEncoder().encode(secreto);
 	const huella = await crypto.subtle.digest('SHA-256', bytes);
-	const hex = [...new Uint8Array(huella)].map((b) => b.toString(16).padStart(2, '0')).join('');
-	return `t/${hex}`;
+	return [...new Uint8Array(huella)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /** El secreto que trae la petición, o null si no trae uno usable. */
@@ -78,7 +80,11 @@ export default {
 
 		const secreto = secretoDe(req);
 		if (!secreto) return error(401, 'Falta el código de emparejamiento');
-		const carpeta = await carpetaDe(secreto);
+		const huella = await huellaDe(secreto);
+		// Las capturas y el catálogo viven en prefijos distintos: así el listado
+		// de lo pendiente nunca incluye el catálogo por accidente.
+		const carpeta = `t/${huella}`;
+		const claveCatalogo = `c/${huella}`;
 
 		// Que el secreto sirve solo se puede comprobar usándolo: aquí no hay
 		// registro de tiendas ni lista de secretos válidos. Cualquier secreto
@@ -108,13 +114,11 @@ export default {
 			if (entrada.datos === undefined) return error(400, 'La captura viene vacía');
 
 			const clave = `${carpeta}/${id}`;
+			// Antes de subir se contaban las pendientes con un listado, para frenar
+			// a un teléfono en bucle. Cada listado gasta de un cupo diario pequeño
+			// que el punto de venta necesita para recoger; el freno ya lo pone el
+			// cupo de escrituras, y la cola del teléfono no repite identificadores.
 			const yaEstaba = await env.CAPTURAS.get(clave, 'stream');
-			if (!yaEstaba) {
-				const { keys } = await env.CAPTURAS.list({ prefix: `${carpeta}/`, limit: MAX_PENDIENTES });
-				if (keys.length >= MAX_PENDIENTES) {
-					return error(429, 'Hay demasiadas capturas sin recoger. Enciende el punto de venta.');
-				}
-			}
 
 			await env.CAPTURAS.put(clave, JSON.stringify({ tipo, datos: entrada.datos }), {
 				expirationTtl: CADUCIDAD_SEGUNDOS,
@@ -122,6 +126,36 @@ export default {
 			});
 
 			return json({ ok: true, captura_id: id, repetida: Boolean(yaEstaba) });
+		}
+
+		// El catálogo para contar: nombres, códigos y tallas, sin existencias.
+		//
+		// Sin existencias a propósito. Lo que la caja cree que hay es inventario,
+		// y el inventario no sale de la tienda: el conteo funciona igual sin él,
+		// porque quien está frente al perchero ve la verdad y la caja le suma
+		// después lo que se vendió mientras tanto.
+		if (ruta === '/api/catalogo' && req.method === 'PUT') {
+			const largo = Number(req.headers.get('content-length') ?? '0');
+			if (largo > MAX_BYTES_CATALOGO) return error(413, 'El catálogo es demasiado grande');
+
+			let entrada: { productos?: unknown };
+			try {
+				entrada = await req.json();
+			} catch {
+				return error(400, 'El cuerpo no es JSON válido');
+			}
+			if (!Array.isArray(entrada.productos)) return error(400, 'Falta la lista de productos');
+
+			const cuando = new Date().toISOString();
+			await env.CAPTURAS.put(claveCatalogo, JSON.stringify({ productos: entrada.productos, cuando }), {
+				expirationTtl: CADUCIDAD_CATALOGO_SEGUNDOS,
+			});
+			return json({ ok: true, productos: entrada.productos.length, cuando });
+		}
+
+		if (ruta === '/api/catalogo' && req.method === 'GET') {
+			const guardado = await env.CAPTURAS.get<{ productos: unknown[]; cuando: string }>(claveCatalogo, 'json');
+			return json({ ok: true, productos: guardado?.productos ?? [], cuando: guardado?.cuando ?? null });
 		}
 
 		// Lo que el punto de venta todavía no se ha llevado, sin el contenido:

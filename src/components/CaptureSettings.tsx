@@ -2,76 +2,59 @@ import { useCallback, useEffect, useState } from 'react';
 import * as api from '../api';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
-import type { CaptureStatus } from '../types';
+import { formatDateTime } from '../utils';
+import type { VistaRelevo } from '../types';
 
 /**
  * Captura de productos desde el celular.
  *
- * La caja levanta un servidor en la red de la tienda y el teléfono entra desde
- * su navegador: se toman las fotos, se pone el nombre y el producto queda dado
- * de alta con un código que no se repite nunca. No hay nube ni servidor externo.
+ * El teléfono y esta computadora no se hablan directo: el teléfono deja lo
+ * capturado en un buzón en internet y el punto de venta lo recoge solo cada
+ * pocos minutos. No hay nada que encender ni que dejar prendido, y funciona
+ * aunque el celular esté fuera de la tienda o con datos móviles.
  *
- * Como el puerto queda abierto para todo el WiFi mientras está encendido, la
- * pantalla insiste en apagarlo al terminar y muestra siempre que está activo.
+ * Antes era un servidor en el WiFi de la tienda, y ahí murió: el router aísla a
+ * los clientes entre sí. Hacia internet, los dos salen sin problema.
  */
 export default function CaptureSettings({ compacto = false }: { compacto?: boolean } = {}) {
     const { showToast } = useToast();
     const { confirm } = useConfirm();
-    const [estado, setEstado] = useState<CaptureStatus>({
-        encendido: false, url: null, codigo: null, qr_svg: null,
-        interfaz: null, alternativas: [],
-    });
+    const [vista, setVista] = useState<VistaRelevo | null>(null);
     const [ocupado, setOcupado] = useState(false);
 
     const consultar = useCallback(async () => {
-        try { setEstado(await api.captureServerStatus()); } catch { /* la app web no lo tiene */ }
+        try { setVista(await api.relevoEstado()); } catch { /* la app web no lo tiene */ }
     }, []);
 
-    useEffect(() => { consultar(); }, [consultar]);
+    // Solo lee el estado que ya tiene la aplicación; no le pregunta nada a internet.
+    useEffect(() => {
+        consultar();
+        const t = setInterval(consultar, 10_000);
+        return () => clearInterval(t);
+    }, [consultar]);
 
-    const encender = async (ip?: string) => {
+    const traerAhora = async () => {
         setOcupado(true);
         try {
-            setEstado(await api.startCaptureServer(ip));
-            showToast('Listo. Apunta la cámara del celular al código.');
+            const v = await api.relevoSincronizar();
+            setVista(v);
+            if (v.estado.ultimo_error) showToast(v.estado.ultimo_error, 'error');
+            else showToast('Listo: ya está aquí todo lo del celular', 'success');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }
     };
 
-    /// Vuelve a levantar el servidor en otra dirección.
-    ///
-    /// Hace falta cuando el equipo tiene varias redes —un VPN encendido, por
-    /// ejemplo— y la que se eligió sola no es la que ve el teléfono.
-    const cambiarRed = async (ip: string) => {
-        setOcupado(true);
-        try {
-            await api.stopCaptureServer();
-            setEstado(await api.startCaptureServer(ip));
-            showToast('Cambiado. Vuelve a apuntar la cámara al código.');
-        } catch (err) { showToast(String(err), 'error'); }
-        finally { setOcupado(false); }
-    };
-
-    const apagar = async () => {
-        setOcupado(true);
-        try {
-            setEstado(await api.stopCaptureServer());
-            showToast('Captura apagada');
-        } catch (err) { showToast(String(err), 'error'); }
-        finally { setOcupado(false); }
-    };
-
-    const reiniciarCodigo = async () => {
+    const codigoNuevo = async () => {
         const ok = await confirm({
             title: 'Generar un código nuevo',
-            message: 'Ojo: si algún celular tiene productos capturados sin mandar, no va a poder mandarlos hasta que vuelva a apuntar la cámara al código nuevo. ¿Continuar?',
+            message: 'Los celulares emparejados dejan de poder mandar hasta que vuelvan a apuntar la cámara al código nuevo. Antes de cambiarlo se recoge lo que ya mandaron. ¿Continuar?',
             variant: 'warning',
             confirmLabel: 'Generar',
         });
         if (!ok) return;
         setOcupado(true);
         try {
-            setEstado(await api.regenerarCodigoCaptura());
+            setVista(await api.relevoRegenerar());
             showToast('Código nuevo generado');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setOcupado(false); }
@@ -84,100 +67,79 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
             <div className="card" style={{ padding: '22px 24px' }}>{children}</div>
         );
 
+    const estado = vista?.estado;
+    const lineaDeEstado = !estado ? 'Consultando…'
+        : estado.trayendo ? 'Trayendo lo del celular…'
+        : estado.ultimo_error ? `No se pudo recoger: ${estado.ultimo_error}`
+        : estado.ultima_vez ? `Revisado ${formatDateTime(estado.ultima_vez.replace(' ', 'T'))}. Se revisa solo cada 3 minutos.`
+        : 'Todavía no se ha revisado. Se revisa solo cada 3 minutos.';
+
     return (
         <Envoltura>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
-                <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)' }}>
-                    Capturar productos desde el celular
-                </p>
-                {estado.encendido && (
-                    <span className="badge badge-success" style={{ flexShrink: 0 }}>
-                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success)', display: 'inline-block' }} />
-                        Encendida
-                    </span>
-                )}
-            </div>
-
+            <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', marginBottom: 6 }}>
+                Capturar productos desde el celular
+            </p>
             <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 16, lineHeight: 1.5 }}>
-                Toma las fotos con el teléfono y el producto se da de alta solo. La primera
-                vez, el teléfono pide un permiso: son tres toques y se explican en pantalla.
-                Después de eso puedes capturar aunque esta computadora esté apagada, y todo
-                se manda solo cuando la prendas.
+                Toma las fotos con el teléfono y el producto se da de alta solo. Funciona sin
+                internet en el celular: lo capturado se guarda ahí y se manda en cuanto haya
+                señal. Esta computadora lo recoge sola mientras esté abierta.
             </p>
 
-            {!estado.encendido ? (
-                <>
-                    <button onClick={() => encender()} disabled={ocupado} className="btn btn-primary btn-sm">
-                        {ocupado ? 'Encendiendo...' : 'Encender captura'}
-                    </button>
-                    <p style={{ fontSize: 11, color: 'var(--t3)', marginTop: 10, lineHeight: 1.5 }}>
-                        Enciéndela para emparejar un teléfono nuevo o para recibir lo que se
-                        capturó mientras estaba apagada.
+            <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
+                {vista?.qr_svg && (
+                    <div
+                        style={{ width: 168, height: 168, borderRadius: 12, background: '#fff', padding: 10, flexShrink: 0, display: 'grid', placeItems: 'center' }}
+                        dangerouslySetInnerHTML={{ __html: vista.qr_svg }}
+                    />
+                )}
+                <div style={{ flex: 1, minWidth: 190 }}>
+                    <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', marginBottom: 6 }}>
+                        Apunta la cámara del celular al código
                     </p>
-                </>
-            ) : (
-                <>
-                    <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
-                        {estado.qr_svg && (
-                            <div
-                                style={{ width: 168, height: 168, borderRadius: 12, background: '#fff', padding: 10, flexShrink: 0, display: 'grid', placeItems: 'center' }}
-                                dangerouslySetInnerHTML={{ __html: estado.qr_svg }}
-                            />
-                        )}
-                        <div style={{ flex: 1, minWidth: 190 }}>
-                            <p style={{ fontSize: 13, fontWeight: 700, color: 'var(--t1)', marginBottom: 6 }}>
-                                Apunta la cámara del celular al código
-                            </p>
-                            <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 14, lineHeight: 1.5 }}>
-                                La primera vez te va a pedir instalar un permiso: síguelo hasta
-                                el final y guarda la captura en la pantalla de inicio. Si el
-                                código no abre, escribe esta dirección:
-                            </p>
+                    <p style={{ fontSize: 12, color: 'var(--t3)', lineHeight: 1.5 }}>
+                        Se abre la captura en el navegador. Ahí mismo te ofrece instalarla en la
+                        pantalla de inicio: instálala y ábrela siempre desde ahí. Es una sola vez
+                        por teléfono, y no hace falta instalar ningún permiso.
+                    </p>
+                </div>
+            </div>
 
-                            <input readOnly value={estado.url ?? ''} className="input"
-                                style={{ fontFamily: 'monospace', fontSize: 11, marginBottom: 10 }}
-                                onFocus={e => e.currentTarget.select()} />
-                            <p style={{ fontSize: 12, color: 'var(--t3)', marginBottom: 2 }}>Y este número:</p>
-                            <p style={{ fontSize: 26, fontWeight: 900, letterSpacing: '0.14em', color: 'var(--t1)', fontFamily: 'ui-monospace, monospace' }}>
-                                {estado.codigo}
-                            </p>
-                        </div>
-                    </div>
+            <p style={{
+                fontSize: 12, marginBottom: 14, lineHeight: 1.5,
+                color: estado?.ultimo_error ? 'var(--danger)' : 'var(--t3)',
+            }}>
+                {lineaDeEstado}
+                {estado && estado.recibidas > 0 && ` Recibidos desde que se abrió: ${estado.recibidas}.`}
+            </p>
 
-                    {estado.alternativas.length > 1 && (
-                        <div style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 14, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.22)' }}>
-                            <p style={{ fontSize: 12, color: 'var(--t2)', marginBottom: 8, lineHeight: 1.5 }}>
-                                Si el celular no abre la página, prueba con otra de estas:
-                            </p>
-                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                {estado.alternativas.map(d => {
-                                    const enUso = estado.url?.includes(d.ip);
-                                    return (
-                                        <button
-                                            key={d.ip}
-                                            onClick={() => !enUso && cambiarRed(d.ip)}
-                                            disabled={ocupado || enUso}
-                                            className={enUso ? 'btn btn-primary btn-sm' : 'btn btn-ghost btn-sm'}
-                                            style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}
-                                        >
-                                            {d.ip} <span style={{ opacity: .65, marginLeft: 4 }}>{d.interfaz}</span>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <button onClick={apagar} disabled={ocupado} className="btn btn-danger btn-sm">
-                            Apagar captura
-                        </button>
-                        <button onClick={reiniciarCodigo} disabled={ocupado} className="btn btn-ghost btn-sm">
-                            Generar código nuevo
-                        </button>
-                    </div>
-                </>
+            {vista && vista.rechazadas_total > 0 && (
+                <div style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 14, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.22)' }}>
+                    <p style={{ fontSize: 12, color: 'var(--t2)', fontWeight: 700, marginBottom: 6 }}>
+                        {vista.rechazadas_total === 1
+                            ? '1 captura no se pudo dar de alta'
+                            : `${vista.rechazadas_total} capturas no se pudieron dar de alta`}
+                    </p>
+                    <p style={{ fontSize: 11, color: 'var(--t3)', marginBottom: 8, lineHeight: 1.5 }}>
+                        No se perdieron: están guardadas completas, fotos incluidas. Hay que
+                        capturarlas otra vez corrigiendo lo que dice cada una.
+                    </p>
+                    {vista.rechazadas.map(r => (
+                        <p key={r.captura_id} style={{ fontSize: 11, color: 'var(--t2)', lineHeight: 1.5 }}>
+                            <b>{r.tipo === 'conteo' ? 'Conteo' : 'Producto'}</b> · {r.motivo}
+                            <span style={{ color: 'var(--t3)' }}> · {formatDateTime(r.recibida_en.replace(' ', 'T'))}</span>
+                        </p>
+                    ))}
+                </div>
             )}
+
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={traerAhora} disabled={ocupado || estado?.trayendo} className="btn btn-primary btn-sm">
+                    {ocupado ? 'Trayendo…' : 'Traer ahora'}
+                </button>
+                <button onClick={codigoNuevo} disabled={ocupado} className="btn btn-ghost btn-sm">
+                    Generar código nuevo
+                </button>
+            </div>
         </Envoltura>
     );
 }

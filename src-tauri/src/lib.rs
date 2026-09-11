@@ -134,9 +134,16 @@ pub fn run() {
             // Rehydrate still-valid sessions so logins survive restarts.
             let session_map = session::load_sessions(&conn);
 
-            app.manage(DbState::new(conn));
+            let db_state = DbState::new(conn);
+            let db = Arc::clone(&db_state.db);
+            app.manage(db_state);
             app.manage(SessionState::with_map(session_map));
-            app.manage(Arc::new(capture::CaptureState::new()));
+
+            // Lo capturado con el celular llega solo, cada pocos minutos, sin
+            // nada que encender en la tienda.
+            let relevo = Arc::new(capture::relevo::RelevoState::default());
+            capture::relevo::arrancar(db, Arc::clone(&relevo));
+            app.manage(relevo);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -252,10 +259,9 @@ pub fn run() {
             hardware::print_sale_receipt,
             hardware::print_layaway_receipt,
             // Captura desde el celular
-            capture::server::start_capture_server,
-            capture::server::stop_capture_server,
-            capture::server::capture_server_status,
-            capture::server::regenerar_codigo_captura,
+            capture::relevo::relevo_estado,
+            capture::relevo::relevo_sincronizar,
+            capture::relevo::relevo_regenerar,
             // Demo data
             seed::seed_demo_data,
         ])
