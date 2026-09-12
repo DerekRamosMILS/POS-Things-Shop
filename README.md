@@ -1,8 +1,13 @@
 # Things Shop POS
 
 Punto de venta de escritorio para tienda de ropa. React + TypeScript en el frente,
-Tauri 2 + Rust + SQLite en el backend. Funciona sin internet: toda la información
-vive en el equipo donde corre la app.
+Tauri 2 + Rust + SQLite en el backend. Toda la información vive en el equipo donde
+corre la app: vender, cobrar, imprimir y cortar caja no dependen de internet.
+
+Dos cosas sí salen a la red, y solo salen —nadie entra a esta computadora—:
+las [actualizaciones](#actualizaciones-automáticas), que se bajan de GitHub, y la
+[captura desde el celular](#captura-desde-el-celular), que pasa por un buzón en
+Cloudflare. Si se cae el internet, las dos esperan y lo demás sigue igual.
 
 ## Documentación
 
@@ -29,10 +34,16 @@ demostración en memoria — útil para trabajar en la interfaz, pero sin backen
 ## Verificación
 
 ```bash
+pnpm test                         # pruebas del frontend
 pnpm build                        # typecheck + bundle del frontend
 cd src-tauri && cargo test        # pruebas del backend
 cd src-tauri && cargo clippy      # linter de Rust
+cd relevo && pnpm test            # pruebas del buzón (corren en el runtime de Workers)
 ```
+
+`pnpm build` se niega a construir si las versiones de Tauri en Rust y en npm se
+separaron en mayor o menor. No es celo: `tauri build` sí lo valida, falla al final
+de todo y solo en el runner de Windows, donde ya es tarde.
 
 ## Publicar una versión
 
