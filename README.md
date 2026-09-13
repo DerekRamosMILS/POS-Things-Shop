@@ -94,6 +94,47 @@ Las dos firmas son cosas distintas y es fácil confundirlas: la del actualizador
 Sin la segunda el sistema funciona, pero la primera instalación muestra "Windows
 protegió su PC" y hay que entrar en *Más información → Ejecutar de todas formas*.
 
+## Lo que vive fuera de la tienda
+
+La computadora de la tienda está a 2 000 km y nadie de allá va a instalar ni
+configurar nada. Eso obliga a que haya piezas fuera de ella, y conviene tener
+claras cuáles son, porque son las únicas que pueden fallar sin que se vea.
+
+```
+   Tu Mac                    Internet                        La tienda
+   ──────                    ────────                        ─────────
+
+   pnpm publicar ──► GitHub Actions ──► Release + latest.json
+                                                  │
+                                                  │ la app pregunta
+                                                  ▼
+                                          Things Shop POS  ◄── vende sin internet
+                                             (Windows)
+                                                  ▲
+                                                  │ la app recoge
+                                                  │
+   Celular ──────────► Worker + KV (Cloudflare) ──┘
+           deja lo         el buzón
+           capturado
+```
+
+Lo importante del dibujo: **las dos flechas que llegan a la tienda salen de la
+tienda**. La aplicación pregunta, baja y recoge; nadie abre una conexión hacia
+esa computadora. No hay puerto abierto, no hay IP fija que conseguir, no hay nada
+que configurar en el router de la tienda — y no lo hay porque no se puede: ese
+router aísla a sus clientes, y es justo lo que tumbó el primer diseño.
+
+| Pieza | Dónde | Para qué | Si se cae |
+|---|---|---|---|
+| Release + `latest.json` | GitHub, este repo (público) | Que la app encuentre y verifique la versión nueva | No llegan actualizaciones. Vender sigue igual |
+| Worker + KV | Cloudflare, cuenta de Derek | Buzón entre el celular y la tienda | No entran capturas nuevas. Vender sigue igual |
+| Base de datos | La computadora de la tienda | Todo lo que importa | Se para la tienda. Por eso vive ahí y no aquí |
+
+Ninguna de las dos piezas de fuera guarda nada del negocio: ni ventas, ni
+clientes, ni caja, ni existencias. Si mañana se borraran las dos, la tienda
+seguiría operando y lo único que se perdería es la comodidad de actualizar a
+distancia y de capturar con el teléfono.
+
 ## Actualizaciones automáticas
 
 La tienda está lejos y de allá nadie va a instalar nada: publicas desde la Mac y
@@ -155,36 +196,149 @@ encargado de la tienda puede mandar sin entender nada de lo que contiene.
 
 ## Captura desde el celular
 
-El teléfono captura productos y conteos **sin conexión** y los deja en un buzón
-en internet —el relevo, en [`relevo/`](relevo/)—. El punto de venta pasa a
-recogerlos solo cada 3 minutos mientras esté abierto. No se hablan directo.
+Se toman las fotos con el teléfono y el producto se da de alta solo. El teléfono
+funciona **sin conexión**: lo capturado se queda guardado en él y se manda en
+cuanto haya señal, aunque sea desde fuera de la tienda y con datos móviles.
 
-Antes el teléfono se conectaba a un servidor que esta computadora levantaba en
-el WiFi de la tienda. Funcionaba en la mesa de pruebas y no en la tienda: el
-router aísla a los clientes entre sí y ningún permiso de firewall lo cambia.
-Hacia internet los dos salen sin problema, así que el buzón vive ahí.
+El teléfono y la computadora **nunca se hablan directo**. El teléfono deja lo
+capturado en un buzón en internet, y el punto de venta pasa a recogerlo cada 3
+minutos mientras esté abierto. Ese buzón es el *relevo*, y su código vive en
+[`relevo/`](relevo/).
 
-**Emparejar un teléfono:** Ajustes → Capturar desde el celular, escanear el QR,
-e instalar la página en la pantalla de inicio cuando la ofrezca. Es una vez por
-teléfono y no hay que instalar ningún certificado.
+### Por qué hay un servidor de por medio
+
+El primer diseño no tenía ninguno: esta computadora levantaba un servidor en el
+WiFi de la tienda y el teléfono entraba a él. Funcionó en la mesa de pruebas y
+**nunca funcionó en la tienda**. El router de allá aísla a sus clientes entre sí
+—no se ven ni estando en la misma red—, y eso no lo arregla ningún permiso de
+firewall: lo comprobamos con la regla puesta y el servidor escuchando.
+
+La asimetría que sí sirve es esta: de la tienda **se sale** a internet sin
+problema (por ahí se actualiza la app sola), pero **no se entra**. Un buzón al
+que los dos lados llegan por su cuenta no necesita que nadie entre a ningún lado.
+
+### Qué es, en Cloudflare
+
+Dos cosas, ambas en el plan gratuito de la cuenta de Derek:
 
 | | |
 |---|---|
-| Qué pasa por el relevo | Lo capturado: nombre, precio, tallas, piezas, fotos. Y el catálogo para contar: nombres, códigos y tallas, **sin existencias** |
-| Qué no pasa nunca | Ventas, clientes, caja, inventario |
-| Cuánto se queda | Hasta que el punto de venta lo recoge. Lo que nadie recoja caduca solo a los 30 días |
-| Quién puede entrar | Quien tenga el secreto de la tienda (32 bytes al azar, viaja en el QR después del `#`). **Generar código nuevo** lo cambia |
+| **Worker** `things-shop-relevo` | El código de `relevo/src/index.ts`. Atiende la API y **también sirve la página de captura** que abre el teléfono |
+| **KV** (binding `CAPTURAS`) | Donde se quedan las capturas mientras nadie las recoge. El identificador del namespace está en `relevo/wrangler.jsonc` |
+
+Vive en `https://things-shop-relevo.derek-papa.workers.dev`, y esa dirección va
+horneada en la app (`URL_PREDETERMINADA`, en `src-tauri/src/capture/relevo.rs`).
+Se puede apuntar a otro relevo sin recompilar, escribiendo la clave `relevo_url`
+en la tabla `system_config`; no hay pantalla para eso a propósito, porque es algo
+que solo se toca si se muda el buzón.
+
+La página y la API salen del **mismo origen** (`run_worker_first: ["/api/*"]`:
+lo que empieza por `/api/` lo atiende el Worker, el resto son archivos de
+`relevo/public/`). Eso no es un detalle de estilo — significa que no hay CORS que
+configurar ni un segundo despliegue que pueda quedarse atrás del primero.
+
+### Quién puede entrar
+
+La dirección es pública y no hace falta esconderla: sin el secreto de la tienda
+no se ve absolutamente nada.
+
+El punto de venta genera **32 bytes al azar** y la carpeta de esa tienda es el
+`SHA-256` de ese secreto. No hay registro de tiendas ni lista de secretos
+válidos: quien tiene el secreto llega a su carpeta, quien no, no ve ninguna —ni
+sabe si existe—. El Worker rechaza de entrada cualquier secreto de menos de 40
+caracteres, porque esto está expuesto a internet y un secreto corto sería una
+contraseña adivinable.
+
+El secreto viaja al teléfono dentro del QR, **después del `#`**, que es la única
+parte de una URL que los navegadores no mandan al servidor: no aparece en los
+registros de Cloudflare ni se filtra por el `Referer`.
+
+Todas las rutas piden ese secreto (`Authorization: Bearer`) menos una:
+`/api/salud`, que existe justamente para poder distinguir *"el relevo está
+caído"* de *"mi secreto no sirve"*.
+
+### Emparejar un teléfono
+
+**Ajustes → Capturar productos desde el celular**, apuntar la cámara al QR, y
+cuando el navegador lo ofrezca, **instalar la página en la pantalla de inicio** y
+abrirla siempre desde ahí. Es una vez por teléfono y no hay que instalar ningún
+certificado ni dar ningún permiso raro.
+
+Dos botones en esa misma pantalla:
+
+- **Traer ahora** — no espera los 3 minutos. Es la salida de emergencia de la
+  captura, igual que *Actualizar ahora* lo es de las actualizaciones.
+- **Generar código nuevo** — cambia el secreto. Los teléfonos ya emparejados
+  dejan de poder mandar hasta que vuelvan a escanear; antes de cambiarlo se
+  recoge lo que ya habían mandado.
+
+Arriba de los botones hay un renglón que dice cuándo se revisó por última vez, o
+el error si no se pudo. Es lo primero que hay que leer cuando algo no aparece.
+
+### Qué pasa por ahí y qué no
+
+| | |
+|---|---|
+| Qué pasa | Lo capturado: nombre, precio, tallas, colores, piezas y fotos. Y el catálogo para poder contar: nombres, códigos y tallas, **sin existencias** |
+| Qué no pasa nunca | Ventas, clientes, caja, inventario. El punto de venta solo baja; no expone nada |
+| Cuánto se queda | Lo normal es segundos: se recoge, se confirma y se borra. Lo que nadie recoja caduca solo a los 30 días (el catálogo, a los 60) |
+| Cuánto cabe | 8 MB por captura, 5 MB el catálogo |
+
+El borrado va **después** de que la captura quedó guardada en la tienda, nunca
+antes: entre el relevo y la base de datos de la tienda, la copia que importa es
+la de la tienda. Si se corta el internet a media recogida, la captura sigue en el
+buzón y entra en la vuelta siguiente.
 
 Lo que llega y no se puede dar de alta —un conteo de una prenda que se borró, un
-producto sin nombre— sale del buzón para no tapar lo demás, pero se guarda
-completo en la tabla `capturas_rechazadas` y se enseña en la misma pantalla.
+producto sin nombre— sale del buzón para no tapar lo demás, pero **no se pierde**:
+se guarda completo, fotos incluidas, en la tabla `capturas_rechazadas`, y se
+enseña en esa misma pantalla con el motivo.
 
-El intervalo de 3 minutos y el catálogo que solo se publica cuando cambia salen
-del cupo gratuito de KV (1 000 escrituras al día). Si se sondea más seguido, el
-cupo se acaba antes de cerrar la tienda.
+### De dónde salen los 3 minutos
 
-El relevo se despliega aparte, desde su carpeta: `cd relevo && pnpm deploy`.
-Ver [`relevo/README.md`](relevo/README.md).
+Del cupo gratuito de KV, no del gusto: 1 000 escrituras y 1 000 listados al día.
+Cada vuelta hace un listado, así que cada minuto serían 1 440 —se acabaría el
+cupo antes de cerrar la tienda— y cada tres son 480, que deja margen para *Traer
+ahora* y para el día que la app se quede abierta de corrido. Por lo mismo el
+catálogo se publica **solo cuando cambia** y no en cada vuelta.
+
+Los pendientes se leen en páginas de 200, hasta 5 páginas por vuelta; lo que no
+alcance entra en la siguiente. El listado de KV es *eventualmente consistente* y
+puede enseñar algo que ya se borró, lo cual no estorba porque la tienda reconoce
+por `captura_id` lo que ya tiene.
+
+### Cuando no llega algo del celular
+
+En este orden, que va de lo más probable a lo menos:
+
+1. **El renglón de estado** en esa pantalla. Si dice un error, ahí está la
+   respuesta. Si dice que revisó hace rato, la app estuvo cerrada.
+2. **Traer ahora.** Descarta que sea nada más la espera de los 3 minutos.
+3. **¿Capturas rechazadas?** Si el aviso naranja está ahí, sí llegó — lo que
+   falló fue darla de alta, y el motivo lo dice cada renglón.
+4. **¿Vive el relevo?** Abrir `https://things-shop-relevo.derek-papa.workers.dev/api/salud`
+   en cualquier navegador. Si contesta `ok`, el buzón está bien y el problema es
+   de la tienda o del secreto.
+5. **`cd relevo && pnpm tail`** desde la Mac: los registros del Worker en vivo,
+   mientras el teléfono intenta mandar.
+
+### Desplegar el relevo
+
+Va aparte de la app y no se publica con `pnpm publicar`:
+
+```bash
+cd relevo
+pnpm test        # contra el runtime real de Workers, con KV de verdad
+pnpm deploy
+```
+
+Solo hace falta que `wrangler` esté conectado a la cuenta (`wrangler login`); no
+hay secretos que cargar, porque el Worker no guarda ninguno — la autenticación es
+el secreto que trae cada petición.
+
+Cambiar el relevo **no obliga a actualizar la app ni a reemparejar teléfonos**,
+mientras la dirección y las rutas no cambien. Los detalles de dentro están en
+[`relevo/README.md`](relevo/README.md).
 
 ## Dónde viven los datos
 
