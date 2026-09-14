@@ -15,6 +15,12 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+/// Con esto empieza el motivo de todo ajuste que viene de un conteo. Es lo que
+/// permite separarlos de los movimientos de mercancía, también en los conteos
+/// que ya estaban en la base antes de este arreglo.
+const RAZON_CONTEO: &str = "Conteo desde el celular";
+const RAZON_CONTEO_COMO_PATRON: &str = "Conteo desde el celular%";
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ConteoDelCelular {
     /// Lo pone el teléfono al contar, no al mandar: reintentar no cuenta dos veces.
@@ -108,12 +114,18 @@ pub fn aplicar_conteo(
     // esa distinción, anotar "talla M: 5" y vender después tres piezas de la
     // talla G dejaba la M en 2: el conteo absorbía ventas de mercancía que nadie
     // había contado.
+    //
+    // Los ajustes de otros conteos no son movimientos de mercancía: se anotan al
+    // llegar, no al contar, así que un recuento que llega junto con el primer
+    // conteo los veía "después" y se los restaba. Recontar dejaba la talla en
+    // cero.
     let movido: i32 = match entrada.variant_id {
         Some(vid) => db
             .query_row(
                 "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements
-                 WHERE product_id = ?1 AND variant_id = ?2 AND created_at > ?3",
-                params![product_id, vid, entrada.contado_en],
+                 WHERE product_id = ?1 AND variant_id = ?2 AND created_at > ?3
+                   AND NOT (movement_type = 'adjustment' AND reason LIKE ?4)",
+                params![product_id, vid, entrada.contado_en, RAZON_CONTEO_COMO_PATRON],
                 |r| r.get(0),
             )
             .unwrap_or(0),
@@ -121,14 +133,31 @@ pub fn aplicar_conteo(
         None => db
             .query_row(
                 "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements
-                 WHERE product_id = ?1 AND created_at > ?2",
-                params![product_id, entrada.contado_en],
+                 WHERE product_id = ?1 AND created_at > ?2
+                   AND NOT (movement_type = 'adjustment' AND reason LIKE ?3)",
+                params![product_id, entrada.contado_en, RAZON_CONTEO_COMO_PATRON],
                 |r| r.get(0),
             )
             .unwrap_or(0),
     };
 
-    let stock_despues = (entrada.contado + movido).max(0);
+    // El relevo no entrega en el orden en que se contó. Si esta misma prenda ya
+    // tiene un conteo hecho más tarde, ese es la verdad más reciente: este llega
+    // viejo y se anota sin tocar el inventario.
+    let hay_uno_mas_nuevo: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM conteos
+                           WHERE product_id = ?1 AND variant_id IS ?2 AND contado_en > ?3)",
+            params![product_id, entrada.variant_id, entrada.contado_en],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+
+    let (stock_despues, movido) = if hay_uno_mas_nuevo {
+        (stock_antes, 0)
+    } else {
+        ((entrada.contado + movido).max(0), movido)
+    };
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
     let resultado = (|| -> Result<(), String> {
@@ -155,16 +184,18 @@ pub fn aplicar_conteo(
             }
         }
 
-        let razon = if movido == 0 {
-            "Conteo desde el celular".to_string()
-        } else {
-            format!("Conteo desde el celular (se movieron {} mientras tanto)", movido)
-        };
-        db.execute(
-            "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
-             VALUES (?1, ?2, 'adjustment', ?3, ?4, ?5, ?6, ?7)",
-            params![product_id, entrada.variant_id, stock_despues - stock_antes, stock_antes, stock_despues, razon, user_id],
-        ).map_err(|e| e.to_string())?;
+        if !hay_uno_mas_nuevo {
+            let razon = if movido == 0 {
+                RAZON_CONTEO.to_string()
+            } else {
+                format!("{} (se movieron {} mientras tanto)", RAZON_CONTEO, movido)
+            };
+            db.execute(
+                "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
+                 VALUES (?1, ?2, 'adjustment', ?3, ?4, ?5, ?6, ?7)",
+                params![product_id, entrada.variant_id, stock_despues - stock_antes, stock_antes, stock_despues, razon, user_id],
+            ).map_err(|e| e.to_string())?;
+        }
 
         db.execute(
             "INSERT INTO conteos (conteo_id, product_id, variant_id, contado, contado_en,
@@ -444,5 +475,39 @@ mod tests {
         let mut fantasma = conteo(4, "2026-01-01 15:00:00");
         fantasma.sku = "NO-EXISTE".into();
         assert!(aplicar_conteo(&db, Some(1), &fantasma).is_err());
+    }
+
+    #[test]
+    fn recontar_no_le_resta_al_segundo_conteo_el_ajuste_del_primero() {
+        // Se cuenta 5, se nota el error y se recuenta 6. Los dos llegan juntos:
+        // el ajuste del primero se anota al llegar, "después" del segundo, y
+        // sumarlo como si fuera una venta dejaba 3.
+        let db = tienda();
+        aplicar_conteo(&db, Some(1), &conteo(5, "2026-01-01 15:00:00")).unwrap();
+        aplicar_conteo(&db, Some(1), &conteo(6, "2026-01-01 15:01:00")).unwrap();
+        assert_eq!(stock(&db), 6);
+    }
+
+    #[test]
+    fn un_conteo_viejo_que_llega_tarde_no_pisa_a_uno_mas_nuevo() {
+        // El relevo no entrega en orden: el recuento puede aplicarse primero.
+        let db = tienda();
+        aplicar_conteo(&db, Some(1), &conteo(6, "2026-01-01 15:01:00")).unwrap();
+        let r = aplicar_conteo(&db, Some(1), &conteo(5, "2026-01-01 15:00:00")).unwrap();
+        assert_eq!(stock(&db), 6);
+        assert_eq!(r.antes, r.despues);
+    }
+
+    #[test]
+    fn un_conteo_viejo_no_pisa_lo_vendido_despues_del_nuevo() {
+        let db = tienda();
+        aplicar_conteo(&db, Some(1), &conteo(6, "2026-01-01 15:01:00")).unwrap();
+        db.execute(
+            "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, created_at)
+             VALUES (1, 'sale', -1, 6, 5, '2099-01-01 10:00:00')", [],
+        ).unwrap();
+        db.execute("UPDATE products SET stock = 5 WHERE id = 1", []).unwrap();
+        aplicar_conteo(&db, Some(1), &conteo(9, "2026-01-01 15:00:00")).unwrap();
+        assert_eq!(stock(&db), 5);
     }
 }

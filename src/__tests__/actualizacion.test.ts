@@ -183,3 +183,52 @@ describe('el botón de actualizar a mano', () => {
         expect(mensaje).toContain('Network unreachable');
     });
 });
+
+describe('cuando el instalador falla', () => {
+    beforeEach(() => {
+        check.mockReset();
+        useCartStore.getState().clear();
+        useSessionStore.setState({ user: null, token: null, cashRegisterId: null });
+        useActualizacionStore.setState({
+            fase: 'inactivo', version: null, error: null, ultimaRevision: null, instalacionFallida: false,
+        });
+    });
+
+    function instaladorRoto() {
+        const intentos = { n: 0 };
+        check.mockResolvedValue({
+            version: '9.9.9',
+            download: async () => {},
+            install: async () => { intentos.n++; throw new Error('El antivirus borró el instalador'); },
+        });
+        return intentos;
+    }
+
+    it('la automática no lo vuelve a intentar sola', async () => {
+        // Al fallar, la fase regresa a "lista", y el efecto que instala escucha
+        // la fase: volvía a llamar enseguida, fallaba otra vez, y así sin pausa.
+        // La caja parpadeaba entre la pantalla de "instalando" y la aplicación, y
+        // cada vuelta escribía dos renglones en la bitácora.
+        const intentos = instaladorRoto();
+        const store = useActualizacionStore.getState();
+        await store.buscar();
+
+        await useActualizacionStore.getState().instalar({ automatica: true });
+        await useActualizacionStore.getState().instalar({ automatica: true });
+        await useActualizacionStore.getState().instalar({ automatica: true });
+
+        expect(intentos.n).toBe(1);
+        expect(useActualizacionStore.getState().fase).toBe('lista');
+    });
+
+    it('a mano sí se puede reintentar', async () => {
+        const intentos = instaladorRoto();
+        await useActualizacionStore.getState().buscar();
+        await useActualizacionStore.getState().instalar({ automatica: true });
+
+        const mensaje = await useActualizacionStore.getState().forzar();
+
+        expect(intentos.n).toBe(2);
+        expect(mensaje).toContain('antivirus');
+    });
+});

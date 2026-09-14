@@ -5,11 +5,17 @@ use crate::db::connection::DbState;
 use crate::models::config::SystemConfig;
 use crate::session::{require_admin, require_auth, SessionState};
 
-#[tauri::command]
-pub fn get_all_config(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<SystemConfig>, String> {
-    require_auth(&sessions, &token)?;
-    let db = state.conn();
+/// Claves que no salen por la configuración genérica.
+///
+/// `get_all_config` y `get_config` las puede leer cualquiera con sesión, cajeras
+/// incluidas. El secreto del relevo deja subir productos y conteos que cambian
+/// el inventario desde cualquier parte del mundo; por esta puerta se lo llevaba
+/// cualquiera, y el candado de administrador de `relevo_estado` no servía de nada.
+fn es_privada(key: &str) -> bool {
+    key.trim().starts_with("relevo_secreto")
+}
 
+pub(crate) fn configuracion_publica(db: &rusqlite::Connection) -> Result<Vec<SystemConfig>, String> {
     let mut stmt = db.prepare("SELECT key, value, description FROM system_config ORDER BY key")
         .map_err(|e| e.to_string())?;
 
@@ -25,12 +31,22 @@ pub fn get_all_config(state: State<DbState>, sessions: State<SessionState>, toke
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    Ok(configs)
+    Ok(configs.into_iter().filter(|c| !es_privada(&c.key)).collect())
+}
+
+#[tauri::command]
+pub fn get_all_config(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<SystemConfig>, String> {
+    require_auth(&sessions, &token)?;
+    let db = state.conn();
+    configuracion_publica(&db)
 }
 
 #[tauri::command]
 pub fn get_config(state: State<DbState>, sessions: State<SessionState>, token: String, key: String) -> Result<String, String> {
     require_auth(&sessions, &token)?;
+    if es_privada(&key) {
+        return Err("Ese valor no se puede consultar".to_string());
+    }
     let db = state.conn();
 
     db.query_row(
@@ -43,6 +59,9 @@ pub fn get_config(state: State<DbState>, sessions: State<SessionState>, token: S
 #[tauri::command]
 pub fn set_config(state: State<DbState>, sessions: State<SessionState>, token: String, key: String, value: String) -> Result<(), String> {
     require_admin(&sessions, &token)?;
+    if es_privada(&key) {
+        return Err("Ese valor no se puede cambiar desde aquí".to_string());
+    }
     let db = state.conn();
 
     db.execute(
@@ -162,6 +181,23 @@ mod tests {
         // El error del sistema a veces es una página entera.
         let recortado: String = "x".repeat(5000).chars().take(400).collect();
         assert_eq!(recortado.chars().count(), 400);
+    }
+
+    #[test]
+    fn el_secreto_del_relevo_no_sale_por_la_configuracion() {
+        let conn = db();
+        let secreto = crate::capture::relevo::secreto_de_la_tienda(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO system_config (key, value) VALUES ('relevo_secreto_anterior', 'otro-secreto-cualquiera')",
+            [],
+        ).unwrap();
+
+        let todo = configuracion_publica(&conn).unwrap();
+
+        assert!(!todo.is_empty(), "lo demás sí tiene que salir");
+        assert!(todo.iter().all(|c| c.value != secreto && !c.key.starts_with("relevo_secreto")));
+        assert!(es_privada("relevo_secreto") && es_privada(" relevo_secreto_anterior"));
+        assert!(!es_privada("relevo_url") && !es_privada("currency_symbol"));
     }
 
     #[test]

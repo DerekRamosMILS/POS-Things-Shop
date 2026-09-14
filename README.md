@@ -268,9 +268,16 @@ Dos botones en esa misma pantalla:
 
 - **Traer ahora** — no espera los 3 minutos. Es la salida de emergencia de la
   captura, igual que *Actualizar ahora* lo es de las actualizaciones.
-- **Generar código nuevo** — cambia el secreto. Los teléfonos ya emparejados
-  dejan de poder mandar hasta que vuelvan a escanear; antes de cambiarlo se
-  recoge lo que ya habían mandado.
+- **Generar código nuevo** — cambia el secreto. Primero le avisa al relevo que
+  el viejo queda retirado, y **sin internet no lo cambia**: cambiarlo solo en la
+  computadora dejaba a los teléfonos subiendo a una carpeta que ya nadie miraba,
+  con el relevo contestándoles que sí había llegado. Un teléfono con el código
+  viejo recibe "este código ya no sirve", **conserva lo que capturó**, y lo manda
+  en cuanto vuelve a escanear el QR. Lo que alcanzó a subir con el viejo se
+  sigue recogiendo durante media hora.
+
+El secreto no sale por la configuración general de la app: solo lo ve un
+administrador, en esta pantalla.
 
 Arriba de los botones hay un renglón que dice cuándo se revisó por última vez, o
 el error si no se pudo. Es lo primero que hay que leer cuando algo no aparece.

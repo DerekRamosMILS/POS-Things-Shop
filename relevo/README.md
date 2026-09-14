@@ -46,6 +46,17 @@ Referer.
 | `GET /api/pendientes` | Lo que falta por recoger, sin el contenido |
 | `GET /api/pendiente/:id` | El contenido de una |
 | `POST /api/recibido` | El punto de venta ya la guardó: bórrala |
+| `PUT` / `GET /api/catalogo` | El catálogo para contar, sin existencias |
+| `POST /api/retirar` | Este código ya no sirve para subir. La tienda sí puede seguir recogiendo lo que quedó |
+
+## Retirar un código
+
+Como no hay lista de secretos, el relevo no tiene cómo saber que la tienda
+cambió el suyo. Sin `/api/retirar`, un teléfono sin re-emparejar seguía subiendo
+con el código viejo: recibía "ok", borraba su copia, y la tienda ya nunca miraba
+esa carpeta. Ahora queda una marca (`r/<huella>`, un año) y el relevo le niega al
+teléfono `subir`, `verificar` y el catálogo con un 401. El teléfono conserva lo
+capturado y pide volver a escanear.
 
 ## Trabajar aquí
 

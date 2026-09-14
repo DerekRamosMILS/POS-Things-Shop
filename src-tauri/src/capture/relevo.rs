@@ -34,6 +34,12 @@ pub const URL_PREDETERMINADA: &str = "https://things-shop-relevo.derek-papa.work
 const CLAVE_URL: &str = "relevo_url";
 const CLAVE_SECRETO: &str = "relevo_secreto";
 const CLAVE_HUELLA_CATALOGO: &str = "relevo_catalogo_publicado";
+const CLAVE_SECRETO_ANTERIOR: &str = "relevo_secreto_anterior";
+const CLAVE_ANTERIOR_DESDE: &str = "relevo_secreto_anterior_desde";
+
+/// Cuánto se sigue recogiendo la carpeta de un código que se cambió. Retirarlo
+/// tarda hasta un minuto en verse en todo el mundo; esto sobra de largo.
+const RECOGER_ANTERIOR_DURANTE: chrono::Duration = chrono::Duration::minutes(30);
 
 /// Cada cuánto se pasa por el buzón.
 ///
@@ -261,14 +267,17 @@ pub(crate) fn aplicar_captura(db: &Connection, cuerpo: &str) -> Resultado {
 /// detrás, que fue exactamente el error de la cola del teléfono— pero no se
 /// tira: queda completo en la base, fotos incluidas, con el motivo. Nada de lo
 /// que se capturó se pierde en silencio.
-fn guardar_rechazada(db: &Connection, captura_id: &str, tipo: &str, motivo: &str, contenido: &str) {
-    let nueva = db
-        .execute(
-            "INSERT OR IGNORE INTO capturas_rechazadas (captura_id, tipo, motivo, contenido)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![captura_id, tipo, motivo, contenido],
-        )
-        .unwrap_or(0);
+///
+/// Devuelve si quedó guardada. Si la base no pudo apartarla, no se confirma al
+/// relevo: borrarla de allá sería perderla.
+fn guardar_rechazada(db: &Connection, captura_id: &str, tipo: &str, motivo: &str, contenido: &str) -> bool {
+    let Ok(nueva) = db.execute(
+        "INSERT OR IGNORE INTO capturas_rechazadas (captura_id, tipo, motivo, contenido)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![captura_id, tipo, motivo, contenido],
+    ) else {
+        return false;
+    };
     if nueva > 0 {
         db.execute(
             "INSERT INTO app_logs (level, module, message) VALUES ('warn', 'relevo', ?1)",
@@ -276,6 +285,7 @@ fn guardar_rechazada(db: &Connection, captura_id: &str, tipo: &str, motivo: &str
         )
         .ok();
     }
+    true
 }
 
 // ─── Estado compartido ───────────────────────────────────────────────────────
@@ -401,7 +411,7 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
     // Todo lo que hace falta de la base, de una vez, y soltando el candado antes
     // de tocar la red: si la base se quedara tomada mientras el WiFi tarda, la
     // caja se congelaría a media venta.
-    let (url, secreto, catalogo, huella_nueva, huella_vieja) = {
+    let (url, secreto, catalogo, huella_nueva, huella_vieja, anterior) = {
         let conn = recuperar(db.lock());
         // Sin secreto nadie ha emparejado un teléfono todavía: no hay a quién
         // preguntarle nada, y no se toca la red.
@@ -415,7 +425,10 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
         // El secreto entra en la huella para que cambiar de código vuelva a
         // publicar el catálogo en la carpeta nueva.
         let nueva = huella(&format!("{}\n{}", secreto, catalogo));
-        (url_del_relevo(&conn), secreto, catalogo, nueva, leer(&conn, CLAVE_HUELLA_CATALOGO))
+        let anterior = leer(&conn, CLAVE_SECRETO_ANTERIOR)
+            .zip(leer(&conn, CLAVE_ANTERIOR_DESDE))
+            .filter(|(s, _)| *s != secreto);
+        (url_del_relevo(&conn), secreto, catalogo, nueva, leer(&conn, CLAVE_HUELLA_CATALOGO), anterior)
     };
 
     let cliente = cliente()?;
@@ -438,6 +451,37 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
         resumen.catalogo_publicado = true;
     }
 
+    recoger(db, &cliente, &url, &secreto, &mut resumen).await?;
+
+    // 5. Lo que quedó bajo el código anterior. Retirarlo tarda hasta un minuto
+    //    en verse en todo el mundo, y en ese rato un teléfono todavía pudo subir
+    //    con él: se sigue recogiendo esa carpeta un tiempo y después se olvida.
+    if let Some((anterior, desde)) = anterior {
+        recoger(db, &cliente, &url, &anterior, &mut resumen).await?;
+        let vencido = chrono::NaiveDateTime::parse_from_str(&desde, "%Y-%m-%d %H:%M:%S")
+            .map(|d| chrono::Local::now().naive_local() - d > RECOGER_ANTERIOR_DURANTE)
+            .unwrap_or(true);
+        if vencido {
+            let conn = recuperar(db.lock());
+            conn.execute(
+                "DELETE FROM system_config WHERE key IN (?1, ?2)",
+                params![CLAVE_SECRETO_ANTERIOR, CLAVE_ANTERIOR_DESDE],
+            )
+            .ok();
+        }
+    }
+
+    Ok(Some(resumen))
+}
+
+/// Recoge todo lo pendiente en la carpeta de un secreto.
+async fn recoger(
+    db: &Arc<Mutex<Connection>>,
+    cliente: &reqwest::Client,
+    url: &str,
+    secreto: &str,
+    resumen: &mut Resumen,
+) -> Result<(), String> {
     // 2. Qué hay por recoger.
     let mut ids: Vec<String> = Vec::new();
     let mut cursor: Option<String> = None;
@@ -448,7 +492,7 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
             None => reqwest::Url::parse(&base),
         }
         .map_err(|e| format!("La dirección del relevo no es válida: {}", e))?;
-        let r = cliente.get(direccion).bearer_auth(&secreto).send().await.map_err(de_red)?;
+        let r = cliente.get(direccion).bearer_auth(secreto).send().await.map_err(de_red)?;
         let listado: Listado = exito(r).await?.json().await.map_err(de_red)?;
         ids.extend(listado.pendientes.into_iter().map(|p| p.captura_id).filter(|id| id_valido(id)));
         cursor = listado.cursor;
@@ -462,7 +506,7 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
     for id in ids {
         let r = cliente
             .get(format!("{}/api/pendiente/{}", url, id))
-            .bearer_auth(&secreto)
+            .bearer_auth(secreto)
             .send()
             .await
             .map_err(de_red)?;
@@ -485,7 +529,9 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
                     .ok();
                 }
                 Resultado::Rechazada { tipo, motivo } => {
-                    guardar_rechazada(&conn, &id, tipo, motivo, &cuerpo);
+                    if !guardar_rechazada(&conn, &id, tipo, motivo, &cuerpo) {
+                        continue;
+                    }
                 }
             }
             resultado
@@ -503,7 +549,7 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
     for tanda in confirmar.chunks(200) {
         let r = cliente
             .post(format!("{}/api/recibido", url))
-            .bearer_auth(&secreto)
+            .bearer_auth(secreto)
             .json(&serde_json::json!({ "ids": tanda }))
             .send()
             .await
@@ -511,7 +557,18 @@ async fn vuelta(db: &Arc<Mutex<Connection>>) -> Result<Option<Resumen>, String> 
         exito(r).await?;
     }
 
-    Ok(Some(resumen))
+    Ok(())
+}
+
+/// Le dice al relevo que un código ya no sirve para subir.
+async fn retirar(url: &str, secreto: &str) -> Result<(), String> {
+    let r = cliente()?
+        .post(format!("{}/api/retirar", url))
+        .bearer_auth(secreto)
+        .send()
+        .await
+        .map_err(de_red)?;
+    exito(r).await.map(|_| ())
 }
 
 /// Pasa por el buzón una vez y deja el resultado en el estado compartido.
@@ -651,6 +708,46 @@ pub async fn relevo_sincronizar(
     vista(&db, &rel)
 }
 
+/// Cambia el secreto de la tienda: lo retira en el relevo y, solo si eso salió
+/// bien, guarda uno nuevo y apunta el viejo para seguir recogiendo su carpeta.
+pub(crate) async fn cambiar_codigo(db: &Arc<Mutex<Connection>>) -> Result<(), String> {
+    let (url, viejo) = {
+        let db = recuperar(db.lock());
+        (url_del_relevo(&db), leer(&db, CLAVE_SECRETO))
+    };
+
+    // Primero se retira el viejo en el relevo, y si no se puede, no se cambia.
+    // Cambiarlo solo aquí dejaba a los teléfonos sin re-emparejar subiendo a una
+    // carpeta que la tienda ya no mira, con el relevo contestándoles que sí.
+    if let Some(ref viejo) = viejo {
+        retirar(&url, viejo)
+            .await
+            .map_err(|e| format!("No se cambió el código, para no perder lo que manden los celulares. {}", e))?;
+    }
+
+    {
+        let db = recuperar(db.lock());
+        guardar(&db, CLAVE_SECRETO, &secreto_nuevo(), "Secreto de emparejamiento con el relevo de capturas")?;
+        if let Some(ref viejo) = viejo {
+            guardar(&db, CLAVE_SECRETO_ANTERIOR, viejo, "Código anterior del relevo, mientras se recoge lo que quedó")?;
+            guardar(
+                &db,
+                CLAVE_ANTERIOR_DESDE,
+                &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                "Desde cuándo se retiró el código anterior",
+            )?;
+        }
+        db.execute("DELETE FROM system_config WHERE key = ?1", params![CLAVE_HUELLA_CATALOGO]).ok();
+        db.execute(
+            "INSERT INTO app_logs (level, module, message) VALUES ('warn', 'relevo', 'Código de emparejamiento del celular cambiado')",
+            [],
+        )
+        .ok();
+    }
+
+    Ok(())
+}
+
 /// Emite un secreto nuevo. Los teléfonos emparejados dejan de servir hasta que
 /// vuelvan a escanear el QR.
 #[tauri::command]
@@ -662,18 +759,13 @@ pub async fn relevo_regenerar(
 ) -> Result<VistaRelevo, String> {
     require_admin(&sessions, &token)?;
     let rel = Arc::clone(relevo.inner());
-    // Antes de cambiarlo se recoge lo que quedó con el viejo: después, lo que
-    // estuviera en el buzón bajo el código anterior ya no se podría pedir.
-    let _ = sincronizar(Arc::clone(&state.db), Arc::clone(&rel)).await;
 
+    cambiar_codigo(&state.db).await?;
+
+    // Lo que quedó con el viejo se recoge ahora y en las vueltas de la próxima
+    // media hora; si esta falla, lo intentan ellas.
+    let _ = sincronizar(Arc::clone(&state.db), Arc::clone(&rel)).await;
     let db = state.conn();
-    guardar(&db, CLAVE_SECRETO, &secreto_nuevo(), "Secreto de emparejamiento con el relevo de capturas")?;
-    db.execute("DELETE FROM system_config WHERE key = ?1", params![CLAVE_HUELLA_CATALOGO]).ok();
-    db.execute(
-        "INSERT INTO app_logs (level, module, message) VALUES ('warn', 'relevo', 'Código de emparejamiento del celular cambiado')",
-        [],
-    )
-    .ok();
     vista(&db, &rel)
 }
 
@@ -873,15 +965,20 @@ mod vuelta_completa {
     #[derive(Default)]
     struct Buzon {
         secreto: Mutex<String>,
-        pendientes: Mutex<BTreeMap<String, String>>,
+        /// Lo pendiente de cada secreto, como las carpetas del relevo de verdad.
+        carpetas: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+        /// Secretos retirados: ya no suben, pero la tienda sí puede recoger.
+        retirados: Mutex<Vec<String>>,
+        fallar_retiro: Mutex<bool>,
         catalogos: Mutex<Vec<String>>,
         /// Cuántas confirmaciones más van a fallar antes de funcionar.
         fallar_confirmaciones: Mutex<u32>,
     }
 
-    fn autorizado(b: &Buzon, h: &HeaderMap) -> bool {
-        h.get("authorization").and_then(|v| v.to_str().ok())
-            == Some(format!("Bearer {}", b.secreto.lock().unwrap()).as_str())
+    /// El secreto con que se pide, si el buzón lo acepta para recoger.
+    fn autorizado(b: &Buzon, h: &HeaderMap) -> Option<String> {
+        let s = h.get("authorization")?.to_str().ok()?.strip_prefix("Bearer ")?.to_string();
+        (s == *b.secreto.lock().unwrap() || b.retirados.lock().unwrap().contains(&s)).then_some(s)
     }
 
     async fn levantar(buzon: Arc<Buzon>) -> String {
@@ -889,7 +986,7 @@ mod vuelta_completa {
             .route(
                 "/api/catalogo",
                 put(|Estado(b): Estado<Arc<Buzon>>, h: HeaderMap, cuerpo: String| async move {
-                    if !autorizado(&b, &h) {
+                    if autorizado(&b, &h).is_none() {
                         return StatusCode::UNAUTHORIZED;
                     }
                     b.catalogos.lock().unwrap().push(cuerpo);
@@ -899,14 +996,16 @@ mod vuelta_completa {
             .route(
                 "/api/pendientes",
                 get(|Estado(b): Estado<Arc<Buzon>>, h: HeaderMap| async move {
-                    if !autorizado(&b, &h) {
+                    let Some(s) = autorizado(&b, &h) else {
                         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "ok": false, "mensaje": "Falta el código" })));
-                    }
+                    };
                     let lista: Vec<_> = b
-                        .pendientes
+                        .carpetas
                         .lock()
                         .unwrap()
-                        .keys()
+                        .get(&s)
+                        .into_iter()
+                        .flat_map(|c| c.keys())
                         .map(|k| serde_json::json!({ "captura_id": k }))
                         .collect();
                     (StatusCode::OK, Json(serde_json::json!({ "ok": true, "pendientes": lista, "cursor": null })))
@@ -915,10 +1014,10 @@ mod vuelta_completa {
             .route(
                 "/api/pendiente/:id",
                 get(|Estado(b): Estado<Arc<Buzon>>, h: HeaderMap, Path(id): Path<String>| async move {
-                    if !autorizado(&b, &h) {
+                    let Some(s) = autorizado(&b, &h) else {
                         return (StatusCode::UNAUTHORIZED, String::new());
-                    }
-                    match b.pendientes.lock().unwrap().get(&id) {
+                    };
+                    match b.carpetas.lock().unwrap().get(&s).and_then(|c| c.get(&id)) {
                         Some(c) => (StatusCode::OK, c.clone()),
                         None => (StatusCode::NOT_FOUND, String::new()),
                     }
@@ -927,9 +1026,9 @@ mod vuelta_completa {
             .route(
                 "/api/recibido",
                 post(|Estado(b): Estado<Arc<Buzon>>, h: HeaderMap, Json(v): Json<serde_json::Value>| async move {
-                    if !autorizado(&b, &h) {
+                    let Some(s) = autorizado(&b, &h) else {
                         return StatusCode::UNAUTHORIZED;
-                    }
+                    };
                     {
                         let mut fallar = b.fallar_confirmaciones.lock().unwrap();
                         if *fallar > 0 {
@@ -937,10 +1036,24 @@ mod vuelta_completa {
                             return StatusCode::INTERNAL_SERVER_ERROR;
                         }
                     }
-                    let mut p = b.pendientes.lock().unwrap();
+                    let mut carpetas = b.carpetas.lock().unwrap();
+                    let p = carpetas.entry(s).or_default();
                     for id in v["ids"].as_array().unwrap() {
                         p.remove(id.as_str().unwrap());
                     }
+                    StatusCode::OK
+                }),
+            )
+            .route(
+                "/api/retirar",
+                post(|Estado(b): Estado<Arc<Buzon>>, h: HeaderMap| async move {
+                    if *b.fallar_retiro.lock().unwrap() {
+                        return StatusCode::INTERNAL_SERVER_ERROR;
+                    }
+                    let Some(s) = autorizado(&b, &h) else {
+                        return StatusCode::UNAUTHORIZED;
+                    };
+                    b.retirados.lock().unwrap().push(s);
                     StatusCode::OK
                 }),
             )
@@ -962,7 +1075,18 @@ mod vuelta_completa {
     }
 
     fn dejar(buzon: &Buzon, id: &str, cuerpo: serde_json::Value) {
-        buzon.pendientes.lock().unwrap().insert(id.to_string(), cuerpo.to_string());
+        let secreto = buzon.secreto.lock().unwrap().clone();
+        dejar_en(buzon, &secreto, id, cuerpo);
+    }
+
+    fn dejar_en(buzon: &Buzon, secreto: &str, id: &str, cuerpo: serde_json::Value) {
+        buzon.carpetas.lock().unwrap().entry(secreto.to_string()).or_default().insert(id.to_string(), cuerpo.to_string());
+    }
+
+    /// Cuántas quedan en la carpeta del secreto vigente.
+    fn en_el_buzon(buzon: &Buzon) -> usize {
+        let secreto = buzon.secreto.lock().unwrap().clone();
+        buzon.carpetas.lock().unwrap().get(&secreto).map_or(0, |c| c.len())
     }
 
     fn productos(db: &Arc<Mutex<Connection>>, nombre: &str) -> i64 {
@@ -988,7 +1112,7 @@ mod vuelta_completa {
         assert_eq!(stock, 9);
         let apartadas: i64 = db.lock().unwrap().query_row("SELECT COUNT(*) FROM capturas_rechazadas WHERE captura_id = 'malo'", [], |r| r.get(0)).unwrap();
         assert_eq!(apartadas, 1, "lo malo se aparta, no se tira");
-        assert!(buzon.pendientes.lock().unwrap().is_empty(), "el buzón queda vacío, lo malo incluido");
+        assert_eq!(en_el_buzon(&buzon), 0, "el buzón queda vacío, lo malo incluido");
         assert!(!buzon.catalogos.lock().unwrap()[0].contains("stock"), "el catálogo salió con existencias");
         assert_eq!(relevo.estado().recibidas, 2);
     }
@@ -1018,11 +1142,11 @@ mod vuelta_completa {
 
         assert!(sincronizar(Arc::clone(&db), Arc::clone(&relevo)).await.is_err());
         assert_eq!(productos(&db, "Chamarra"), 1, "ya se dio de alta aunque no se confirmó");
-        assert_eq!(buzon.pendientes.lock().unwrap().len(), 1, "y sigue en el buzón");
+        assert_eq!(en_el_buzon(&buzon), 1, "y sigue en el buzón");
 
         sincronizar(Arc::clone(&db), Arc::clone(&relevo)).await.unwrap();
         assert_eq!(productos(&db, "Chamarra"), 1, "la segunda vuelta no la duplica");
-        assert!(buzon.pendientes.lock().unwrap().is_empty());
+        assert_eq!(en_el_buzon(&buzon), 0);
     }
 
     #[tokio::test]
@@ -1060,6 +1184,74 @@ mod vuelta_completa {
         guardar(&conn, CLAVE_URL, "http://127.0.0.1:9", "").unwrap();
         let r = sincronizar(Arc::new(Mutex::new(conn)), Arc::new(RelevoState::default())).await;
         assert_eq!(r, Ok(Resumen::default()));
+    }
+
+    fn secreto_guardado(db: &Arc<Mutex<Connection>>, clave: &str) -> Option<String> {
+        leer(&db.lock().unwrap(), clave)
+    }
+
+    #[tokio::test]
+    async fn cambiar_el_codigo_lo_retira_en_el_relevo_antes_de_olvidarlo() {
+        let buzon = Arc::new(Buzon::default());
+        let (db, _) = tienda(&buzon).await;
+        let viejo = secreto_guardado(&db, CLAVE_SECRETO).unwrap();
+
+        cambiar_codigo(&db).await.unwrap();
+
+        assert_eq!(*buzon.retirados.lock().unwrap(), vec![viejo.clone()]);
+        let nuevo = secreto_guardado(&db, CLAVE_SECRETO).unwrap();
+        assert_ne!(nuevo, viejo);
+        assert_eq!(secreto_guardado(&db, CLAVE_SECRETO_ANTERIOR), Some(viejo));
+    }
+
+    #[tokio::test]
+    async fn sin_poder_retirarlo_el_codigo_no_cambia() {
+        // Cambiarlo solo aquí dejaba a los teléfonos subiendo a una carpeta que
+        // nadie iba a mirar, con el relevo diciéndoles que sí llegó.
+        let buzon = Arc::new(Buzon::default());
+        let (db, _) = tienda(&buzon).await;
+        let viejo = secreto_guardado(&db, CLAVE_SECRETO).unwrap();
+        *buzon.fallar_retiro.lock().unwrap() = true;
+
+        let err = cambiar_codigo(&db).await.unwrap_err();
+
+        assert!(err.contains("No se cambió el código"), "{}", err);
+        assert_eq!(secreto_guardado(&db, CLAVE_SECRETO), Some(viejo));
+        assert_eq!(secreto_guardado(&db, CLAVE_SECRETO_ANTERIOR), None);
+    }
+
+    #[tokio::test]
+    async fn despues_de_cambiarlo_se_recoge_lo_que_quedo_con_el_viejo() {
+        let buzon = Arc::new(Buzon::default());
+        let (db, relevo) = tienda(&buzon).await;
+        let viejo = secreto_guardado(&db, CLAVE_SECRETO).unwrap();
+
+        cambiar_codigo(&db).await.unwrap();
+        *buzon.secreto.lock().unwrap() = secreto_guardado(&db, CLAVE_SECRETO).unwrap();
+        // Subido con el código viejo justo mientras se retiraba.
+        dejar_en(&buzon, &viejo, "tarde", serde_json::json!({ "tipo": "producto", "datos": { "captura_id": "tarde", "nombre": "Llegó tarde", "precio": 100 } }));
+        dejar(&buzon, "nueva", serde_json::json!({ "tipo": "producto", "datos": { "captura_id": "nueva", "nombre": "Con el nuevo", "precio": 100 } }));
+
+        sincronizar(Arc::clone(&db), Arc::clone(&relevo)).await.unwrap();
+
+        assert_eq!(productos(&db, "Llegó tarde"), 1);
+        assert_eq!(productos(&db, "Con el nuevo"), 1);
+        assert!(buzon.carpetas.lock().unwrap()[&viejo].is_empty());
+        assert!(secreto_guardado(&db, CLAVE_SECRETO_ANTERIOR).is_some(), "se sigue recogiendo un rato");
+    }
+
+    #[tokio::test]
+    async fn pasado_el_rato_el_codigo_viejo_se_olvida() {
+        let buzon = Arc::new(Buzon::default());
+        let (db, relevo) = tienda(&buzon).await;
+        cambiar_codigo(&db).await.unwrap();
+        *buzon.secreto.lock().unwrap() = secreto_guardado(&db, CLAVE_SECRETO).unwrap();
+        guardar(&db.lock().unwrap(), CLAVE_ANTERIOR_DESDE, "2020-01-01 00:00:00", "").unwrap();
+
+        sincronizar(Arc::clone(&db), Arc::clone(&relevo)).await.unwrap();
+
+        assert_eq!(secreto_guardado(&db, CLAVE_SECRETO_ANTERIOR), None);
+        assert_eq!(secreto_guardado(&db, CLAVE_ANTERIOR_DESDE), None);
     }
 }
 

@@ -28,6 +28,12 @@ const CADUCIDAD_CATALOGO_SEGUNDOS = 60 * 24 * 60 * 60;
 /** Tope de una captura: un producto con sus fotos ronda el medio mega. */
 const MAX_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Cuánto se recuerda que un código se retiró. Mucho más que lo que un teléfono
+ * olvidado en un cajón puede tardar en volver a abrirse.
+ */
+const CADUCIDAD_RETIRADO_SEGUNDOS = 365 * 24 * 60 * 60;
+
 /** Tope del catálogo. Sin fotos, cinco mil prendas caben en menos de uno. */
 const MAX_BYTES_CATALOGO = 5 * 1024 * 1024;
 
@@ -89,6 +95,27 @@ export default {
 		// Que el secreto sirve solo se puede comprobar usándolo: aquí no hay
 		// registro de tiendas ni lista de secretos válidos. Cualquier secreto
 		// tiene su propia carpeta, y sin el correcto no se ve la de nadie más.
+		// Un código que la tienda cambió. Sin esta marca el relevo no tendría cómo
+		// saberlo —no hay lista de secretos—, y un teléfono sin re-emparejar seguía
+		// subiendo con él: recibía "ok", borraba su copia, y la tienda ya nunca
+		// miraba esa carpeta. Se le niega al teléfono, que así conserva lo suyo y
+		// pide volver a escanear; la tienda sí puede seguir recogiendo lo que quedó.
+		const claveRetirado = `r/${huella}`;
+		const esDelTelefono =
+			ruta === '/api/verificar' ||
+			(ruta === '/api/subir' && req.method === 'POST') ||
+			(ruta === '/api/catalogo' && req.method === 'GET');
+		if (esDelTelefono && (await env.CAPTURAS.get(claveRetirado)) !== null) {
+			return error(401, 'Este código ya no sirve: vuelve a apuntar la cámara al código de la computadora');
+		}
+
+		if (ruta === '/api/retirar' && req.method === 'POST') {
+			await env.CAPTURAS.put(claveRetirado, new Date().toISOString(), {
+				expirationTtl: CADUCIDAD_RETIRADO_SEGUNDOS,
+			});
+			return json({ ok: true });
+		}
+
 		if (ruta === '/api/verificar') {
 			return json({ ok: true });
 		}

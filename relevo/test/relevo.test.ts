@@ -59,6 +59,42 @@ describe('quién puede entrar', () => {
     });
 });
 
+describe('un código retirado', () => {
+    // Aquí no hay registro de secretos: cualquiera tiene su carpeta. Antes de
+    // poder retirar uno, un teléfono sin re-emparejar seguía subiendo con el
+    // código viejo, el relevo decía "ok", el teléfono borraba su copia, y la
+    // tienda ya nunca miraba esa carpeta. Se perdía en silencio.
+    it('ya no acepta capturas, para que el teléfono se quede con ellas', async () => {
+        const viejo = secreto();
+        expect((await llamar('/api/retirar', { method: 'POST', secreto: viejo })).status).toBe(200);
+
+        const res = await subir(viejo, 'despues-de-retirar');
+        expect(res.status).toBe(401);
+        expect((await llamar('/api/verificar', { secreto: viejo })).status).toBe(401);
+        expect((await pendientes(viejo)).pendientes).toHaveLength(0);
+    });
+
+    it('deja que la tienda recoja lo que quedó antes de retirarlo', async () => {
+        const viejo = secreto();
+        await subir(viejo, 'antes-de-retirar');
+        await llamar('/api/retirar', { method: 'POST', secreto: viejo });
+
+        expect((await pendientes(viejo)).pendientes.map((p) => p.captura_id)).toEqual(['antes-de-retirar']);
+        expect((await llamar('/api/pendiente/antes-de-retirar', { secreto: viejo })).status).toBe(200);
+        const recibido = await llamar('/api/recibido', {
+            method: 'POST', secreto: viejo, body: JSON.stringify({ ids: ['antes-de-retirar'] }),
+        });
+        expect(recibido.status).toBe(200);
+    });
+
+    it('no afecta a ningún otro código', async () => {
+        const viejo = secreto();
+        const otro = secreto();
+        await llamar('/api/retirar', { method: 'POST', secreto: viejo });
+        expect((await subir(otro, 'de-otro')).status).toBe(200);
+    });
+});
+
 describe('una tienda no ve la de otra', () => {
     it('lo subido con un secreto no aparece con otro', async () => {
         const tienda = secreto();

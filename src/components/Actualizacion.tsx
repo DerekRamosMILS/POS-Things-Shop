@@ -34,7 +34,7 @@ export function useActualizacionAutomatica() {
     useEffect(() => {
         if (fase !== 'lista') return;
         if (!esMomentoSeguro()) return;
-        void instalar();
+        void instalar({ automatica: true });
     }, [fase, items, cashRegisterId, user, instalar]);
 }
 

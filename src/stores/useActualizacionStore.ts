@@ -61,11 +61,16 @@ interface ActualizacionStore {
     error: string | null;
     /** Qué pasó la última vez que se buscó, en palabras, para Ajustes. */
     ultimaRevision: string | null;
+    /**
+     * El instalador ya falló en esta ejecución. La automática no lo vuelve a
+     * intentar hasta que la app se reabra; a mano, desde Ajustes, sí.
+     */
+    instalacionFallida: boolean;
 
     /** Busca y, si hay algo, la deja descargada y lista. */
     buscar: () => Promise<boolean>;
     /** Instala lo que ya está listo. La aplicación se cierra sola. */
-    instalar: () => Promise<void>;
+    instalar: (opciones?: { automatica?: boolean }) => Promise<void>;
     /**
      * Busca, descarga e instala ahora, sin consultar la política de momentos.
      *
@@ -124,6 +129,7 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
     progreso: 0,
     error: null,
     ultimaRevision: null,
+    instalacionFallida: false,
 
     buscar: async () => {
         // Ya hay una lista o una en curso: no se pisa.
@@ -205,8 +211,12 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
         return get().error ?? 'Instalando; la aplicación se va a reiniciar.';
     },
 
-    instalar: async () => {
+    instalar: async ({ automatica = false } = {}) => {
         if (!pendiente || get().fase !== 'lista') return;
+        // Al fallar la fase regresa a "lista", y el efecto que instala escucha la
+        // fase: sin este freno lo reintentaba enseguida, fallaba otra vez, y la
+        // caja quedaba parpadeando entre "instalando" y la aplicación.
+        if (automatica && get().instalacionFallida) return;
         set({ fase: 'instalando' });
         anotar(`Instalando la versión ${get().version}`);
         try {
@@ -217,7 +227,7 @@ export const useActualizacionStore = create<ActualizacionStore>((set, get) => ({
             await relaunch();
         } catch (err) {
             const motivo = `Falló la instalación: ${err}`;
-            set({ fase: 'lista', error: String(err), ultimaRevision: motivo });
+            set({ fase: 'lista', error: String(err), ultimaRevision: motivo, instalacionFallida: true });
             anotar(motivo);
         }
     },
