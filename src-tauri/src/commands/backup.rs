@@ -210,6 +210,9 @@ fn rotate_backups(backup_dir: &std::path::Path, max: usize) -> Result<(), String
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map(|ext| ext == "db").unwrap_or(false))
+        // La copia de antes de restaurar es la única salida si se restauró el
+        // respaldo equivocado: no cuenta para el tope y no se borra.
+        .filter(|e| !e.file_name().to_string_lossy().starts_with(crate::db::connection::PREFIJO_ANTES_DE_RESTAURAR))
         .collect();
 
     entries.sort_by_key(|e| e.file_name());
@@ -382,6 +385,65 @@ mod tests {
 
         let conn = Connection::open(&db_path).unwrap();
         assert_eq!(count_products(&conn), 1);
+    }
+
+    #[test]
+    fn restaurar_guarda_antes_la_base_actual_con_lo_que_sigue_en_el_wal() {
+        // Restaurar el respaldo equivocado borraba todo lo posterior sin forma de
+        // volver. Y lo último vendido puede no haber salido del WAL todavía, como
+        // tras un apagón: una copia del .db solo lo dejaba fuera.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("things_shop.db");
+        let backups = dir.path().join("backups");
+
+        let conn = open_db(&db_path);
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
+        add_product(&conn, "ANTES");
+        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        add_product(&conn, "SOLO-EN-EL-WAL");
+
+        // La foto de disco de una tienda que se apagó de golpe: base + WAL.
+        let apagada = tempfile::tempdir().unwrap();
+        let db_apagada = apagada.path().join("things_shop.db");
+        for ext in ["", "-wal", "-shm"] {
+            let de = std::path::PathBuf::from(format!("{}{}", db_path.to_string_lossy(), ext));
+            if de.exists() {
+                fs::copy(&de, format!("{}{}", db_apagada.to_string_lossy(), ext)).unwrap();
+            }
+        }
+        drop(conn);
+        assert!(apagada.path().join("things_shop.db-wal").exists(), "la prueba necesita un WAL con datos");
+        fs::create_dir_all(apagada.path().join("backups")).unwrap();
+        fs::copy(backups.join(&name), apagada.path().join(PENDING_RESTORE)).unwrap();
+
+        apply_pending_restore(&db_apagada);
+
+        let restaurada = Connection::open(&db_apagada).unwrap();
+        assert_eq!(count_products(&restaurada), 1, "la restauración sí ocurrió");
+
+        let copia = fs::read_dir(apagada.path().join("backups")).unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with(crate::db::connection::PREFIJO_ANTES_DE_RESTAURAR))
+            .expect("debe quedar una copia de la base reemplazada");
+        let copia = Connection::open(copia.path()).unwrap();
+        let en_wal: i64 = copia
+            .query_row("SELECT COUNT(*) FROM products WHERE sku = 'SOLO-EN-EL-WAL'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(en_wal, 1, "lo que estaba en el WAL tiene que estar en la copia");
+    }
+
+    #[test]
+    fn la_rotacion_nunca_borra_la_copia_de_antes_de_restaurar() {
+        let dir = tempfile::tempdir().unwrap();
+        let copia = format!("{}20200101_000000.db", crate::db::connection::PREFIJO_ANTES_DE_RESTAURAR);
+        fs::write(dir.path().join(&copia), b"x").unwrap();
+        for n in 1..=5 {
+            fs::write(dir.path().join(format!("backup_2026010{}_120000.db", n)), b"x").unwrap();
+        }
+
+        rotate_backups(dir.path(), 2).unwrap();
+
+        assert!(dir.path().join(&copia).exists());
     }
 
     #[test]

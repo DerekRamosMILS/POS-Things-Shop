@@ -447,14 +447,17 @@ mod tests {
     }
 
     #[test]
-    fn borrar_el_producto_se_lleva_sus_fotos_y_nada_mas() {
+    fn un_producto_no_se_puede_borrar_y_sus_fotos_se_quedan() {
+        // La llave foránea es en cascada: borrar el producto se llevaba sus
+        // fotos. La base ya no deja borrar productos, así que no hay cascada.
         let db = tienda();
         agregar_foto(&db, &foto(1)).unwrap();
-        db.execute("DELETE FROM products WHERE id = 1", []).unwrap();
+
+        assert!(db.execute("DELETE FROM products WHERE id = 1", []).is_err());
 
         let quedan: i64 = db.query_row(
             "SELECT COUNT(*) FROM product_images", [], |r| r.get(0)).unwrap();
-        assert_eq!(quedan, 0, "la cascada se lleva la fila con sus bytes");
+        assert_eq!(quedan, 1);
     }
 
     #[test]
@@ -581,13 +584,19 @@ mod tests {
     }
 
     #[test]
-    fn borrar_el_producto_se_lleva_sus_fotos() {
+    fn quitar_una_foto_la_guarda_completa_en_el_archivo() {
         let db = tienda();
-        agregar_foto(&db, &foto(1)).unwrap();
+        let img = agregar_foto(&db, &foto(1)).unwrap();
+        let original: Vec<u8> = db.query_row(
+            "SELECT photo FROM product_images WHERE id = ?1", params![img.id], |r| r.get(0)).unwrap();
 
-        db.execute("DELETE FROM products WHERE id = 1", []).unwrap();
+        db.execute("DELETE FROM product_images WHERE id = ?1", params![img.id]).unwrap();
 
-        let cuantas: i64 = db.query_row("SELECT COUNT(*) FROM product_images", [], |r| r.get(0)).unwrap();
-        assert_eq!(cuantas, 0, "la cascada debe limpiar las filas");
+        let (producto, archivada): (i64, Vec<u8>) = db.query_row(
+            "SELECT product_id, photo FROM product_images_archivo WHERE id = ?1",
+            params![img.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(producto, 1);
+        assert_eq!(archivada, original, "los bytes de la foto se conservan");
+        assert!(db.execute("DELETE FROM product_images_archivo", []).is_err(), "el archivo no se borra");
     }
 }

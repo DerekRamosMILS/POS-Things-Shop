@@ -414,3 +414,32 @@ describe('contar mercancía', () => {
         expect(doc.getElementById('estadoCatalogo')!.textContent).toContain('Todavía no hay catálogo');
     });
 });
+
+describe('una captura demasiado pesada', () => {
+    beforeEach(() => vi.restoreAllMocks());
+
+    it('se detiene al guardar y no entra a la cola a tapar lo demás', async () => {
+        // El relevo no acepta más de 8 MB. Antes el teléfono la guardaba igual:
+        // el relevo contestaba 413, el teléfono lo tomaba por un error pasajero,
+        // la dejaba al frente de la cola, y ahí se quedaba bloqueando todo lo
+        // capturado después, subiéndola entera en cada intento.
+        const { doc, caja } = await abrirCaptura();
+        escribir(doc, 'nombre', 'Vestido pesado');
+        escribir(doc, 'notas', 'x'.repeat(8 * 1024 * 1024));
+        doc.getElementById('guardar')!.dispatchEvent(new doc.defaultView!.Event('click'));
+
+        await esperarA(
+            () => doc.getElementById('aviso')!.textContent!.includes('pesa demasiado'),
+            'que avisara del peso',
+        );
+        // El producto sigue en pantalla para quitarle fotos y volver a guardar.
+        expect((doc.getElementById('nombre') as HTMLInputElement).value).toBe('Vestido pesado');
+        expect((doc.getElementById('guardar') as HTMLButtonElement).disabled).toBe(false);
+
+        // Y lo que se capture después sí sale.
+        escribir(doc, 'notas', '');
+        await capturar(doc, 'Blusa ligera');
+        await esperarA(() => caja.recibidos.length === 1, 'que se mandara la blusa');
+        expect(caja.recibidos.map(r => r.nombre)).toEqual(['Blusa ligera']);
+    });
+});

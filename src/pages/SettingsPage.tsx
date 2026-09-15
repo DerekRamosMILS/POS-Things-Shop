@@ -116,7 +116,7 @@ export default function SettingsPage() {
     const handleRestore = async (filename: string) => {
         const ok = await confirm({
             title: 'Restaurar respaldo',
-            message: `Se reemplazará la base de datos actual con "${filename}". Los datos actuales se perderán. La app deberá reiniciarse. ¿Continuar?`,
+            message: `Se reemplazará la base de datos actual con "${filename}": lo registrado después de ese respaldo deja de verse. Antes se guarda una copia completa de la base actual en la lista de respaldos ("antes-de-restaurar"), por si hay que volver. La app deberá reiniciarse. ¿Continuar?`,
             variant: 'danger', confirmLabel: 'Restaurar',
         });
         if (!ok) return;

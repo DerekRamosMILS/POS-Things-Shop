@@ -141,6 +141,19 @@ pub fn apply_pending_restore(db_path: &std::path::Path) {
     if !pending.exists() {
         return;
     }
+
+    // Antes de pisar la base se guarda entera. Restaurar un respaldo de hace una
+    // semana por error borraba la semana: sin copia no había forma de volver. Si
+    // la copia no se puede hacer, no se restaura.
+    match guardar_antes_de_restaurar(db_path) {
+        Ok(Some(copia)) => log::info!("Base actual guardada antes de restaurar en {:?}", copia),
+        Ok(None) => {}
+        Err(e) => {
+            log::error!("No se restauró el respaldo: no se pudo guardar antes la base actual: {}", e);
+            return;
+        }
+    }
+
     // Remove WAL/SHM sidecars tied to the old database file.
     for ext in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{}", db_path.to_string_lossy(), ext));
@@ -165,6 +178,44 @@ pub fn apply_pending_restore(db_path: &std::path::Path) {
             let _ = fs::remove_file(&temporal);
         }
     }
+}
+
+/// Con esto empieza el nombre de la copia que se guarda antes de restaurar. La
+/// rotación de respaldos no la toca nunca.
+pub const PREFIJO_ANTES_DE_RESTAURAR: &str = "antes-de-restaurar_";
+
+/// Guarda la base actual en `backups/` antes de que un respaldo la reemplace.
+///
+/// Con `VACUUM INTO` y no copiando el archivo: lo último que se vendió puede
+/// estar todavía en el `-wal`, que la restauración borra enseguida. Copiar solo
+/// el `.db` dejaba fuera justo eso.
+fn guardar_antes_de_restaurar(db_path: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let carpeta = db_path.parent().ok_or("La base no tiene carpeta")?.join("backups");
+    fs::create_dir_all(&carpeta).map_err(|e| e.to_string())?;
+
+    let sello = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let mut destino = carpeta.join(format!("{}{}.db", PREFIJO_ANTES_DE_RESTAURAR, sello));
+    let mut n = 1;
+    while destino.exists() {
+        n += 1;
+        destino = carpeta.join(format!("{}{}_{}.db", PREFIJO_ANTES_DE_RESTAURAR, sello, n));
+    }
+
+    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    conn.execute("VACUUM INTO ?1", [destino.to_string_lossy().to_string()])
+        .map_err(|e| e.to_string())?;
+    drop(conn);
+
+    let revision: String = Connection::open(&destino)
+        .and_then(|c| c.query_row("PRAGMA quick_check", [], |r| r.get(0)))
+        .map_err(|e| e.to_string())?;
+    if revision != "ok" {
+        return Err(format!("la copia salió dañada: {}", revision));
+    }
+    Ok(Some(destino))
 }
 
 /// One-time move of a pre-existing database from the old macOS location.

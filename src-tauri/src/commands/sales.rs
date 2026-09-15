@@ -1050,6 +1050,8 @@ mod tests {
         insertar_folio(&conn, &format!("V-{}-001", hoy()));
         insertar_folio(&conn, &format!("V-{}-002", hoy()));
         insertar_folio(&conn, &format!("V-{}-003", hoy()));
+        // Un hueco como el que deja un respaldo viejo: la base de ahora ya no deja borrar.
+        conn.execute_batch("DROP TRIGGER no_borrar_sales").unwrap();
         conn.execute("DELETE FROM sales WHERE folio LIKE '%-002'", []).unwrap();
 
         assert_eq!(crate::folios::siguiente(&conn, crate::folios::Serie::Ventas).unwrap(), format!("V-{}-004", hoy()));

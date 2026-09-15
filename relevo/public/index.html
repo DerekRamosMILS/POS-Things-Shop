@@ -262,6 +262,8 @@
   }
 
   var MAX_FOTOS = 8;
+  // Por debajo de los 8 MB que acepta el relevo, con margen para el sobre JSON.
+  var MAX_BYTES_CAPTURA = 7.5 * 1024 * 1024;
   var MAX_VARIANTES = 60;
   var fotos = [];
   var tallas = [];
@@ -943,6 +945,18 @@
       }
     };
     producto.datos.captura_id = producto.id;
+
+    // El relevo no acepta más de 8 MB. Se mide aquí, con el producto todavía en
+    // pantalla: guardado en la cola ya no se puede quitarle fotos, el relevo lo
+    // rechazaría una y otra vez, y al frente de la cola taparía todo lo demás.
+    var peso = new Blob([JSON.stringify({ captura_id: producto.id, tipo: 'producto', datos: producto.datos })]).size;
+    if (peso > MAX_BYTES_CAPTURA) {
+      aviso('Este producto pesa demasiado para mandarlo (' + (peso / 1048576).toFixed(1) +
+            ' MB; el máximo es ' + (MAX_BYTES_CAPTURA / 1048576).toFixed(1) +
+            ' MB). Quita alguna foto y vuelve a guardar.', 'bad');
+      soltarBoton();
+      return;
+    }
 
     try {
       // Primero al teléfono. Aunque la caja esté encendida: si se guarda aquí,

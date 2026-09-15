@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { formatCurrency, formatDateTime } from '../utils';
 import { code128SVG } from '../utils/barcode';
 import * as api from '../api';
+import { aplicarFotoPrincipal } from '../utils/fotoPrincipal';
 import type { Product, Category, CreateProductDto, UpdateProductDto, Notification, Supplier, PriceHistoryEntry, SaveVariantDto } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
@@ -328,26 +329,15 @@ export default function ProductsPage() {
                 const created = await api.createProduct(form);
                 productId = created.id;
             }
-            // La foto se guarda como archivo. Reemplazar significa quitar las
-            // anteriores: el formulario maneja una sola imagen principal.
+            // La ficha maneja solo la foto principal: las demás —las del
+            // celular, por ejemplo— no se tocan.
             if (photoChanged) {
-                // Primero entra la nueva y después se quitan las viejas. Al
-                // revés, si la subida fallaba el producto se quedaba sin
-                // ninguna foto y la anterior ya no existía.
-                let previas = await api.getProductImageList(productId);
-                if (photoPreview && photoThumb) {
-                    // Con el cupo lleno hay que hacer sitio; se quita la última,
-                    // nunca la principal, para que si algo falla siga habiendo foto.
-                    while (previas.length >= MAX_FOTOS_POR_PRODUCTO) {
-                        const ultima = previas[previas.length - 1];
-                        await api.deleteProductImage(ultima.id);
-                        previas = previas.slice(0, -1);
-                    }
-                    await api.addProductImage({
-                        product_id: productId, photo: photoPreview, thumbnail: photoThumb,
-                    });
-                }
-                for (const img of previas) await api.deleteProductImage(img.id);
+                await aplicarFotoPrincipal(
+                    api,
+                    productId,
+                    photoPreview && photoThumb ? { photo: photoPreview, thumbnail: photoThumb } : null,
+                    MAX_FOTOS_POR_PRODUCTO,
+                );
                 invalidateProductImage(productId);
             }
             // Save variants (or clear them if variants were turned off)

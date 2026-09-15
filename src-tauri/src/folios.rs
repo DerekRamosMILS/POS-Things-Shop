@@ -124,6 +124,8 @@ mod tests {
         apartado(&db, &format!("A-{}-001", hoy()));
         apartado(&db, &format!("A-{}-002", hoy()));
         apartado(&db, &format!("A-{}-003", hoy()));
+        // Un hueco como el que deja un respaldo viejo: la base de ahora ya no deja borrar.
+        db.execute_batch("DROP TRIGGER no_borrar_layaways").unwrap();
         db.execute("DELETE FROM layaways WHERE folio LIKE '%-002'", []).unwrap();
 
         assert_eq!(siguiente(&db, Serie::Apartados).unwrap(), format!("A-{}-004", hoy()));

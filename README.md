@@ -358,6 +358,30 @@ mientras la dirección y las rutas no cambien. Los detalles de dentro están en
 Dentro de esa carpeta: `things_shop.db` (base de datos), `backups/` (respaldos
 rotados) y `things-shop.log` (bitácora, rotada a los 5 MB).
 
+### Nada del negocio se borra
+
+No depende de que cada pantalla lo haga bien: lo garantiza la base de datos, con
+disparadores (migración `026_nada_se_borra`), pase el borrado por donde pase.
+
+| | Qué pasa al intentar borrar |
+|---|---|
+| Ventas, productos, tallas, inventario, caja, apartados, devoluciones, conteos, clientes, proveedores, usuarios, historial de precios | La base se niega y la operación entera se cancela. Lo que en la app dice "eliminar" es desactivar o cancelar |
+| Fotos y gastos | Se pueden quitar de la vista, pero antes la base copia la fila completa —la foto con sus bytes— a `product_images_archivo` / `expenses_archivo`, que tampoco se pueden borrar |
+| Promociones y categorías | Solo si nunca se usaron o están vacías |
+| Sesiones, bitácora, notificaciones, configuración | Se borran con normalidad: no son historia del negocio |
+
+Cambiar la foto desde la ficha del producto solo toca la **principal**; las demás
+—las que llegaron del celular, por ejemplo— se quedan.
+
+**Restaurar un respaldo** reemplaza la base entera, y eso ningún disparador lo
+detiene. Por eso, antes de reemplazarla, la app guarda una copia completa de la
+base actual en `backups/antes-de-restaurar_<fecha>.db` —con `VACUUM INTO`, que
+incluye lo que todavía estaba en el `-wal`— y si esa copia falla, no restaura.
+Esa copia sale en la lista de respaldos y la rotación nunca la borra.
+
+La prueba `toda_tabla_tiene_decidido_si_se_puede_borrar` falla si alguien agrega
+una tabla sin decidir en cuál de estos grupos va.
+
 ## Primer inicio
 
 Se crea un usuario `admin` con la contraseña `admin1234`. La app **no deja pasar

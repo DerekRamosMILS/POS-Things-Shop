@@ -104,6 +104,10 @@ fn migration_list() -> Vec<(&'static str, &'static str)> {
             "025_captura_por_el_relevo",
             include_str!("../../migrations/025_captura_por_el_relevo.sql"),
         ),
+        (
+            "026_nada_se_borra",
+            include_str!("../../migrations/026_nada_se_borra.sql"),
+        ),
     ]
 }
 
@@ -161,7 +165,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 25);
+        assert_eq!(applied, 26);
     }
 
     #[test]
@@ -171,7 +175,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 25);
+        assert_eq!(applied, 26);
     }
 
     /// La 017 reconstruye `sales` para corregir su restricción. Una reconstrucción
@@ -399,5 +403,128 @@ mod tests {
             r.get::<_, i64>(0)
         })
         .expect_err("la tabla está vacía");
+    }
+
+    /// Tablas con historia del negocio: la base se niega a borrar sus filas.
+    const PROTEGIDAS: &[&str] = &[
+        "products", "product_variants", "sales", "sale_items", "sale_payments",
+        "returns", "return_items", "layaways", "layaway_items", "layaway_payments",
+        "cash_registers", "inventory_movements", "price_history", "conteos",
+        "capturas_rechazadas", "customers", "suppliers", "users",
+        "product_images_archivo", "expenses_archivo",
+    ];
+
+    /// Se pueden quitar desde la app, pero la base guarda una copia antes.
+    const ARCHIVADAS: &[&str] = &["product_images", "expenses"];
+
+    /// Solo se borran cuando no hay historia que perder (la base lo comprueba).
+    const CONDICIONADAS: &[&str] = &["promotions", "categories"];
+
+    /// Borrarlas no pierde nada del negocio.
+    const DESECHABLES: &[&str] = &[
+        "_migrations", "app_logs", "login_attempts", "notifications", "sessions",
+        "system_config", "sqlite_sequence",
+    ];
+
+    fn tablas(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    }
+
+    #[test]
+    fn toda_tabla_tiene_decidido_si_se_puede_borrar() {
+        // Si alguien agrega una tabla, esta prueba lo obliga a decidir en cuál
+        // lista va. Sin eso, una tabla nueva con ventas o fotos quedaría sin
+        // protección y nadie lo notaría hasta perder algo.
+        let conn = fresh();
+        let sin_decidir: Vec<_> = tablas(&conn)
+            .into_iter()
+            .filter(|t| ![PROTEGIDAS, ARCHIVADAS, CONDICIONADAS, DESECHABLES].iter().any(|l| l.contains(&t.as_str())))
+            .collect();
+        assert!(sin_decidir.is_empty(), "tablas sin decidir si se pueden borrar: {:?}", sin_decidir);
+    }
+
+    #[test]
+    fn nada_con_historia_del_negocio_se_puede_borrar() {
+        let conn = fresh();
+        for tabla in PROTEGIDAS {
+            let disparador: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1
+                     AND sql LIKE '%BEFORE DELETE%' AND sql LIKE '%RAISE(ABORT%'",
+                    [tabla],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(disparador, 1, "{} no está protegida contra borrados", tabla);
+        }
+    }
+
+    fn con_venta(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO users (id, username, password_hash, full_name, role) VALUES (1, 'u', 'x', 'U', 'admin');
+             INSERT INTO categories (id, name) VALUES (900, 'Pruebas');
+             INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, category_id)
+                 VALUES (1, 'TS-1', 'Vestido', 100, 200, 5, 900);
+             INSERT INTO cash_registers (id, user_id, opening_amount) VALUES (1, 1, 0);
+             INSERT INTO promotions (id, name, discount_type, discount_value, start_date, end_date)
+                 VALUES (1, 'Enero', 'percentage', 10, '2026-01-01', '2026-12-31');
+             INSERT INTO sales (id, folio, user_id, cash_register_id, subtotal, total, payment_method, promotion_id)
+                 VALUES (1, 'V-1', 1, 1, 200, 200, 'cash', 1);
+             INSERT INTO expenses (id, cash_register_id, category, description, amount, user_id)
+                 VALUES (1, 1, 'otros', 'Bolsas', 55.5, 1);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn borrar_una_venta_o_un_producto_de_verdad_aborta() {
+        let conn = fresh();
+        con_venta(&conn);
+        for sql in [
+            "DELETE FROM sales",
+            "DELETE FROM products",
+            "DELETE FROM cash_registers",
+            "DELETE FROM users",
+            "DELETE FROM promotions WHERE id = 1",
+            "DELETE FROM categories WHERE id = 900",
+        ] {
+            let err = conn.execute(sql, []).expect_err(sql);
+            assert!(err.to_string().contains("no se borra"), "{}: {}", sql, err);
+        }
+        let ventas: i64 = conn.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas, 1);
+    }
+
+    #[test]
+    fn lo_que_nunca_se_uso_si_se_puede_quitar() {
+        let conn = fresh();
+        con_venta(&conn);
+        conn.execute_batch(
+            "INSERT INTO promotions (id, name, discount_type, discount_value, start_date, end_date)
+                 VALUES (2, 'Nunca usada', 'fixed', 10, '2026-01-01', '2026-12-31');
+             INSERT INTO categories (id, name) VALUES (901, 'Vacía');",
+        )
+        .unwrap();
+        assert_eq!(conn.execute("DELETE FROM promotions WHERE id = 2", []).unwrap(), 1);
+        assert_eq!(conn.execute("DELETE FROM categories WHERE id = 901", []).unwrap(), 1);
+    }
+
+    #[test]
+    fn un_gasto_quitado_queda_completo_en_el_archivo() {
+        let conn = fresh();
+        con_venta(&conn);
+        conn.execute("DELETE FROM expenses WHERE id = 1", []).unwrap();
+
+        let (caja, descripcion, monto): (i64, String, f64) = conn
+            .query_row(
+                "SELECT cash_register_id, description, amount FROM expenses_archivo WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((caja, descripcion.as_str(), monto), (1, "Bolsas", 55.5));
     }
 }

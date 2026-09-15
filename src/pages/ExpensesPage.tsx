@@ -70,7 +70,7 @@ export default function ExpensesPage() {
     };
 
     const handleDelete = async (id: number) => {
-        const ok = await confirm({ title: 'Eliminar gasto', message: '¿Eliminar este gasto? Esta acción no se puede deshacer.', variant: 'danger', confirmLabel: 'Eliminar' });
+        const ok = await confirm({ title: 'Eliminar gasto', message: '¿Quitar este gasto? Deja de contar en la caja y en los reportes, pero queda guardado en el archivo de gastos.', variant: 'danger', confirmLabel: 'Eliminar' });
         if (!ok) return;
         try { await api.deleteExpense(id); load(); } catch (e) { showToast(String(e), 'error'); }
     };

@@ -364,6 +364,8 @@ mod tests {
         let conn = db();
         alta(&conn);
         let segundo = alta(&conn);
+        // Un hueco como el que deja un respaldo viejo: la base de ahora ya no deja borrar.
+        conn.execute_batch("DROP TRIGGER no_borrar_products").unwrap();
         conn.execute("DELETE FROM products WHERE sku = ?1", params![segundo]).unwrap();
 
         assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000003",
@@ -374,6 +376,8 @@ mod tests {
     fn vaciar_el_catalogo_entero_no_reinicia_el_consecutivo() {
         let conn = db();
         alta(&conn); alta(&conn); alta(&conn);
+        // Un hueco como el que deja un respaldo viejo: la base de ahora ya no deja borrar.
+        conn.execute_batch("DROP TRIGGER no_borrar_products").unwrap();
         conn.execute("DELETE FROM products", []).unwrap();
 
         assert_eq!(siguiente_sku(&conn).unwrap(), "TS-000004");
@@ -403,6 +407,8 @@ mod tests {
         crear(&conn, "TS-000001");
         // Alguien ocupó a mano el que tocaba.
         crear(&conn, "TS-000002");
+        // Un hueco como el que deja un respaldo viejo: la base de ahora ya no deja borrar.
+        conn.execute_batch("DROP TRIGGER no_borrar_products").unwrap();
         conn.execute("DELETE FROM products WHERE sku = 'TS-000001'", []).unwrap();
 
         let sku = siguiente_sku(&conn).unwrap();
