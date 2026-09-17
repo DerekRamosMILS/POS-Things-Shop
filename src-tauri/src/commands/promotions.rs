@@ -18,7 +18,21 @@ fn validar(
     valor: f64,
     inicio: &str,
     fin: &str,
+    alcance: &str,
+    destino: Option<i64>,
 ) -> Result<(), String> {
+    match alcance {
+        "all" => {}
+        "category" | "product" if destino.is_none() => {
+            return Err(if alcance == "category" {
+                "Elige a qué categoría aplica la promoción".to_string()
+            } else {
+                "Elige a qué producto aplica la promoción".to_string()
+            });
+        }
+        "category" | "product" => {}
+        otro => return Err(format!("Alcance de promoción desconocido: {}", otro)),
+    }
     if nombre.trim().is_empty() {
         return Err("Ponle nombre a la promoción".to_string());
     }
@@ -68,7 +82,7 @@ pub fn get_promotions(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn create_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreatePromotionDto) -> Result<Promotion, String> {
     require_admin(&sessions, &token)?;
-    validar(&data.name, &data.discount_type, data.discount_value, &data.start_date, &data.end_date)?;
+    validar(&data.name, &data.discount_type, data.discount_value, &data.start_date, &data.end_date, &data.applies_to, data.target_id)?;
     let db = state.conn();
 
     db.execute(
@@ -100,7 +114,7 @@ pub fn create_promotion(state: State<DbState>, sessions: State<SessionState>, to
 #[tauri::command]
 pub fn update_promotion(state: State<DbState>, sessions: State<SessionState>, token: String, data: Promotion) -> Result<(), String> {
     require_admin(&sessions, &token)?;
-    validar(&data.name, &data.discount_type, data.discount_value, &data.start_date, &data.end_date)?;
+    validar(&data.name, &data.discount_type, data.discount_value, &data.start_date, &data.end_date, &data.applies_to, data.target_id)?;
     let db = state.conn();
 
     db.execute(
@@ -152,15 +166,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn una_promocion_sin_destino_se_rechaza_al_guardarla() {
+        let ok = |alcance, destino| validar("Enero", "percentage", 10.0, "2026-01-01", "2026-12-31", alcance, destino);
+        assert!(ok("category", None).is_err());
+        assert!(ok("product", None).is_err());
+        assert!(ok("marca", Some(1)).is_err());
+        assert!(ok("category", Some(3)).is_ok());
+        assert!(ok("product", Some(3)).is_ok());
+        assert!(ok("all", None).is_ok());
+    }
+
+    #[test]
     fn una_promocion_imposible_se_rechaza_al_guardarla() {
-        assert!(validar("", "percentage", 10.0, "2026-01-01", "2026-12-31").is_err());
-        assert!(validar("Enero", "percentage", 0.0, "2026-01-01", "2026-12-31").is_err());
-        assert!(validar("Enero", "percentage", -5.0, "2026-01-01", "2026-12-31").is_err());
-        assert!(validar("Enero", "percentage", 150.0, "2026-01-01", "2026-12-31").is_err());
-        assert!(validar("Enero", "fixed", 150.0, "2026-01-01", "2026-12-31").is_ok(),
+        assert!(validar("", "percentage", 10.0, "2026-01-01", "2026-12-31", "all", None).is_err());
+        assert!(validar("Enero", "percentage", 0.0, "2026-01-01", "2026-12-31", "all", None).is_err());
+        assert!(validar("Enero", "percentage", -5.0, "2026-01-01", "2026-12-31", "all", None).is_err());
+        assert!(validar("Enero", "percentage", 150.0, "2026-01-01", "2026-12-31", "all", None).is_err());
+        assert!(validar("Enero", "fixed", 150.0, "2026-01-01", "2026-12-31", "all", None).is_ok(),
                 "un descuento fijo de 150 pesos sí existe");
-        assert!(validar("Enero", "percentage", 10.0, "2026-12-31", "2026-01-01").is_err(),
+        assert!(validar("Enero", "percentage", 10.0, "2026-12-31", "2026-01-01", "all", None).is_err(),
                 "un rango al revés nunca se aplicaría");
-        assert!(validar("Enero", "percentage", 100.0, "2026-01-01", "2026-01-01").is_ok());
+        assert!(validar("Enero", "percentage", 100.0, "2026-01-01", "2026-01-01", "all", None).is_ok());
     }
 }

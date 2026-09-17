@@ -34,6 +34,39 @@ pub(crate) fn configuracion_publica(db: &rusqlite::Connection) -> Result<Vec<Sys
     Ok(configs.into_iter().filter(|c| !es_privada(&c.key)).collect())
 }
 
+/// Revisa los ajustes numéricos antes de guardarlos.
+///
+/// Quien los lee cae a un valor por omisión cuando no entiende lo guardado, así
+/// que un "abc" o un "-5" no rompía nada a la vista: simplemente se ignoraba sin
+/// avisar, y un umbral negativo de stock bajo apagaba las alertas. Vacío sí se
+/// acepta: significa "el de siempre".
+fn validar_valor(key: &str, value: &str) -> Result<String, String> {
+    let v = value.trim();
+    let rango: Option<(f64, f64, &str)> = match key {
+        "tax_rate" => Some((0.0, 100.0, "La tasa de impuesto va de 0 a 100")),
+        "low_stock_threshold" => Some((0.0, 1_000_000.0, "El umbral de stock bajo no puede ser negativo")),
+        "session_hours" => Some((1.0, 24.0 * 30.0, "La sesión dura de 1 hora a 30 días")),
+        "max_backups" => Some((1.0, 1000.0, "Hay que conservar al menos un respaldo")),
+        "log_retention_days" => Some((1.0, 3650.0, "La bitácora se conserva de 1 día a 10 años")),
+        "scanner_min_length" => Some((1.0, 100.0, "La longitud mínima del código va de 1 a 100")),
+        "scanner_max_gap_ms" => Some((1.0, 5000.0, "El tiempo entre teclas del lector va de 1 a 5000 ms")),
+        _ => None,
+    };
+    let Some((min, max, mensaje)) = rango else {
+        return Ok(value.to_string());
+    };
+    if v.is_empty() {
+        return Ok(String::new());
+    }
+    let n: f64 = v.parse().map_err(|_| format!("{}: '{}' no es un número", mensaje, v))?;
+    // Los que no son la tasa se leen como enteros.
+    let entero = key != "tax_rate";
+    if !n.is_finite() || n < min || n > max || (entero && n.fract() != 0.0) {
+        return Err(format!("{} (se recibió '{}')", mensaje, v));
+    }
+    Ok(v.to_string())
+}
+
 #[tauri::command]
 pub fn get_all_config(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<SystemConfig>, String> {
     require_auth(&sessions, &token)?;
@@ -62,6 +95,7 @@ pub fn set_config(state: State<DbState>, sessions: State<SessionState>, token: S
     if es_privada(&key) {
         return Err("Ese valor no se puede cambiar desde aquí".to_string());
     }
+    let value = validar_valor(&key, &value)?;
     let db = state.conn();
 
     db.execute(
@@ -198,6 +232,22 @@ mod tests {
         assert!(todo.iter().all(|c| c.value != secreto && !c.key.starts_with("relevo_secreto")));
         assert!(es_privada("relevo_secreto") && es_privada(" relevo_secreto_anterior"));
         assert!(!es_privada("relevo_url") && !es_privada("currency_symbol"));
+    }
+
+    #[test]
+    fn los_ajustes_numericos_imposibles_se_rechazan() {
+        for (k, v) in [
+            ("low_stock_threshold", "-5"), ("tax_rate", "150"), ("tax_rate", "-1"),
+            ("session_hours", "0"), ("max_backups", "0"), ("log_retention_days", "abc"),
+            ("scanner_min_length", "2.5"), ("tax_rate", "NaN"),
+        ] {
+            assert!(validar_valor(k, v).is_err(), "aceptó {} = {}", k, v);
+        }
+        assert_eq!(validar_valor("tax_rate", " 16 ").unwrap(), "16");
+        assert_eq!(validar_valor("tax_rate", "8.5").unwrap(), "8.5");
+        assert_eq!(validar_valor("low_stock_threshold", "0").unwrap(), "0");
+        assert_eq!(validar_valor("max_backups", "").unwrap(), "", "vacío es el de siempre");
+        assert_eq!(validar_valor("store_name", "  Things  ").unwrap(), "  Things  ", "lo demás pasa tal cual");
     }
 
     #[test]

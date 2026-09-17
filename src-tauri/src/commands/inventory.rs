@@ -181,11 +181,11 @@ pub fn registrar_compra(
         return Err("El costo de compra no puede ser negativo".to_string());
     }
 
-    let (current_stock, has_variants): (i32, i32) = db
+    let (current_stock, has_variants, costo_antes): (i32, i32, f64) = db
         .query_row(
-            "SELECT stock, has_variants FROM products WHERE id = ?1",
+            "SELECT stock, has_variants, purchase_price FROM products WHERE id = ?1",
             params![data.product_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| "El producto no existe".to_string())?;
 
@@ -215,6 +215,7 @@ pub fn registrar_compra(
             params![price, data.product_id],
         )
         .map_err(|e| e.to_string())?;
+        crate::commands::products::anotar_precio(db, data.product_id, "costo", costo_antes, price, user_id)?;
     }
 
     db.execute(
@@ -421,4 +422,35 @@ mod tests {
         }).unwrap_err();
         assert!(err.contains("no existe"), "mensaje poco claro: {}", err);
     }
+    fn historial_de_costos(db: &rusqlite::Connection) -> Vec<(f64, f64)> {
+        db.prepare("SELECT old_price, new_price FROM price_history WHERE product_id = 1 AND tipo = 'costo' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn una_compra_a_otro_costo_deja_el_cambio_en_el_historial() {
+        // El costo se reescribía sin rastro, y con él la utilidad de las ventas
+        // viejas que no guardaron el suyo.
+        let db = tienda();
+        registrar_compra(&db, 1, compra(5, Some(62.5))).unwrap();
+
+        assert_eq!(historial_de_costos(&db), vec![(50.0, 62.5)]);
+    }
+
+    #[test]
+    fn una_compra_al_mismo_costo_o_sin_costo_no_ensucia_el_historial() {
+        let db = tienda();
+        registrar_compra(&db, 1, compra(5, Some(50.0))).unwrap();
+        registrar_compra(&db, 1, compra(5, None)).unwrap();
+
+        assert!(historial_de_costos(&db).is_empty());
+        let de_venta: i64 = db.query_row(
+            "SELECT COUNT(*) FROM price_history WHERE tipo = 'venta'", [], |r| r.get(0)).unwrap();
+        assert_eq!(de_venta, 0);
+    }
+
 }

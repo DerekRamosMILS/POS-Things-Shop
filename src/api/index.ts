@@ -192,7 +192,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         }
 
         case 'cancel_sale':
-            return undefined as unknown as T;
+            return 'Venta cancelada y mercancía devuelta al inventario.' as unknown as T;
 
         case 'get_inventory_movements':
             return [] as unknown as T;
@@ -496,7 +496,7 @@ export const deleteSupplier = (id: number) => invoke<void>('delete_supplier', { 
 // Sales
 export const createSale = (cashRegisterId: number | null, data: CreateSaleDto) =>
     invoke<Sale>('create_sale', { cashRegisterId, data });
-export const cancelSale = (saleId: number) => invoke<void>('cancel_sale', { saleId });
+export const cancelSale = (saleId: number) => invoke<string>('cancel_sale', { saleId });
 export const getSales = (filters?: SaleFilters) => invoke<Sale[]>('get_sales', { filters });
 export const getSaleDetail = (saleId: number) => invoke<Sale>('get_sale_detail', { saleId });
 

@@ -41,6 +41,8 @@ export interface SaveVariantDto {
     sku: string | null;
     barcode: string | null;
     stock: number;
+    /** La existencia con que se abrió el formulario; null en tallas nuevas. */
+    stock_original?: number | null;
 }
 
 export interface CreateProductDto {
@@ -455,6 +457,8 @@ export interface PriceHistoryEntry {
     new_price: number;
     user_name: string | null;
     created_at: string;
+    /** 'venta' o 'costo'. */
+    tipo: 'venta' | 'costo';
 }
 
 // Return types

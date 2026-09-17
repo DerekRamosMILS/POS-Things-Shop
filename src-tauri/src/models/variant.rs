@@ -21,4 +21,9 @@ pub struct SaveVariantDto {
     pub sku: Option<String>,
     pub barcode: Option<String>,
     pub stock: i32,
+    /// La existencia que el formulario cargó al abrirse. Con ella se distingue
+    /// "no la toqué" de "la cambié", y se detecta que cambió por otro lado
+    /// —una venta, un conteo del celular— mientras el formulario estaba abierto.
+    #[serde(default)]
+    pub stock_original: Option<i32>,
 }

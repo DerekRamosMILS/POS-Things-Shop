@@ -266,13 +266,13 @@ export default function ProductsPage() {
         setVariants([]);
         if (product.has_variants) {
             api.getVariants(product.id)
-                .then(vs => setVariants(vs.map(v => ({ id: v.id, size: v.size, color: v.color, sku: v.sku, barcode: v.barcode, stock: v.stock }))))
+                .then(vs => setVariants(vs.map(v => ({ id: v.id, size: v.size, color: v.color, sku: v.sku, barcode: v.barcode, stock: v.stock, stock_original: v.stock }))))
                 .catch(() => setVariants([]));
         }
         setShowForm(true); setError('');
     };
 
-    const addVariantRow = () => setVariants(v => [...v, { id: null, size: '', color: '', sku: '', barcode: '', stock: 0 }]);
+    const addVariantRow = () => setVariants(v => [...v, { id: null, size: '', color: '', sku: '', barcode: '', stock: 0, stock_original: null }]);
     const updateVariantRow = (i: number, patch: Partial<SaveVariantDto>) => setVariants(v => v.map((row, idx) => idx === i ? { ...row, ...patch } : row));
     const removeVariantRow = (i: number) => setVariants(v => v.filter((_, idx) => idx !== i));
 
@@ -818,7 +818,7 @@ export default function ProductsPage() {
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 120, overflowY: 'auto' }}>
                                         {priceHistory.map(h => (
                                             <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--t3)' }}>
-                                                <span>{formatDateTime(h.created_at)}{h.user_name ? ` · ${h.user_name}` : ''}</span>
+                                                <span>{h.tipo === 'costo' ? 'Costo · ' : ''}{formatDateTime(h.created_at)}{h.user_name ? ` · ${h.user_name}` : ''}</span>
                                                 <span style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(h.old_price)} → <strong style={{ color: 'var(--t1)' }}>{formatCurrency(h.new_price)}</strong></span>
                                             </div>
                                         ))}

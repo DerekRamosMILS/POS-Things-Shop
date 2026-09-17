@@ -3,6 +3,7 @@ use tauri::State;
 
 use crate::commands::cash_register::open_register_id;
 use crate::db::connection::DbState;
+use crate::money::Cents;
 use crate::models::expense::{CreateExpenseDto, Expense};
 use crate::session::{require_admin, require_auth, SessionState};
 
@@ -135,69 +136,95 @@ pub fn get_expenses(state: State<DbState>, sessions: State<SessionState>, token:
 #[tauri::command]
 pub fn update_expense(state: State<DbState>, sessions: State<SessionState>, token: String, data: Expense) -> Result<(), String> {
     require_admin(&sessions, &token)?;
+    let db = state.conn();
+    editar_gasto(&db, data)
+}
+
+/// Cambia un gasto y ajusta el total del turno, las dos cosas o ninguna.
+///
+/// Antes eran dos escrituras sueltas: si fallaba la segunda, el gasto quedaba
+/// con el monto nuevo y el corte con el viejo.
+pub fn editar_gasto(db: &rusqlite::Connection, data: Expense) -> Result<(), String> {
     if !data.amount.is_finite() || data.amount <= 0.0 {
         return Err("El gasto tiene que ser mayor a cero".to_string());
     }
-    let db = state.conn();
+    if data.description.trim().is_empty() {
+        return Err("Escribe en qué se gastó".to_string());
+    }
 
-    // Current amount + owning register
     let (old_amount, cr_id): (f64, Option<i64>) = db.query_row(
         "SELECT amount, cash_register_id FROM expenses WHERE id = ?1",
         params![data.id],
         |row| Ok((row.get(0)?, row.get(1)?)),
-    ).map_err(|e| e.to_string())?;
+    ).map_err(|_| "El gasto no existe".to_string())?;
 
     if let Some(cr_id) = cr_id {
-        if register_is_closed(&db, cr_id)? {
+        if register_is_closed(db, cr_id)? {
             return Err("No se puede editar un gasto de una caja ya cerrada".to_string());
         }
     }
 
-    db.execute(
-        "UPDATE expenses SET category = ?1, description = ?2, amount = ?3 WHERE id = ?4",
-        params![data.category, data.description, data.amount, data.id],
-    ).map_err(|e| e.to_string())?;
-
-    // Keep the register's expense total in sync
-    if let Some(cr_id) = cr_id {
-        let delta = data.amount - old_amount;
+    en_transaccion(db, || {
         db.execute(
-            "UPDATE cash_registers SET total_expenses = total_expenses + ?1 WHERE id = ?2",
-            params![delta, cr_id],
+            "UPDATE expenses SET category = ?1, description = ?2, amount = ?3 WHERE id = ?4",
+            params![data.category, data.description.trim(), data.amount, data.id],
         ).map_err(|e| e.to_string())?;
-    }
 
-    Ok(())
+        if let Some(cr_id) = cr_id {
+            let delta = (Cents::from_pesos(data.amount) - Cents::from_pesos(old_amount)).to_pesos();
+            db.execute(
+                "UPDATE cash_registers SET total_expenses = total_expenses + ?1 WHERE id = ?2",
+                params![delta, cr_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub fn delete_expense(state: State<DbState>, sessions: State<SessionState>, token: String, id: i64) -> Result<(), String> {
     require_admin(&sessions, &token)?;
     let db = state.conn();
+    quitar_gasto(&db, id)
+}
 
+/// Quita un gasto del turno. La base lo guarda antes en su archivo.
+pub fn quitar_gasto(db: &rusqlite::Connection, id: i64) -> Result<(), String> {
     let (amount, cr_id): (f64, Option<i64>) = db.query_row(
         "SELECT amount, cash_register_id FROM expenses WHERE id = ?1",
         params![id],
         |row| Ok((row.get(0)?, row.get(1)?)),
-    ).map_err(|e| e.to_string())?;
+    ).map_err(|_| "El gasto no existe".to_string())?;
 
     if let Some(cr_id) = cr_id {
-        if register_is_closed(&db, cr_id)? {
+        if register_is_closed(db, cr_id)? {
             return Err("No se puede eliminar un gasto de una caja ya cerrada".to_string());
         }
     }
 
-    db.execute("DELETE FROM expenses WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
+    en_transaccion(db, || {
+        db.execute("DELETE FROM expenses WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
 
-    if let Some(cr_id) = cr_id {
-        db.execute(
-            "UPDATE cash_registers SET total_expenses = total_expenses - ?1 WHERE id = ?2",
-            params![amount, cr_id],
-        ).map_err(|e| e.to_string())?;
+        if let Some(cr_id) = cr_id {
+            db.execute(
+                "UPDATE cash_registers SET total_expenses = total_expenses - ?1 WHERE id = ?2",
+                params![amount, cr_id],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+}
+
+fn en_transaccion(db: &rusqlite::Connection, f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    match f() {
+        Ok(()) => db.execute_batch("COMMIT;").map_err(|e| e.to_string()),
+        Err(e) => {
+            db.execute_batch("ROLLBACK;").ok();
+            Err(e)
+        }
     }
-
-    Ok(())
 }
 
 fn register_is_closed(db: &rusqlite::Connection, cr_id: i64) -> Result<bool, String> {
@@ -303,4 +330,72 @@ mod tests {
         sin.description = "   ".into();
         assert!(registrar_gasto(&db, 1, None, sin).is_err());
     }
+    /// Hace fallar el ajuste del turno, para ver qué queda si la segunda
+    /// escritura no entra.
+    fn romper_el_corte(db: &rusqlite::Connection) {
+        db.execute_batch(
+            "CREATE TRIGGER romper BEFORE UPDATE OF total_expenses ON cash_registers
+             BEGIN SELECT RAISE(ABORT, 'fallo a la mitad'); END;",
+        ).unwrap();
+    }
+
+    fn el_gasto(db: &rusqlite::Connection, id: i64) -> Expense {
+        db.query_row("SELECT id, cash_register_id, category, description, amount, user_id, created_at FROM expenses WHERE id = ?1",
+            params![id], |r| Ok(Expense {
+                id: r.get(0)?, cash_register_id: r.get(1)?, category: r.get(2)?, description: r.get(3)?,
+                amount: r.get(4)?, user_id: r.get(5)?, created_at: r.get(6)?, user_name: None,
+            })).unwrap()
+    }
+
+    #[test]
+    fn editar_un_gasto_mueve_el_corte_por_la_diferencia() {
+        let db = tienda();
+        abrir_caja(&db, 500.0);
+        let g = registrar_gasto(&db, 1, None, gasto(100.0)).unwrap();
+
+        editar_gasto(&db, Expense { amount: 70.10, ..el_gasto(&db, g.id) }).unwrap();
+
+        assert_eq!(total_gastos(&db), 70.10);
+    }
+
+    #[test]
+    fn si_el_corte_no_se_puede_ajustar_el_gasto_no_cambia() {
+        let db = tienda();
+        abrir_caja(&db, 500.0);
+        let g = registrar_gasto(&db, 1, None, gasto(100.0)).unwrap();
+        romper_el_corte(&db);
+
+        assert!(editar_gasto(&db, Expense { amount: 300.0, ..el_gasto(&db, g.id) }).is_err());
+
+        assert_eq!(el_gasto(&db, g.id).amount, 100.0, "el gasto se quedó como estaba");
+        assert_eq!(total_gastos(&db), 100.0);
+    }
+
+    #[test]
+    fn si_el_corte_no_se_puede_ajustar_el_gasto_no_se_quita() {
+        let db = tienda();
+        abrir_caja(&db, 500.0);
+        let g = registrar_gasto(&db, 1, None, gasto(100.0)).unwrap();
+        romper_el_corte(&db);
+
+        assert!(quitar_gasto(&db, g.id).is_err());
+
+        let sigue: i64 = db.query_row("SELECT COUNT(*) FROM expenses", [], |r| r.get(0)).unwrap();
+        assert_eq!(sigue, 1);
+        let archivados: i64 = db.query_row("SELECT COUNT(*) FROM expenses_archivo", [], |r| r.get(0)).unwrap();
+        assert_eq!(archivados, 0, "el archivo tampoco se queda con una copia a medias");
+        assert_eq!(total_gastos(&db), 100.0);
+    }
+
+    #[test]
+    fn quitar_un_gasto_lo_saca_del_corte() {
+        let db = tienda();
+        abrir_caja(&db, 500.0);
+        let g = registrar_gasto(&db, 1, None, gasto(100.0)).unwrap();
+
+        quitar_gasto(&db, g.id).unwrap();
+
+        assert_eq!(total_gastos(&db), 0.0);
+    }
+
 }

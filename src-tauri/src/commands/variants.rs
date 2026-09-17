@@ -147,9 +147,24 @@ pub fn guardar_variantes(
             let color = norm(&v.color);
             let sku = norm(&v.sku);
             let barcode = norm(&v.barcode);
-            let stock = v.stock.max(0);
+            let pedida = v.stock.max(0);
             match v.id {
                 Some(id) => {
+                    let actual = previo.get(&id).copied().unwrap_or(0);
+                    let stock = match v.stock_original {
+                        // No se tocó: se queda la de la base, que pudo cambiar
+                        // mientras el formulario estaba abierto. Escribir la del
+                        // formulario deshacía un conteo o una venta de ese rato.
+                        Some(original) if pedida == original.max(0) => actual,
+                        Some(original) if actual != original => {
+                            return Err(format!(
+                                "La existencia de la talla {} cambió mientras editabas: ahora hay {}. Cierra el producto y vuelve a abrirlo para no pisar ese cambio.",
+                                etiqueta_de(&size, &color),
+                                actual
+                            ));
+                        }
+                        _ => pedida,
+                    };
                     db.execute(
                         "UPDATE product_variants SET size=?1, color=?2, sku=?3, barcode=?4, stock=?5, is_active=1, updated_at=datetime('now','localtime') WHERE id=?6 AND product_id=?7",
                         params![size, color, sku, barcode, stock, id, product_id],
@@ -164,6 +179,7 @@ pub fn guardar_variantes(
                     }
                 }
                 None => {
+                    let stock = pedida;
                     db.execute(
                         "INSERT INTO product_variants (product_id, size, color, sku, barcode, stock) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![product_id, size, color, sku, barcode, stock],
@@ -439,6 +455,7 @@ mod tests {
             sku: None,
             barcode: None,
             stock,
+            stock_original: None,
         }
     }
 
@@ -568,4 +585,68 @@ mod tests {
         );
         invariante(&db, p, "tras pasar a tallas");
     }
+    fn fila(id: i64, size: &str, stock: i32, original: Option<i32>) -> SaveVariantDto {
+        SaveVariantDto {
+            id: Some(id), size: Some(size.into()), color: None, sku: None, barcode: None,
+            stock, stock_original: original,
+        }
+    }
+
+    fn stock_de(db: &rusqlite::Connection, variant_id: i64) -> i32 {
+        db.query_row("SELECT stock FROM product_variants WHERE id = ?1", params![variant_id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn guardar_sin_tocar_la_existencia_no_pisa_lo_que_cambio_mientras() {
+        // El formulario se abrió con M en 5. Mientras estaba abierto llegó un
+        // conteo del celular: M quedó en 9. Guardar para cambiarle el nombre a la
+        // talla escribía el 5 de vuelta y el conteo se perdía.
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+        db.execute("UPDATE product_variants SET stock = 9 WHERE id = ?1", params![m]).unwrap();
+        db.execute("UPDATE products SET stock = 14 WHERE id = ?1", params![p]).unwrap();
+
+        guardar_variantes(&db, 1, p, vec![fila(m, "Mediana", 5, Some(5)), fila(l, "L", 5, Some(5))]).unwrap();
+
+        assert_eq!(stock_de(&db, m), 9);
+        invariante(&db, p, "guardar sin tocar existencias");
+        let nombre: String = db.query_row("SELECT size FROM product_variants WHERE id = ?1", params![m], |r| r.get(0)).unwrap();
+        assert_eq!(nombre, "Mediana", "lo que sí se cambió, se guarda");
+    }
+
+    #[test]
+    fn cambiarla_cuando_tambien_cambio_por_otro_lado_se_detiene() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+        db.execute("UPDATE product_variants SET stock = 9 WHERE id = ?1", params![m]).unwrap();
+        db.execute("UPDATE products SET stock = 14 WHERE id = ?1", params![p]).unwrap();
+
+        let err = guardar_variantes(&db, 1, p, vec![fila(m, "M", 7, Some(5)), fila(l, "L", 5, Some(5))]).unwrap_err();
+
+        assert!(err.contains("cambió mientras editabas"), "{}", err);
+        assert!(err.contains('9'), "dice cuánto hay ahora: {}", err);
+        assert_eq!(stock_de(&db, m), 9, "nada se escribió");
+    }
+
+    #[test]
+    fn cambiarla_cuando_nadie_mas_la_toco_se_guarda() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![fila(m, "M", 7, Some(5)), fila(l, "L", 5, Some(5))]).unwrap();
+
+        assert_eq!(stock_de(&db, m), 7);
+        invariante(&db, p, "un ajuste a mano");
+    }
+
+    #[test]
+    fn sin_existencia_original_se_comporta_como_antes() {
+        let db = tienda();
+        let (p, m, l) = con_variantes(&db);
+
+        guardar_variantes(&db, 1, p, vec![fila(m, "M", 2, None), fila(l, "L", 5, None)]).unwrap();
+
+        assert_eq!(stock_de(&db, m), 2);
+    }
+
 }

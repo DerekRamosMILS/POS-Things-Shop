@@ -63,8 +63,11 @@ export default function ReportsPage() {
     const totalProfit = dailyReport.reduce((s, d) => s + d.gross_profit, 0);
     const totalExpenses = dailyReport.reduce((s, d) => s + d.total_expenses, 0);
     const netProfit = totalProfit - totalExpenses;
-    const avgDaily = dailyReport.length > 0 ? totalSales / dailyReport.length : 0;
-    const avgCount = dailyReport.length > 0 ? Math.round(totalCount / dailyReport.length) : 0;
+    // Un día con solo abonos o gastos también sale en el reporte; el promedio es
+    // de los días en que se vendió.
+    const diasConVenta = dailyReport.filter(d => d.sale_count > 0).length;
+    const avgDaily = diasConVenta > 0 ? totalSales / diasConVenta : 0;
+    const avgCount = diasConVenta > 0 ? Math.round(totalCount / diasConVenta) : 0;
     const margin = totalSales > 0 ? (netProfit / totalSales) * 100 : 0;
 
     if (loading) return (

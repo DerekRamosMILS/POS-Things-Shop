@@ -555,4 +555,60 @@ mod tests {
         let partida = t.partidas(venta_id)[0];
         assert_eq!(t.devolver(venta_id, vec![(partida, 2)], "cash").unwrap(), 200.0);
     }
+    #[test]
+    fn una_venta_con_devoluciones_no_se_cancela() {
+        // Cancelar regresaba al inventario las tres piezas aunque una ya había
+        // vuelto con la devolución (10 -> 11), y la caja revertía la venta
+        // completa mientras el reembolso seguía restando: $300 de descuadre.
+        let t = Tienda::nueva().con_caja();
+        let p = t.producto("VES", 100.0, 10);
+        let venta = t.vender(vec![(p, 3, 0.0)], None);
+        let partida = t.partidas(venta)[0];
+        t.devolver(venta, vec![(partida, 1)], "cash").unwrap();
+
+        let err = crate::commands::sales::cancelar_venta(&t.db, 1, venta).unwrap_err();
+
+        assert!(err.contains("devoluci"), "{}", err);
+        let stock: i32 = t.db.query_row("SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 8, "nada se movió");
+        let efectivo: f64 = t.db.query_row("SELECT total_cash_sales FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(efectivo, 300.0);
+
+        // Lo que falta se devuelve por su camino, y cuadra.
+        t.devolver(venta, vec![(partida, 2)], "cash").unwrap();
+        let stock: i32 = t.db.query_row("SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 10);
+    }
+
+    #[test]
+    fn cancelar_una_venta_de_un_turno_cerrado_lo_dice() {
+        // La caja de ese turno ya se cortó: no se toca, pero el efectivo que se
+        // regrese hoy sale del cajón de hoy y alguien tiene que saberlo.
+        let t = Tienda::nueva().con_caja();
+        let p = t.producto("VES", 100.0, 10);
+        let venta = t.vender(vec![(p, 1, 0.0)], None);
+        t.db.execute("UPDATE cash_registers SET status = 'closed'", []).unwrap();
+
+        let aviso = crate::commands::sales::cancelar_venta(&t.db, 1, venta).unwrap();
+
+        assert!(aviso.contains("turno ya cerrado"), "{}", aviso);
+        let efectivo: f64 = t.db.query_row("SELECT total_cash_sales FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(efectivo, 100.0, "el corte cerrado no se toca");
+    }
+
+    #[test]
+    fn cancelar_en_el_mismo_turno_revierte_la_caja_sin_aviso_extra() {
+        let t = Tienda::nueva().con_caja();
+        let p = t.producto("VES", 100.0, 10);
+        let venta = t.vender(vec![(p, 2, 0.0)], None);
+
+        let aviso = crate::commands::sales::cancelar_venta(&t.db, 1, venta).unwrap();
+
+        assert!(!aviso.contains("turno ya cerrado"), "{}", aviso);
+        let efectivo: f64 = t.db.query_row("SELECT total_cash_sales FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(efectivo, 0.0);
+        let stock: i32 = t.db.query_row("SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 10);
+    }
+
 }

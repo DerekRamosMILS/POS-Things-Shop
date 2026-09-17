@@ -9,6 +9,7 @@ import { useProductImage } from '../hooks/useProductImages';
 import { evaluateMixedTender, round2 } from '../utils/cash';
 import KeyboardHelp from '../components/KeyboardHelp';
 import * as api from '../api';
+import { firmaDelCobro, identidadParaCobrar, type IdentidadDeCobro } from '../utils/idDeCobro';
 import { T } from '../theme';
 
 
@@ -200,7 +201,7 @@ export default function POSPage() {
     const [processing, setProcessing] = useState(false);
     // Un id por intento de cobro: si el envío se repite (doble clic, reintento
     // tras un cuelgue), el backend devuelve la venta original en vez de otra.
-    const chargeRequestId = useRef<string>(crypto.randomUUID());
+    const chargeRequest = useRef<IdentidadDeCobro | null>(null);
     // Id de la última venta, para poder reimprimir su ticket desde la base.
     const lastSaleId = useRef<number | null>(null);
     const [lastSale, setLastSale] = useState<CompletedSale | null>(null);
@@ -422,6 +423,9 @@ export default function POSPage() {
         for (const it of items) {
             const lineNet = it.product.sale_price * it.quantity - it.discount;
             if (activePromo.applies_to === 'all') base += lineNet;
+            // Sin destino no alcanza a nada, igual que en el cobro: null === null
+            // hacía que una promoción por categoría cayera sobre lo que no tenía.
+            else if (activePromo.target_id == null) continue;
             else if (activePromo.applies_to === 'category' && it.product.category_id === activePromo.target_id) base += lineNet;
             else if (activePromo.applies_to === 'product' && it.product.id === activePromo.target_id) base += lineNet;
         }
@@ -519,6 +523,11 @@ export default function POSPage() {
             : [];
 
         const paid = paymentMethod === 'cash' ? cashGiven : total;
+        chargeRequest.current = identidadParaCobrar(
+            chargeRequest.current,
+            firmaDelCobro(items, activePromo?.id ?? null, customerId, requiereFactura),
+            () => crypto.randomUUID(),
+        );
         setProcessing(true);
         const saleItems = items.map(i => ({ ...i }));
         const saleSubtotal = subtotal, saleLineDiscount = lineDiscountTotal, saleTax = tax;
@@ -530,7 +539,7 @@ export default function POSPage() {
                 promotion_id: activePromo?.id ?? null,
                 requiere_factura: requiereFactura,
                 customer_id: customerId,
-                client_request_id: chargeRequestId.current,
+                client_request_id: chargeRequest.current.id,
                 notes: [SERVICE_LABELS[serviceType], customerName ? `Cliente: ${customerName}` : '', activePromo ? `Promo: ${activePromo.name}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
             });
             setLastSale({ folio: sale.folio, total: sale.total, change: sale.change_amount, items: saleItems, subtotal: saleSubtotal, lineDiscountTotal: saleLineDiscount, promoDiscount, tax: saleTax, paymentMethod, amountPaid: paid, serviceType, customerName, orderNotes });
@@ -560,7 +569,7 @@ export default function POSPage() {
             const applySold = (list: Product[]) => list.map(p => soldMap.has(p.id) ? { ...p, stock: Math.max(0, p.stock - (soldMap.get(p.id) || 0)) } : p);
             setAllProducts(applySold);
             setSearchResults(applySold);
-            chargeRequestId.current = crypto.randomUUID();
+            chargeRequest.current = null;
             clear(); setShowPayment(false); setAmountPaid(''); setMixedCard(''); setMixedTransfer(''); setCustomerName(''); setRequiereFactura(false); setCustomerId(null); setOrderNotes(''); setActivePromo(null); setPromoInput('');
             setOrderSeq(prev => prev + 1);
         } catch (err) { showToast(String(err), 'error'); }

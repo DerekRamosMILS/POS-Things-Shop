@@ -106,7 +106,11 @@ export default function SalesPage() {
         if (!user) return;
         const ok = await confirm({ title: 'Cancelar venta', message: '¿Cancelar esta venta? Se restaurará el inventario.', variant: 'danger', confirmLabel: 'Cancelar venta' });
         if (!ok) return;
-        try { await api.cancelSale(saleId); loadSales(); setDetail(null); }
+        try {
+            const aviso = await api.cancelSale(saleId);
+            showToast(aviso, aviso.includes('turno ya cerrado') ? 'warning' : 'success');
+            loadSales(); setDetail(null);
+        }
         catch (err) { showToast(String(err), 'error'); }
     };
 

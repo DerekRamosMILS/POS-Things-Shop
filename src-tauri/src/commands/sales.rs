@@ -136,10 +136,13 @@ fn promotion_discount(
     // Base: solo lo que la promoción alcanza, ya neto de descuentos de línea.
     let base: Cents = lines
         .iter()
+        // Sin destino no alcanza a nada: comparar dos vacíos daba verdadero, y una
+        // promoción por categoría sin categoría caía sobre todo lo que no tenía.
         .filter(|(product_id, category_id, _)| match applies_to.as_str() {
-            "category" => *category_id == target_id,
-            "product" => Some(*product_id) == target_id,
-            _ => true,
+            "all" => true,
+            "category" => target_id.is_some() && *category_id == target_id,
+            "product" => target_id.is_some() && Some(*product_id) == target_id,
+            _ => false,
         })
         .map(|(_, _, net)| *net)
         .sum();
@@ -160,6 +163,27 @@ fn variant_label(size: &Option<String>, color: &Option<String>) -> String {
     if let Some(s) = size.as_deref() { if !s.trim().is_empty() { parts.push(s); } }
     if let Some(c) = color.as_deref() { if !c.trim().is_empty() { parts.push(c); } }
     if parts.is_empty() { "Único".to_string() } else { parts.join(" / ") }
+}
+
+/// (producto, talla, cantidad) de una venta guardada, en orden.
+fn renglones_de_venta(db: &rusqlite::Connection, sale_id: i64) -> Result<Vec<(i64, Option<i64>, i32)>, String> {
+    let mut stmt = db
+        .prepare("SELECT product_id, variant_id, quantity FROM sale_items WHERE sale_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let mut filas = stmt
+        .query_map(params![sale_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    filas.sort();
+    Ok(filas)
+}
+
+/// Lo mismo, de lo que pide el punto de venta.
+fn renglones_pedidos(data: &CreateSaleDto) -> Vec<(i64, Option<i64>, i32)> {
+    let mut filas: Vec<_> = data.items.iter().map(|i| (i.product_id, i.variant_id, i.quantity)).collect();
+    filas.sort();
+    filas
 }
 
 #[tauri::command]
@@ -198,6 +222,18 @@ pub fn registrar_venta(
             params![rid],
             |row| row.get::<_, i64>(0),
         ) {
+            // Solo es el mismo cobro si es la misma compra. Devolver la venta
+            // anterior para un carrito distinto dejaba sin cobrar lo agregado
+            // después y la pantalla decía que todo salió bien.
+            if renglones_de_venta(db, existing_id)? != renglones_pedidos(&data) {
+                let folio: String = db
+                    .query_row("SELECT folio FROM sales WHERE id = ?1", params![existing_id], |r| r.get(0))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Este cobro ya se había registrado como la venta {} con otros productos. Revísala en Ventas antes de volver a cobrar.",
+                    folio
+                ));
+            }
             log::warn!("Cobro repetido ignorado (request {}), se devuelve la venta {}", rid, existing_id);
             return get_sale_by_id(db, existing_id);
         }
@@ -255,6 +291,12 @@ pub fn registrar_venta(
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
                 )
                 .map_err(|_| "Un producto de la venta ya no existe".to_string())?;
+            if !price.is_finite() || price < 0.0 {
+                return Err(format!(
+                    "'{}' tiene un precio inválido ({}). Corrígelo en Productos antes de venderlo.",
+                    name, price
+                ));
+            }
 
             // If a variant is specified, availability is checked against the variant.
             let (variant_id, variant_label, available) = if let Some(vid) = item.variant_id {
@@ -488,18 +530,22 @@ pub fn registrar_venta(
 }
 
 #[tauri::command]
-pub fn cancel_sale(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<(), String> {
+pub fn cancel_sale(state: State<DbState>, sessions: State<SessionState>, token: String, sale_id: i64) -> Result<String, String> {
     let user_id = require_admin(&sessions, &token)?;
     let db = state.conn();
     cancelar_venta(&db, user_id, sale_id)
 }
 
 /// Núcleo de la cancelación, con la conexión explícita.
-pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> Result<(), String> {
+///
+/// Devuelve el mensaje para la pantalla: cuando la venta es de un turno ya
+/// cerrado, el efectivo que se le regrese al cliente sale del cajón de hoy y
+/// nada en el sistema lo registra solo.
+pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> Result<String, String> {
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<String, String> {
         // Get sale status
         let status: String = db.query_row(
             "SELECT status FROM sales WHERE id = ?1",
@@ -520,6 +566,20 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
         if de_apartado.is_some() {
             return Err(
                 "Esta venta es la entrega de un apartado. Si hay que deshacerla, hazlo desde Apartados."
+                    .to_string(),
+            );
+        }
+
+        // Con devoluciones de por medio, cancelar regresaba al inventario las
+        // piezas que ya habían vuelto y revertía en caja la venta completa
+        // mientras el reembolso seguía restando. Lo que falta se devuelve por su
+        // camino, que ya sabe cuánto queda y cuánto cobrar.
+        let devoluciones: i64 = db
+            .query_row("SELECT COUNT(*) FROM returns WHERE sale_id = ?1", params![sale_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if devoluciones > 0 {
+            return Err(
+                "Esta venta ya tiene devoluciones. Para deshacer el resto, devuelve lo que falta desde el detalle de la venta."
                     .to_string(),
             );
         }
@@ -578,12 +638,14 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(|e| e.to_string())?;
 
+        let mut turno_cerrado = false;
         if let Some(cr_id) = cr_id {
             let is_open: bool = db.query_row(
                 "SELECT status = 'open' FROM cash_registers WHERE id = ?1",
                 params![cr_id],
                 |row| row.get(0),
             ).unwrap_or(false);
+            turno_cerrado = !is_open;
 
             if is_open {
                 // Reverse each leg of the tender into the column it landed in.
@@ -614,18 +676,34 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
             }
         }
 
+        let aviso = if turno_cerrado {
+            format!(
+                "Venta cancelada y mercancía devuelta al inventario. Era de un turno ya cerrado, así que su corte no se tocó: si le regresas {} en efectivo, anótalo como gasto para que el corte de hoy cuadre.",
+                crate::money::Cents::from_pesos(total)
+            )
+        } else {
+            "Venta cancelada y mercancía devuelta al inventario.".to_string()
+        };
+
         db.execute(
             "INSERT INTO app_logs (level, module, message, user_id) VALUES ('warn', 'sales', ?1, ?2)",
-            params![format!("Venta {} cancelada", sale_id), user_id],
+            params![
+                if turno_cerrado {
+                    format!("Venta {} cancelada; era de un turno ya cerrado", sale_id)
+                } else {
+                    format!("Venta {} cancelada", sale_id)
+                },
+                user_id
+            ],
         ).ok();
 
-        Ok(())
+        Ok(aviso)
     })();
 
     match result {
-        Ok(()) => {
+        Ok(aviso) => {
             db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
-            Ok(())
+            Ok(aviso)
         }
         Err(e) => {
             db.execute_batch("ROLLBACK;").ok();
@@ -1013,6 +1091,104 @@ mod tests {
             [],
         ).unwrap();
         conn
+    }
+
+    fn pedido(items: Vec<(i64, i32)>, request: &str) -> crate::models::sale::CreateSaleDto {
+        crate::models::sale::CreateSaleDto {
+            items: items.into_iter().map(|(product_id, quantity)| crate::models::sale::CreateSaleItemDto {
+                product_id, quantity, unit_price: 0.0, discount: 0.0, variant_id: None,
+            }).collect(),
+            payment_method: "cash".to_string(), amount_paid: 10_000.0, payments: vec![],
+            discount_total: 0.0, promotion_id: None, requiere_factura: false,
+            notes: None, customer_id: None, client_request_id: Some(request.to_string()),
+        }
+    }
+
+    fn con_dos_productos() -> rusqlite::Connection {
+        let conn = db_ventas();
+        conn.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
+        conn.execute_batch(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock) VALUES (1, 'A', 'A', 1, 100, 10);
+             INSERT INTO products (id, sku, name, purchase_price, sale_price, stock) VALUES (2, 'B', 'B', 1, 50, 10);",
+        ).unwrap();
+        conn
+    }
+
+    #[test]
+    fn reintentar_el_mismo_cobro_devuelve_la_misma_venta() {
+        let conn = con_dos_productos();
+        let primera = registrar_venta(&conn, 1, None, pedido(vec![(1, 1), (2, 2)], "r-1")).unwrap();
+        let otra_vez = registrar_venta(&conn, 1, None, pedido(vec![(2, 2), (1, 1)], "r-1")).unwrap();
+        assert_eq!(primera.id, otra_vez.id);
+        let ventas: i64 = conn.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas, 1);
+    }
+
+    #[test]
+    fn el_mismo_identificador_con_otra_compra_no_se_da_por_cobrado() {
+        let conn = con_dos_productos();
+        let primera = registrar_venta(&conn, 1, None, pedido(vec![(1, 1)], "r-1")).unwrap();
+
+        let err = registrar_venta(&conn, 1, None, pedido(vec![(1, 1), (2, 1)], "r-1")).unwrap_err();
+
+        assert!(err.contains(&primera.folio), "dice cuál venta ya existe: {}", err);
+        let stock_b: i32 = conn.query_row("SELECT stock FROM products WHERE id = 2", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock_b, 10);
+    }
+
+    #[test]
+    fn una_promocion_por_categoria_sin_categoria_no_alcanza_a_nada() {
+        // Los dos productos de prueba no tienen categoría.
+        let conn = con_dos_productos();
+        conn.execute(
+            "INSERT INTO promotions (id, name, discount_type, discount_value, start_date, end_date, applies_to, target_id)
+             VALUES (5, 'Rota', 'percentage', 50, '2000-01-01', '2999-12-31', 'category', NULL)",
+            [],
+        ).unwrap();
+        let mut p = pedido(vec![(1, 1)], "r-promo");
+        p.promotion_id = Some(5);
+
+        let venta = registrar_venta(&conn, 1, None, p).unwrap();
+
+        assert_eq!(venta.total, 100.0, "no se descontó nada");
+    }
+
+    #[test]
+    fn una_promocion_por_producto_si_descuenta_su_producto() {
+        let conn = con_dos_productos();
+        conn.execute(
+            "INSERT INTO promotions (id, name, discount_type, discount_value, start_date, end_date, applies_to, target_id)
+             VALUES (7, 'Blusa', 'percentage', 50, '2000-01-01', '2999-12-31', 'product', 1)",
+            [],
+        ).unwrap();
+        let mut p = pedido(vec![(1, 1), (2, 1)], "r-producto");
+        p.promotion_id = Some(7);
+
+        assert_eq!(registrar_venta(&conn, 1, None, p).unwrap().total, 100.0, "50 de A con descuento + 50 de B");
+    }
+
+    #[test]
+    fn un_precio_negativo_en_la_base_no_se_vende() {
+        let conn = db_ventas();
+        conn.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (7, 'MALO', 'Malo', 0.0, -200.0, 10)",
+            [],
+        ).unwrap();
+
+        let err = registrar_venta(&conn, 1, None, crate::models::sale::CreateSaleDto {
+            items: vec![crate::models::sale::CreateSaleItemDto {
+                product_id: 7, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: None,
+            }],
+            payment_method: "cash".to_string(), amount_paid: 1000.0, payments: vec![],
+            discount_total: 0.0, promotion_id: None, requiere_factura: false,
+            notes: None, customer_id: None, client_request_id: None,
+        }).unwrap_err();
+
+        assert!(err.contains("precio inválido"), "{}", err);
+        let ventas: i64 = conn.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas, 0);
     }
 
     fn insertar_folio(conn: &rusqlite::Connection, folio: &str) {

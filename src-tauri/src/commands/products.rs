@@ -200,9 +200,63 @@ pub fn get_next_sku(
     siguiente_sku(&db)
 }
 
+/// Lo que un producto no puede traer, venga de donde venga.
+///
+/// Un precio negativo por error de dedo no abarataba el ticket —el recorte del
+/// descuento lo neutralizaba— pero regalaba la prenda y dejaba en la venta un
+/// descuento negativo que torcía los reportes.
+pub(crate) fn validar_producto(
+    nombre: &str,
+    sale_price: f64,
+    purchase_price: f64,
+    min_stock: i32,
+    stock: Option<i32>,
+) -> Result<(), String> {
+    if nombre.trim().is_empty() {
+        return Err("El producto necesita un nombre".to_string());
+    }
+    if !sale_price.is_finite() || sale_price < 0.0 {
+        return Err("El precio de venta no puede ser negativo".to_string());
+    }
+    if !purchase_price.is_finite() || purchase_price < 0.0 {
+        return Err("El costo no puede ser negativo".to_string());
+    }
+    if min_stock < 0 {
+        return Err("El stock mínimo no puede ser negativo".to_string());
+    }
+    if stock.is_some_and(|s| s < 0) {
+        return Err("La existencia inicial no puede ser negativa".to_string());
+    }
+    Ok(())
+}
+
+/// Deja en el historial un cambio de precio de venta o de costo, si lo hubo.
+///
+/// Con quién lo cambió: la columna existía y la pantalla la mostraba, pero nadie
+/// la llenaba.
+pub(crate) fn anotar_precio(
+    db: &rusqlite::Connection,
+    product_id: i64,
+    tipo: &str,
+    antes: f64,
+    despues: f64,
+    user_id: i64,
+) -> Result<(), String> {
+    if crate::money::Cents::from_pesos(antes) == crate::money::Cents::from_pesos(despues) {
+        return Ok(());
+    }
+    db.execute(
+        "INSERT INTO price_history (product_id, old_price, new_price, changed_by, tipo) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![product_id, antes, despues, user_id, tipo],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
     require_admin(&sessions, &token)?;
+    validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, Some(data.stock))?;
     let db = state.conn();
 
     db.execute(
@@ -236,21 +290,19 @@ pub fn create_product(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn update_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateProductDto) -> Result<Product, String> {
     let user_id = require_admin(&sessions, &token)?;
+    validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, None)?;
     let db = state.conn();
 
     let old_price: f64 = db
         .query_row("SELECT sale_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
-    if (old_price - data.sale_price).abs() > 0.001 {
-        // Quién lo cambió: la columna existía y la pantalla la mostraba, pero
-        // nadie la llenaba, así que el historial decía qué precio cambió y nunca
-        // de quién fue la mano.
-        db.execute(
-            "INSERT INTO price_history (product_id, old_price, new_price, changed_by) VALUES (?1, ?2, ?3, ?4)",
-            params![data.id, old_price, data.sale_price, user_id],
-        ).map_err(|e| e.to_string())?;
-    }
+    let old_cost: f64 = db
+        .query_row("SELECT purchase_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    anotar_precio(&db, data.id, "venta", old_price, data.sale_price, user_id)?;
+    anotar_precio(&db, data.id, "costo", old_cost, data.purchase_price, user_id)?;
 
     db.execute(
         "UPDATE products SET sku=?1, barcode=?2, name=?3, description=?4,
@@ -291,6 +343,8 @@ pub struct PriceHistoryEntry {
     pub new_price: f64,
     pub user_name: Option<String>,
     pub created_at: String,
+    /// "venta" o "costo".
+    pub tipo: String,
 }
 
 #[tauri::command]
@@ -298,7 +352,7 @@ pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, t
     require_auth(&sessions, &token)?;
     let db = state.conn();
     let mut stmt = db.prepare(
-        "SELECT ph.id, ph.old_price, ph.new_price, u.full_name, ph.created_at
+        "SELECT ph.id, ph.old_price, ph.new_price, u.full_name, ph.created_at, ph.tipo
          FROM price_history ph
          LEFT JOIN users u ON ph.changed_by = u.id
          WHERE ph.product_id = ?1
@@ -312,6 +366,7 @@ pub fn get_price_history(state: State<DbState>, sessions: State<SessionState>, t
                 new_price: row.get(2)?,
                 user_name: row.get(3)?,
                 created_at: row.get(4)?,
+                tipo: row.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -356,6 +411,19 @@ mod tests {
         let sku = siguiente_sku(db).unwrap();
         crear(db, &sku);
         sku
+    }
+
+    #[test]
+    fn un_producto_con_numeros_imposibles_se_rechaza() {
+        assert!(validar_producto("Vestido", -200.0, 50.0, 0, Some(1)).is_err());
+        assert!(validar_producto("Vestido", 200.0, -1.0, 0, Some(1)).is_err());
+        assert!(validar_producto("Vestido", 200.0, 50.0, -3, Some(1)).is_err());
+        assert!(validar_producto("Vestido", 200.0, 50.0, 0, Some(-5)).is_err());
+        assert!(validar_producto("Vestido", f64::NAN, 50.0, 0, None).is_err());
+        assert!(validar_producto("  ", 200.0, 50.0, 0, None).is_err());
+        // Cero sí: un regalo o una prenda capturada que aún no tiene precio.
+        assert!(validar_producto("Vestido", 0.0, 0.0, 0, Some(0)).is_ok());
+        assert!(validar_producto("Vestido", 200.0, 50.0, 2, None).is_ok());
     }
 
     #[test]
