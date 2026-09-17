@@ -4272,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "things-shop"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "argon2",
  "axum",
