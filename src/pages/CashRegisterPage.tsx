@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { formatCurrency, formatDateTime } from '../utils';
 import { useSessionStore } from '../stores/useSessionStore';
 import * as api from '../api';
-import { cashBreakdown, expectedCash as computeExpectedCash, round2 } from '../utils/cash';
+import { cashBreakdown, expectedCash as computeExpectedCash, montoContado, round2 } from '../utils/cash';
 import type { CashRegister, Expense } from '../types';
 import { useToast } from '../contexts/ToastContext';
 
@@ -53,9 +53,11 @@ export default function CashRegisterPage() {
     };
 
     const handleClose = async () => {
+        const contado = montoContado(closeAmount);
+        if (contado === null) { showToast('Escribe cuánto efectivo contaste antes de cerrar', 'error'); return; }
         setProcessing(true);
         try {
-            await api.closeRegister({ closing_amount: parseFloat(closeAmount) || 0 });
+            await api.closeRegister({ closing_amount: contado });
             setRegister(null); setCashRegisterId(null); setShowClose(false); setCloseAmount(''); loadData();
         } catch (err) { showToast(String(err), 'error'); } finally { setProcessing(false); }
     };
@@ -100,7 +102,8 @@ export default function CashRegisterPage() {
     const cashLines = register ? cashBreakdown(register).filter(l => l.amount !== 0) : [];
     const expectedCash = register ? computeExpectedCash(register) : 0;
 
-    const closeDifference = register ? round2((parseFloat(closeAmount) || 0) - expectedCash) : 0;
+    const contado = montoContado(closeAmount);
+    const closeDifference = register && contado !== null ? round2(contado - expectedCash) : 0;
 
     return (
         <div className="page-container">
@@ -274,7 +277,7 @@ export default function CashRegisterPage() {
                                 <label className="form-label">Conteo Físico en Caja</label>
                                 <input type="number" value={closeAmount} onChange={e => setCloseAmount(e.target.value)} className="input" style={{ height: 52, fontSize: 22, fontWeight: 700, textAlign: 'center', fontFamily: 'monospace' }} placeholder="0.00" autoFocus />
                             </div>
-                            {register && closeAmount && (
+                            {register && contado !== null && (
                                 <div style={{
                                     padding: '14px 18px', borderRadius: 14, textAlign: 'center',
                                     background: closeDifference === 0 ? 'rgba(34,211,160,0.08)' : 'rgba(245,168,66,0.08)',
@@ -286,7 +289,7 @@ export default function CashRegisterPage() {
                             )}
                             <div style={{ display: 'flex', gap: 10 }}>
                                 <button onClick={() => setShowClose(false)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Cancelar</button>
-                                <button onClick={handleClose} disabled={processing} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>
+                                <button onClick={handleClose} disabled={processing || contado === null} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>
                                     {processing && <IcoLoader />} Cerrar Caja
                                 </button>
                             </div>

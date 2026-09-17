@@ -233,6 +233,7 @@ pub fn run() {
             config::get_all_config,
             config::get_config,
             config::set_config,
+            config::set_configs,
             config::registrar_evento_actualizacion,
             // Notifications
             notifications::get_notifications,
@@ -245,6 +246,7 @@ pub fn run() {
             customers::delete_customer,
             // Returns
             returns::create_return,
+            returns::preview_return,
             // Layaways
             layaways::create_layaway,
             layaways::get_layaways,

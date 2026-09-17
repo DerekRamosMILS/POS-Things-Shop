@@ -4,10 +4,26 @@ use crate::models::notification::{CreateReminderDto, Notification};
 use rusqlite::params;
 use tauri::State;
 
+/// Vuelve a encender la alerta de lo que ya se resurtió.
+///
+/// Descartar la alerta la apaga hasta que el producto se resurta. Solo el ajuste
+/// manual y la compra la volvían a encender, y ninguno de los dos existe para
+/// productos con tallas —casi toda la ropa—: una vez descartada, su alerta no
+/// volvía nunca. Aquí se enciende en cuanto la existencia vuelve a estar por
+/// encima del mínimo, venga de donde venga.
+pub(crate) fn rearmar_alertas(db: &rusqlite::Connection) {
+    db.execute(
+        "UPDATE products SET low_stock_ignored = 0 WHERE low_stock_ignored = 1 AND stock > min_stock",
+        [],
+    )
+    .ok();
+}
+
 #[tauri::command]
 pub fn get_notifications(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Notification>, String> {
     require_auth(&sessions, &token)?;
     let conn = state.conn();
+    rearmar_alertas(&conn);
 
     // Low stock notifications
     // We dynamically insert/report low stock products that aren't ignored
@@ -157,4 +173,52 @@ pub fn create_reminder(
         .map_err(|e: rusqlite::Error| e.to_string())?;
 
     Ok(notification)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::variants::guardar_variantes;
+    use crate::models::variant::SaveVariantDto;
+
+    fn ignorada(db: &rusqlite::Connection) -> bool {
+        db.query_row("SELECT low_stock_ignored = 1 FROM products WHERE id = 1", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn la_alerta_de_una_prenda_con_tallas_vuelve_tras_resurtirla() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO users (id, username, password_hash, full_name, role) VALUES (1, 'u', 'x', 'U', 'admin');
+             INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, min_stock, has_variants)
+                 VALUES (1, 'V', 'Vestido', 1, 2, 1, 3, 1);
+             INSERT INTO product_variants (id, product_id, size, stock) VALUES (1, 1, 'M', 1);
+             UPDATE products SET low_stock_ignored = 1 WHERE id = 1;",
+        ).unwrap();
+
+        // Se resurte por el único camino que tienen las tallas.
+        guardar_variantes(&db, 1, 1, vec![SaveVariantDto {
+            id: Some(1), size: Some("M".into()), color: None, sku: None, barcode: None,
+            stock: 10, stock_original: Some(1),
+        }]).unwrap();
+        assert!(ignorada(&db), "sin el rearme se quedaba apagada");
+
+        rearmar_alertas(&db);
+        assert!(!ignorada(&db));
+    }
+
+    #[test]
+    fn lo_que_sigue_bajo_mantiene_su_alerta_descartada() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, min_stock, low_stock_ignored)
+                 VALUES (1, 'V', 'Vestido', 1, 2, 2, 3, 1);",
+        ).unwrap();
+
+        rearmar_alertas(&db);
+
+        assert!(ignorada(&db), "quien la descartó no quiere verla otra vez mientras siga igual");
+    }
 }

@@ -165,6 +165,11 @@ fn variant_label(size: &Option<String>, color: &Option<String>) -> String {
     if parts.is_empty() { "Único".to_string() } else { parts.join(" / ") }
 }
 
+fn es_admin(db: &rusqlite::Connection, user_id: i64) -> bool {
+    db.query_row("SELECT role = 'admin' FROM users WHERE id = ?1", params![user_id], |r| r.get(0))
+        .unwrap_or(false)
+}
+
 /// (producto, talla, cantidad) de una venta guardada, en orden.
 fn renglones_de_venta(db: &rusqlite::Connection, sale_id: i64) -> Result<Vec<(i64, Option<i64>, i32)>, String> {
     let mut stmt = db
@@ -284,13 +289,18 @@ pub fn registrar_venta(
             if item.quantity <= 0 {
                 return Err("La cantidad de un producto es inválida".to_string());
             }
-            let (name, sku, product_stock, price, cost, category_id): (String, String, i32, f64, f64, Option<i64>) = db
+            let (name, sku, product_stock, price, cost, category_id, activo): (String, String, i32, f64, f64, Option<i64>, bool) = db
                 .query_row(
-                    "SELECT name, sku, stock, sale_price, purchase_price, category_id FROM products WHERE id = ?1",
+                    "SELECT name, sku, stock, sale_price, purchase_price, category_id, is_active FROM products WHERE id = ?1",
                     params![item.product_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
                 )
                 .map_err(|_| "Un producto de la venta ya no existe".to_string())?;
+            // Eliminar un producto lo desactiva. Llegaba al ticket igual —por el
+            // código de una talla, o desde un carrito guardado— y se cobraba.
+            if !activo {
+                return Err(format!("'{}' está dado de baja y ya no se vende.", name));
+            }
             if !price.is_finite() || price < 0.0 {
                 return Err(format!(
                     "'{}' tiene un precio inválido ({}). Corrígelo en Productos antes de venderlo.",
@@ -352,6 +362,11 @@ pub fn registrar_venta(
 
         // El importe del descuento se calcula aquí, no se acepta del cliente.
         let line_discount_total: Cents = lines.iter().map(|l| l.discount).sum();
+        // Solo un administrador rebaja un renglón. Una cajera podía dejar
+        // cualquier prenda en cero y solo se notaba en los reportes.
+        if line_discount_total.is_positive() && !es_admin(db, user_id) {
+            return Err("Solo un administrador puede hacer descuentos. Quita el descuento o pide que cobre un administrador.".to_string());
+        }
         let promo_base: Vec<(i64, Option<i64>, Cents)> = lines
             .iter()
             .map(|l| (l.product_id, l.category_id, l.line_subtotal))
@@ -1168,6 +1183,49 @@ mod tests {
     }
 
     #[test]
+    fn un_producto_dado_de_baja_no_se_vende() {
+        let conn = con_dos_productos();
+        conn.execute("UPDATE products SET is_active = 0 WHERE id = 1", []).unwrap();
+
+        let err = registrar_venta(&conn, 1, None, pedido(vec![(1, 1)], "r-baja")).unwrap_err();
+
+        assert!(err.contains("dado de baja"), "{}", err);
+        let stock: i32 = conn.query_row("SELECT stock FROM products WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 10);
+    }
+
+    fn con_descuento(request: &str) -> crate::models::sale::CreateSaleDto {
+        let mut p = pedido(vec![(1, 1)], request);
+        p.items[0].discount = 100.0;
+        p
+    }
+
+    #[test]
+    fn una_cajera_no_puede_hacer_descuentos() {
+        let conn = con_dos_productos();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role) VALUES (2, 'ana', 'x', 'Ana', 'cashier')",
+            [],
+        ).unwrap();
+
+        let err = registrar_venta(&conn, 2, None, con_descuento("r-cajera")).unwrap_err();
+
+        assert!(err.contains("administrador"), "{}", err);
+        let ventas: i64 = conn.query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0)).unwrap();
+        assert_eq!(ventas, 0);
+
+        // Sin descuento, la misma cajera cobra normal.
+        assert!(registrar_venta(&conn, 2, None, pedido(vec![(1, 1)], "r-cajera-2")).is_ok());
+    }
+
+    #[test]
+    fn un_administrador_si_puede_hacer_descuentos() {
+        let conn = con_dos_productos();
+        let venta = registrar_venta(&conn, 1, None, con_descuento("r-admin")).unwrap();
+        assert_eq!(venta.total, 0.0);
+    }
+
+    #[test]
     fn un_precio_negativo_en_la_base_no_se_vende() {
         let conn = db_ventas();
         conn.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
@@ -1292,9 +1350,11 @@ mod integracion {
             let db = rusqlite::Connection::open_in_memory().unwrap();
             db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
             crate::db::migrations::run_migrations(&db).unwrap();
+            // Administrador: estas pruebas son de las cuentas, y varias llevan
+            // descuentos de línea, que solo un administrador puede dar.
             db.execute(
                 "INSERT INTO users (id, username, password_hash, full_name, role)
-                 VALUES (1, 'cajero', 'x', 'Cajero', 'cashier')",
+                 VALUES (1, 'encargada', 'x', 'Encargada', 'admin')",
                 [],
             ).unwrap();
             Tienda { db }

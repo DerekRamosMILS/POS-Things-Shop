@@ -166,10 +166,9 @@ pub fn restore_backup(state: State<DbState>, sessions: State<SessionState>, toke
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
     }
 
-    let pending = get_db_dir().join(crate::db::connection::PENDING_RESTORE);
-    fs::copy(&source, &pending).map_err(|e| format!("Error al preparar restauración: {}", e))?;
+    crate::db::connection::preparar_restauracion(&get_db_dir(), &source)?;
 
-    Ok("Respaldo listo. Reinicia la aplicación para completar la restauración.".to_string())
+    Ok("Respaldo listo. La aplicación se va a reiniciar para completar la restauración.".to_string())
 }
 
 /// Location of the app log file, so Settings can show it and open it.
@@ -308,7 +307,7 @@ mod tests {
         drop(conn);
 
         // Restaurar deja el archivo preparado; el cambio ocurre al arrancar.
-        fs::copy(backups.join(&name), db_path.parent().unwrap().join(PENDING_RESTORE)).unwrap();
+        crate::db::connection::preparar_restauracion(db_path.parent().unwrap(), &backups.join(&name)).unwrap();
         apply_pending_restore(&db_path);
 
         let conn = Connection::open(&db_path).unwrap();
@@ -332,7 +331,7 @@ mod tests {
         drop(conn);
 
         let pending = dir.path().join(PENDING_RESTORE);
-        fs::copy(backups.join(&name), &pending).unwrap();
+        crate::db::connection::preparar_restauracion(dir.path(), &backups.join(&name)).unwrap();
         apply_pending_restore(&db_path);
 
         assert!(!pending.exists(), "el archivo preparado debe borrarse tras aplicarse");
@@ -363,7 +362,7 @@ mod tests {
         let wal = dir.path().join("things_shop.db-wal");
         fs::write(&wal, b"basura del wal anterior").unwrap();
 
-        fs::copy(backups.join(&name), dir.path().join(PENDING_RESTORE)).unwrap();
+        crate::db::connection::preparar_restauracion(dir.path(), &backups.join(&name)).unwrap();
         apply_pending_restore(&db_path);
 
         assert!(!wal.exists(), "los archivos WAL/SHM viejos deben eliminarse");
@@ -414,7 +413,7 @@ mod tests {
         drop(conn);
         assert!(apagada.path().join("things_shop.db-wal").exists(), "la prueba necesita un WAL con datos");
         fs::create_dir_all(apagada.path().join("backups")).unwrap();
-        fs::copy(backups.join(&name), apagada.path().join(PENDING_RESTORE)).unwrap();
+        crate::db::connection::preparar_restauracion(apagada.path(), &backups.join(&name)).unwrap();
 
         apply_pending_restore(&db_apagada);
 
@@ -430,6 +429,52 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM products WHERE sku = 'SOLO-EN-EL-WAL'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(en_wal, 1, "lo que estaba en el WAL tiene que estar en la copia");
+    }
+
+    #[test]
+    fn una_restauracion_que_no_se_aplico_a_tiempo_no_pisa_lo_vendido_despues() {
+        // Se preparó, la aplicación no se reinició, y la tienda siguió vendiendo
+        // días. Aplicarla al siguiente arranque dejaba fuera de la vista esas
+        // ventas.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("things_shop.db");
+        let backups = dir.path().join("backups");
+
+        let conn = open_db(&db_path);
+        add_product(&conn, "VIEJO");
+        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        crate::db::connection::preparar_restauracion(dir.path(), &backups.join(&name)).unwrap();
+        add_product(&conn, "VENDIDO-DESPUES");
+        drop(conn);
+        let hace_dias = chrono::Utc::now().timestamp() - 3 * 24 * 3600;
+        fs::write(dir.path().join(crate::db::connection::PENDING_RESTORE_CUANDO), hace_dias.to_string()).unwrap();
+
+        apply_pending_restore(&db_path);
+
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(count_products(&conn), 2, "la base se quedó como estaba");
+        assert!(!dir.path().join(PENDING_RESTORE).exists(), "no se vuelve a intentar");
+        let apartada = fs::read_dir(dir.path()).unwrap().filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("things_shop.db.restauracion-no-aplicada_"));
+        assert!(apartada, "el respaldo preparado se aparta, no se tira");
+    }
+
+    #[test]
+    fn una_restauracion_preparada_sin_hora_no_se_aplica() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("things_shop.db");
+        let backups = dir.path().join("backups");
+        let conn = open_db(&db_path);
+        add_product(&conn, "UNO");
+        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        add_product(&conn, "DOS");
+        drop(conn);
+        fs::copy(backups.join(&name), dir.path().join(PENDING_RESTORE)).unwrap();
+
+        apply_pending_restore(&db_path);
+
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(count_products(&conn), 2);
     }
 
     #[test]

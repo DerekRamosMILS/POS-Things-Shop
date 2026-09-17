@@ -94,10 +94,14 @@ mod platform {
                 return Ok(Vec::new());
             }
 
-            let mut buf = vec![0u8; needed as usize];
+            // El sistema escribe ahí estructuras con punteros, que piden
+            // alineación de 8 bytes. Un búfer de `u8` no la garantiza; uno de
+            // `u64` sí, y se le pide el mismo espacio en bytes.
+            let palabras = (needed as usize).div_ceil(std::mem::size_of::<u64>());
+            let mut buf = vec![0u64; palabras];
             let ok = EnumPrintersW(
                 flags, ptr::null_mut(), 4,
-                buf.as_mut_ptr(), needed, &mut needed, &mut returned,
+                buf.as_mut_ptr() as *mut u8, needed, &mut needed, &mut returned,
             );
             if ok == 0 {
                 return Err("No se pudo listar las impresoras del sistema".to_string());

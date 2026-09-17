@@ -30,6 +30,85 @@ fn default_refund_method() -> String {
     "cash".to_string()
 }
 
+struct Ri { sale_item_id: i64, product_id: i64, variant_id: Option<i64>, quantity: i32, refund: Cents }
+
+/// Qué se devuelve y cuánto dinero le toca al cliente, sin tocar nada.
+///
+/// Lo usa el registro y también la pantalla, que antes de confirmar tiene que
+/// decir cuánto sacar del cajón: el reembolso se reparte con la promoción y el
+/// impuesto del ticket, y no hay forma de adivinarlo a ojo.
+fn calcular_reembolso(db: &rusqlite::Connection, data: &CreateReturnDto) -> Result<(Vec<Ri>, Cents), String> {
+    let sale_status: String = db.query_row(
+        "SELECT status FROM sales WHERE id = ?1",
+        params![data.sale_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    if sale_status == "cancelled" {
+        return Err("La venta está cancelada".to_string());
+    }
+
+    // Lo que se devuelve es lo que el cliente pagó por esas piezas, no lo
+    // que dice la lista de precios: una venta puede llevar una promoción a
+    // nivel de ticket y un impuesto encima, y ninguno de los dos aparece en
+    // el renglón. Se reparte el total cobrado en proporción al peso de cada
+    // partida.
+    let (venta_total, suma_netos): (f64, f64) = db.query_row(
+        "SELECT s.total,
+                COALESCE((SELECT SUM(subtotal) FROM sale_items WHERE sale_id = s.id), 0)
+         FROM sales s WHERE s.id = ?1",
+        params![data.sale_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+
+    let venta_total = Cents::from_pesos(venta_total);
+    let suma_netos = Cents::from_pesos(suma_netos);
+
+    let mut ris: Vec<Ri> = Vec::new();
+    let mut total_refund = Cents::ZERO;
+    // Lo que las partidas anteriores de esta misma devolución ya tomaron.
+    // El renglón se marca como devuelto hasta el segundo recorrido, así que
+    // sin esto la misma partida repetida se mide dos veces contra lo mismo
+    // y se devuelven más piezas —y más dinero— de las que se vendieron.
+    let mut ya_tomado: HashMap<i64, i32> = HashMap::new();
+
+    for it in &data.items {
+        if it.quantity <= 0 {
+            continue;
+        }
+        let (product_id, sold_qty, returned_qty, line_net, variant_id): (i64, i32, i32, f64, Option<i64>) =
+            db.query_row(
+                "SELECT product_id, quantity, returned_quantity, subtotal, variant_id FROM sale_items WHERE id = ?1 AND sale_id = ?2",
+                params![it.sale_item_id, data.sale_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            ).map_err(|_| "Esa partida no pertenece a la venta".to_string())?;
+
+        let available =
+            sold_qty - returned_qty - ya_tomado.get(&it.sale_item_id).copied().unwrap_or(0);
+        if it.quantity > available {
+            return Err(format!("Solo puedes devolver hasta {} unidad(es) de esa línea", available.max(0)));
+        }
+        if sold_qty <= 0 {
+            continue;
+        }
+        *ya_tomado.entry(it.sale_item_id).or_insert(0) += it.quantity;
+
+        // Parte del renglón que corresponde a las piezas devueltas...
+        let neto_devuelto = Cents::from_pesos(line_net)
+            .prorate(Cents(it.quantity as i64), Cents(sold_qty as i64));
+        // ...llevada a lo que realmente se cobró por el ticket.
+        let refund = venta_total.prorate(neto_devuelto, suma_netos);
+
+        total_refund = total_refund + refund;
+        ris.push(Ri { sale_item_id: it.sale_item_id, product_id, variant_id, quantity: it.quantity, refund });
+    }
+
+    if ris.is_empty() {
+        return Err("Nada que devolver".to_string());
+    }
+    Ok((ris, total_refund))
+}
+
 /// Register a (partial or full) return: restocks inventory, records the movement,
 /// tracks returned_quantity per line, and marks the sale 'returned' when fully returned.
 ///
@@ -40,6 +119,14 @@ pub fn create_return(state: State<DbState>, sessions: State<SessionState>, token
     let user_id = require_admin(&sessions, &token)?;
     let db = state.conn();
     registrar_devolucion(&db, user_id, data)
+}
+
+/// Cuánto dinero le toca al cliente por una devolución, sin registrarla.
+#[tauri::command]
+pub fn preview_return(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateReturnDto) -> Result<f64, String> {
+    require_admin(&sessions, &token)?;
+    let db = state.conn();
+    calcular_reembolso(&db, &data).map(|(_, total)| total.to_pesos())
 }
 
 /// Núcleo de la devolución, con la conexión explícita para poder probarlo.
@@ -55,75 +142,7 @@ pub fn registrar_devolucion(
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
     let result = (|| -> Result<f64, String> {
-        let sale_status: String = db.query_row(
-            "SELECT status FROM sales WHERE id = ?1",
-            params![data.sale_id],
-            |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
-
-        if sale_status == "cancelled" {
-            return Err("La venta está cancelada".to_string());
-        }
-
-        // Lo que se devuelve es lo que el cliente pagó por esas piezas, no lo
-        // que dice la lista de precios: una venta puede llevar una promoción a
-        // nivel de ticket y un impuesto encima, y ninguno de los dos aparece en
-        // el renglón. Se reparte el total cobrado en proporción al peso de cada
-        // partida.
-        let (venta_total, suma_netos): (f64, f64) = db.query_row(
-            "SELECT s.total,
-                    COALESCE((SELECT SUM(subtotal) FROM sale_items WHERE sale_id = s.id), 0)
-             FROM sales s WHERE s.id = ?1",
-            params![data.sale_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).map_err(|e| e.to_string())?;
-
-        let venta_total = Cents::from_pesos(venta_total);
-        let suma_netos = Cents::from_pesos(suma_netos);
-
-        struct Ri { sale_item_id: i64, product_id: i64, variant_id: Option<i64>, quantity: i32, refund: Cents }
-        let mut ris: Vec<Ri> = Vec::new();
-        let mut total_refund = Cents::ZERO;
-        // Lo que las partidas anteriores de esta misma devolución ya tomaron.
-        // El renglón se marca como devuelto hasta el segundo recorrido, así que
-        // sin esto la misma partida repetida se mide dos veces contra lo mismo
-        // y se devuelven más piezas —y más dinero— de las que se vendieron.
-        let mut ya_tomado: HashMap<i64, i32> = HashMap::new();
-
-        for it in &data.items {
-            if it.quantity <= 0 {
-                continue;
-            }
-            let (product_id, sold_qty, returned_qty, line_net, variant_id): (i64, i32, i32, f64, Option<i64>) =
-                db.query_row(
-                    "SELECT product_id, quantity, returned_quantity, subtotal, variant_id FROM sale_items WHERE id = ?1 AND sale_id = ?2",
-                    params![it.sale_item_id, data.sale_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                ).map_err(|_| "Esa partida no pertenece a la venta".to_string())?;
-
-            let available =
-                sold_qty - returned_qty - ya_tomado.get(&it.sale_item_id).copied().unwrap_or(0);
-            if it.quantity > available {
-                return Err(format!("Solo puedes devolver hasta {} unidad(es) de esa línea", available.max(0)));
-            }
-            if sold_qty <= 0 {
-                continue;
-            }
-            *ya_tomado.entry(it.sale_item_id).or_insert(0) += it.quantity;
-
-            // Parte del renglón que corresponde a las piezas devueltas...
-            let neto_devuelto = Cents::from_pesos(line_net)
-                .prorate(Cents(it.quantity as i64), Cents(sold_qty as i64));
-            // ...llevada a lo que realmente se cobró por el ticket.
-            let refund = venta_total.prorate(neto_devuelto, suma_netos);
-
-            total_refund = total_refund + refund;
-            ris.push(Ri { sale_item_id: it.sale_item_id, product_id, variant_id, quantity: it.quantity, refund });
-        }
-
-        if ris.is_empty() {
-            return Err("Nada que devolver".to_string());
-        }
+        let (ris, total_refund) = calcular_reembolso(db, &data)?;
 
         let register_id = open_register_id(db);
 
@@ -609,6 +628,30 @@ mod tests {
         assert_eq!(efectivo, 0.0);
         let stock: i32 = t.db.query_row("SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
         assert_eq!(stock, 10);
+    }
+
+    #[test]
+    fn la_vista_previa_dice_lo_mismo_que_se_registra_y_no_mueve_nada() {
+        // La pantalla no decía cuánto regresar; la cajera tenía que adivinar,
+        // y con promoción o impuesto de por medio no se adivina.
+        let t = Tienda::nueva().con_caja();
+        t.db.execute("UPDATE system_config SET value = '16' WHERE key = 'tax_rate'", []).unwrap();
+        let p = t.producto("VES", 99.99, 10);
+        let venta = t.vender(vec![(p, 3, 10.0)], None);
+        let partida = t.partidas(venta)[0];
+        let pedir = || CreateReturnDto {
+            sale_id: venta, reason: None, refund_method: "cash".into(),
+            items: vec![ReturnItemDto { sale_item_id: partida, quantity: 2 }],
+        };
+
+        let previa = calcular_reembolso(&t.db, &pedir()).unwrap().1.to_pesos();
+        let stock: i32 = t.db.query_row("SELECT stock FROM products WHERE id = ?1", params![p], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 7, "la vista previa no devuelve nada al inventario");
+        let devoluciones: i64 = t.db.query_row("SELECT COUNT(*) FROM returns", [], |r| r.get(0)).unwrap();
+        assert_eq!(devoluciones, 0);
+
+        let registrada = registrar_devolucion(&t.db, 1, pedir()).unwrap();
+        assert_eq!(previa, registrada);
     }
 
 }

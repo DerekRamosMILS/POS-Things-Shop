@@ -82,6 +82,7 @@ fn filas<T>(
 }
 
 pub(crate) fn panel(db: &rusqlite::Connection) -> Result<DashboardStats, String> {
+    crate::commands::notifications::rearmar_alertas(db);
     let uno = |sql: &str| -> Result<f64, String> {
         db.query_row(sql, [], |row| row.get(0)).map_err(|e| e.to_string())
     };

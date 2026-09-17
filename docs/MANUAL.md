@@ -25,6 +25,8 @@ siempre cuadra contra algo.
 
 El lector funciona siempre, aunque el cursor esté dentro de un campo.
 
+Los descuentos por renglón solo los puede dar un administrador: con una sesión de cajero el campo no aparece. Las promociones activas sí las puede aplicar cualquiera.
+
 ### Pago con dos formas a la vez
 
 En la pantalla de cobro elige **Mixto**. Captura cuánto va en tarjeta y cuánto
@@ -62,7 +64,7 @@ registrada — repórtala, no la escondas.
 | F1 | Ayuda |
 | F2 | Buscador de productos |
 | F3 | Nombre del cliente |
-| F4 | Descuento de la línea seleccionada |
+| F4 | Descuento de la línea seleccionada (solo administrador) |
 | F8 | Poner la orden en espera |
 | F9 | Convertir en apartado |
 | F10 | Cobrar |

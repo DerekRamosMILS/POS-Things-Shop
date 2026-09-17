@@ -67,10 +67,22 @@ export default function SalesPage() {
             .map(([id, qty]) => ({ sale_item_id: Number(id), quantity: qty }))
             .filter(it => it.quantity > 0);
         if (items.length === 0) { showToast('Selecciona cantidades a devolver', 'error'); return; }
+        const pedido = { sale_id: detail.id, reason: returnReason || null, refund_method: refundMethod, items };
+        const como = refundMethod === 'cash' ? 'en efectivo, del cajón' : refundMethod === 'card' ? 'a la tarjeta' : 'por transferencia';
         setProcessing(true);
         try {
-            await api.createReturn({ sale_id: detail.id, reason: returnReason || null, refund_method: refundMethod, items });
-            showToast('Devolución registrada', 'success');
+            // El reembolso se reparte con la promoción y el impuesto del ticket:
+            // se dice antes de registrar, para que nadie tenga que adivinarlo.
+            const monto = await api.previewReturn(pedido);
+            const ok = await confirm({
+                title: 'Confirmar devolución',
+                message: `Hay que regresarle ${formatCurrency(monto)} ${como}. ¿Registrar la devolución?`,
+                variant: 'warning',
+                confirmLabel: `Regresar ${formatCurrency(monto)}`,
+            });
+            if (!ok) return;
+            const devuelto = await api.createReturn(pedido);
+            showToast(`Devolución registrada: regresa ${formatCurrency(devuelto)} ${como}`, 'success');
             const fresh = await api.getSaleDetail(detail.id);
             setDetail(fresh); setReturnMode(false); setReturnQtys({}); setReturnReason('');
             loadSales();

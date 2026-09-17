@@ -128,6 +128,25 @@ pub fn init_db() -> Result<Connection, rusqlite::Error> {
 /// Nombre del archivo que `restore_backup` deja preparado para el próximo arranque.
 pub const PENDING_RESTORE: &str = "things_shop.db.restore-pending";
 
+/// Junto al preparado: cuándo se preparó, en segundos desde 1970.
+pub const PENDING_RESTORE_CUANDO: &str = "things_shop.db.restore-pending.cuando";
+
+/// Una restauración preparada hace más que esto ya no se aplica.
+///
+/// La pantalla reinicia la aplicación en cuanto la prepara. Si el preparado sigue
+/// ahí mucho después, el reinicio no ocurrió y la tienda siguió vendiendo:
+/// aplicarlo en el siguiente arranque —días después, o cuando se instale una
+/// actualización— dejaba fuera de la vista todo lo vendido entretanto.
+pub const VIGENCIA_RESTAURACION_SEGUNDOS: i64 = 15 * 60;
+
+/// Deja un respaldo preparado para aplicarse al reiniciar, con su hora.
+pub fn preparar_restauracion(db_dir: &std::path::Path, origen: &std::path::Path) -> Result<(), String> {
+    fs::copy(origen, db_dir.join(PENDING_RESTORE))
+        .map_err(|e| format!("Error al preparar restauración: {}", e))?;
+    fs::write(db_dir.join(PENDING_RESTORE_CUANDO), chrono::Utc::now().timestamp().to_string())
+        .map_err(|e| format!("Error al preparar restauración: {}", e))
+}
+
 /// Replace the main DB with a staged restore (created by `restore_backup`),
 /// clearing any leftover WAL/SHM sidecar files so the restored data is used.
 ///
@@ -139,6 +158,25 @@ pub fn apply_pending_restore(db_path: &std::path::Path) {
         None => return,
     };
     if !pending.exists() {
+        return;
+    }
+
+    let marca = pending.with_file_name(PENDING_RESTORE_CUANDO);
+    let preparada = fs::read_to_string(&marca).ok().and_then(|t| t.trim().parse::<i64>().ok());
+    let vigente = preparada
+        .map(|t| (chrono::Utc::now().timestamp() - t).abs() <= VIGENCIA_RESTAURACION_SEGUNDOS)
+        .unwrap_or(false);
+    if !vigente {
+        let apartada = pending.with_file_name(format!(
+            "things_shop.db.restauracion-no-aplicada_{}",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        ));
+        let _ = fs::rename(&pending, &apartada);
+        let _ = fs::remove_file(&marca);
+        log::error!(
+            "Había una restauración preparada que no se aplicó a tiempo; se apartó en {:?} sin tocar la base",
+            apartada
+        );
         return;
     }
 
@@ -171,6 +209,7 @@ pub fn apply_pending_restore(db_path: &std::path::Path) {
     match fs::rename(&temporal, db_path) {
         Ok(_) => {
             let _ = fs::remove_file(&pending);
+            let _ = fs::remove_file(&marca);
             log::info!("Restored database from staged backup");
         }
         Err(e) => {

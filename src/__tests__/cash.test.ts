@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cashBreakdown, evaluateMixedTender, expectedCash, round2, sumMoney } from '../utils/cash';
+import { cashBreakdown, evaluateMixedTender, expectedCash, montoContado, round2, sumMoney } from '../utils/cash';
 import type { CashRegister } from '../types';
 
 const caja = (over: Partial<CashRegister> = {}): CashRegister => ({
@@ -100,5 +100,28 @@ describe('cobro mixto', () => {
         const t = evaluateMixedTender(0.6, 0.1, 0.2, 0.3);
         expect(t.cashDue).toBe(0.3);
         expect(t.change).toBe(0);
+    });
+});
+
+describe('el efectivo contado al cerrar', () => {
+    it('un campo vacío no es un cero', () => {
+        // Valía cero: se cerraba el turno sin contar y quedaba un faltante por
+        // todo lo esperado, en un corte que no se puede reabrir.
+        expect(montoContado('')).toBeNull();
+        expect(montoContado('   ')).toBeNull();
+    });
+
+    it('lo que no es un número tampoco', () => {
+        expect(montoContado('abc')).toBeNull();
+        expect(montoContado('-50')).toBeNull();
+    });
+
+    it('un cero escrito a propósito sí cuenta', () => {
+        expect(montoContado('0')).toBe(0);
+    });
+
+    it('acepta separador de miles y redondea al centavo', () => {
+        expect(montoContado('1,250.5')).toBe(1250.5);
+        expect(montoContado('99.999')).toBe(100);
     });
 });

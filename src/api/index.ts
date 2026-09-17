@@ -244,6 +244,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'update_expense':
         case 'delete_expense':
         case 'set_config':
+        case 'set_configs':
         case 'dias_sin_copia_externa':
             return null as unknown as T;
 
@@ -437,6 +438,8 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
             return [] as unknown as T;
         case 'create_return':
             return 0 as unknown as T;
+        case 'preview_return':
+            return 0 as unknown as T;
         case 'cancel_layaway':
             return 'Apartado cancelado' as unknown as T;
         case 'update_customer':
@@ -454,15 +457,25 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
     }
 };
 
+/** El backend dice así cuando el token ya no sirve. */
+export function esSesionVencida(err: unknown): boolean {
+    return /Vuelve a iniciar sesión/i.test(String(err));
+}
+
 const invoke = <T>(command: string, args?: InvokeArgs): Promise<T> => {
     // Attach the session token so backend commands can verify role. Reads that
     // don't declare a `token` param simply ignore it.
     const token = useSessionStore.getState().token;
     const merged = token ? { ...(args ?? {}), token } : args;
-    if (isTauriRuntime()) {
-        return tauriInvoke<T>(command, merged);
-    }
-    return webInvoke<T>(command, merged);
+    const llamada = isTauriRuntime() ? tauriInvoke<T>(command, merged) : webInvoke<T>(command, merged);
+    // Con la sesión vencida, cada acción fallaba con el mismo mensaje y la
+    // pantalla seguía como si nada. Se sale a la de inicio de sesión.
+    return llamada.catch((err) => {
+        if (token && esSesionVencida(err) && useSessionStore.getState().token === token) {
+            useSessionStore.getState().logout();
+        }
+        throw err;
+    });
 };
 
 // Products
@@ -600,6 +613,7 @@ export const seedDemoData = () => invoke<string>('seed_demo_data');
 // Config
 export const getAllConfig = () => invoke<SystemConfig[]>('get_all_config');
 export const getConfig = (key: string) => invoke<string>('get_config', { key });
+export const setConfigs = (cambios: [string, string][]) => invoke<void>('set_configs', { cambios });
 export const setConfig = (key: string, value: string) => invoke<void>('set_config', { key, value });
 export const registrarEventoActualizacion = (mensaje: string) =>
     invoke<void>('registrar_evento_actualizacion', { mensaje });
@@ -620,6 +634,7 @@ export const getPriceHistory = (productId: number) => invoke<PriceHistoryEntry[]
 
 // Returns
 export const createReturn = (data: CreateReturnDto) => invoke<number>('create_return', { data });
+export const previewReturn = (data: CreateReturnDto) => invoke<number>('preview_return', { data });
 
 // Layaways (apartados)
 export const createLayaway = (data: CreateLayawayDto) => invoke<Layaway>('create_layaway', { data });

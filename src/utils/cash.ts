@@ -87,3 +87,18 @@ export function evaluateMixedTender(
 
     return { nonCash, cashDue, change, problem };
 }
+
+/**
+ * El efectivo contado al cerrar, o null si todavía no hay un número válido.
+ *
+ * Con `parseFloat(texto) || 0`, un campo vacío valía cero: se podía cerrar el
+ * turno sin contar, y quedaba registrado un faltante por todo lo esperado en un
+ * corte que ya no se puede reabrir.
+ */
+export function montoContado(texto: string): number | null {
+    const limpio = texto.trim().replace(/,/g, '');
+    if (limpio === '') return null;
+    const n = Number(limpio);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return round2(n);
+}

@@ -12,7 +12,7 @@ const SHORTCUTS: { keys: string; action: string }[] = [
     { keys: 'F1', action: 'Mostrar u ocultar esta ayuda' },
     { keys: 'F2', action: 'Ir al buscador de productos' },
     { keys: 'F3', action: 'Ir al nombre del cliente' },
-    { keys: 'F4', action: 'Descuento de la línea seleccionada' },
+    { keys: 'F4', action: 'Descuento de la línea seleccionada (solo administrador)' },
     { keys: 'F8', action: 'Poner la orden en espera' },
     { keys: 'F9', action: 'Convertir la orden en apartado' },
     { keys: 'F10', action: 'Cobrar' },

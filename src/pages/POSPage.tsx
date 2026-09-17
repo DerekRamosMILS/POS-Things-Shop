@@ -9,6 +9,7 @@ import { useProductImage } from '../hooks/useProductImages';
 import { evaluateMixedTender, round2 } from '../utils/cash';
 import KeyboardHelp from '../components/KeyboardHelp';
 import * as api from '../api';
+import { crearTurnos } from '../utils/turnos';
 import { firmaDelCobro, identidadParaCobrar, type IdentidadDeCobro } from '../utils/idDeCobro';
 import { T } from '../theme';
 
@@ -217,6 +218,7 @@ export default function POSPage() {
     const [promoDropdown, setPromoDropdown] = useState(false);
 
     const searchRef = useRef<HTMLInputElement>(null);
+    const busquedas = useRef(crearTurnos());
     // Los ajustes del lector viven en un ref para que el manejador global no se
     // vuelva a montar cada vez que cambian.
     const scannerConfig = useRef(configFromSettings({}));
@@ -282,6 +284,7 @@ export default function POSPage() {
             const lines = liveRef.current.items;
             if (e.key === 'F4') {
                 e.preventDefault();
+                if (useSessionStore.getState().user?.role !== 'admin') return;
                 const line = lines[selectedLineRef.current];
                 if (line) discountRefs.current[cartLineId(line)]?.focus();
                 return;
@@ -382,6 +385,10 @@ export default function POSPage() {
                 // existe. Si no aparece, se pregunta a la base.
                 const product = allProducts.find(p => p.id === variant.product_id)
                     ?? await api.getProductById(variant.product_id);
+                if (product && !product.is_active) {
+                    showToast(`${product.name} está dado de baja`, 'error');
+                    return;
+                }
                 if (product) {
                     addVariantToCart(product, variant);
                     setSearchQuery(''); setSearchResults([]);
@@ -396,10 +403,11 @@ export default function POSPage() {
 
     const handleSearch = useCallback(async (query: string) => {
         setSearchQuery(query);
+        const turno = busquedas.current.siguiente();
         if (query.length < 2) { setSearchResults([]); return; }
         try {
             const products = await api.getProducts({ search: query, is_active: true });
-            setSearchResults(products.slice(0, 24));
+            if (busquedas.current.vigente(turno)) setSearchResults(products.slice(0, 24));
         } catch (err) { showToast(String(err), 'error'); }
     }, []);
 
@@ -883,7 +891,9 @@ export default function POSPage() {
                                             <span style={{ fontSize: 14, fontWeight: 800, color: T.t1, width: 24, textAlign: 'center' }}>{item.quantity}</span>
                                             <button className="cart-qty-btn" onClick={() => updateQuantity(lineId, item.quantity + 1)} disabled={item.quantity >= maxStock}>+</button>
                                         </div>
-                                        {/* Discount */}
+                                        {/* Descuento: solo un administrador. El cobro lo rechaza
+                                            para cualquier otro, así que ni se ofrece. */}
+                                        {user?.role !== 'admin' ? <div style={{ flex: 1 }} /> : (
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1 }}>
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={T.t3} strokeWidth="2.2" strokeLinecap="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
                                             <input
@@ -895,6 +905,7 @@ export default function POSPage() {
                                                 style={{ width: '100%', padding: '5px 8px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.10)', color: T.t2, fontSize: 12, fontFamily: 'inherit', outline: 'none' }}
                                             />
                                         </div>
+                                        )}
                                         <span style={{ fontSize: 14, fontWeight: 900, color: T.t1, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{formatCurrency(lineTotal)}</span>
                                     </div>
                                 </div>

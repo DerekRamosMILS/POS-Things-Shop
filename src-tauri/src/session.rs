@@ -12,6 +12,8 @@ pub struct SessionInfo {
     pub role: String,
     /// Unix epoch seconds after which the token is rejected.
     pub expires_at: i64,
+    /// Cuánto dura una sesión: con esto se renueva mientras se usa.
+    pub ttl: i64,
 }
 
 pub struct SessionState {
@@ -45,6 +47,7 @@ pub fn session_ttl(conn: &rusqlite::Connection) -> i64 {
 /// Load still-valid persisted sessions so logins survive an app restart.
 pub fn load_sessions(conn: &rusqlite::Connection) -> HashMap<String, SessionInfo> {
     let now = now_ts();
+    let ttl = session_ttl(conn);
     conn.execute("DELETE FROM sessions WHERE expires_at <= ?1", [now]).ok();
 
     let mut map = HashMap::new();
@@ -62,7 +65,7 @@ pub fn load_sessions(conn: &rusqlite::Connection) -> HashMap<String, SessionInfo
             for row in rows.flatten() {
                 map.insert(
                     row.0,
-                    SessionInfo { user_id: row.1, role: row.2, expires_at: row.3 },
+                    SessionInfo { user_id: row.1, role: row.2, expires_at: row.3, ttl },
                 );
             }
         }
@@ -85,7 +88,7 @@ pub fn register_session(
         map.retain(|_, s| s.expires_at > now_ts() && s.user_id != user_id);
         map.insert(
             token.to_string(),
-            SessionInfo { user_id, role: role.to_string(), expires_at },
+            SessionInfo { user_id, role: role.to_string(), expires_at, ttl: (expires_at - now_ts()).max(1) },
         );
     }
 }
@@ -99,9 +102,25 @@ pub fn revoke_session(sessions: &State<SessionState>, token: &str) {
 
 /// Resolve a token to (user_id, role), rejecting unknown or expired tokens.
 pub fn resolve(sessions: &State<SessionState>, token: &str) -> Result<(i64, String), String> {
+    resolver(sessions, token)
+}
+
+/// Resuelve el token y, si la sesión ya gastó más de la mitad, la renueva.
+///
+/// Antes vencía a las doce horas del inicio aunque se estuviera usando: en un
+/// turno largo, a partir de esa hora cada cobro fallaba. Ahora solo vence tras
+/// ese tiempo sin usarse. La renovación vive en memoria; si la aplicación se
+/// reinicia después del vencimiento original, se vuelve a iniciar sesión.
+fn resolver(sessions: &SessionState, token: &str) -> Result<(i64, String), String> {
     let mut map = sessions.sessions.lock().map_err(|e| e.to_string())?;
-    match map.get(token) {
-        Some(s) if s.expires_at > now_ts() => Ok((s.user_id, s.role.clone())),
+    let ahora = now_ts();
+    match map.get_mut(token) {
+        Some(s) if s.expires_at > ahora => {
+            if s.expires_at - ahora < s.ttl / 2 {
+                s.expires_at = ahora + s.ttl;
+            }
+            Ok((s.user_id, s.role.clone()))
+        }
         Some(_) => {
             map.remove(token);
             Err("La sesión expiró. Vuelve a iniciar sesión.".to_string())
@@ -178,12 +197,47 @@ mod tests {
     fn volver_a_entrar_invalida_el_token_anterior() {
         let estado = SessionState::with_map(HashMap::new());
         let mut map = estado.sessions.lock().unwrap();
-        map.insert("viejo".into(), SessionInfo { user_id: 1, role: "admin".into(), expires_at: now_ts() + 3600 });
+        map.insert("viejo".into(), SessionInfo { user_id: 1, role: "admin".into(), expires_at: now_ts() + 3600, ttl: 3600 });
         map.retain(|_, s| s.expires_at > now_ts() && s.user_id != 1);
-        map.insert("nuevo".into(), SessionInfo { user_id: 1, role: "admin".into(), expires_at: now_ts() + 3600 });
+        map.insert("nuevo".into(), SessionInfo { user_id: 1, role: "admin".into(), expires_at: now_ts() + 3600, ttl: 3600 });
 
         assert!(!map.contains_key("viejo"), "el token anterior debe dejar de servir");
         assert!(map.contains_key("nuevo"));
+    }
+
+    fn con_sesion(expira_en: i64, ttl: i64) -> SessionState {
+        let estado = SessionState::with_map(HashMap::new());
+        estado.sessions.lock().unwrap().insert(
+            "t".into(),
+            SessionInfo { user_id: 1, role: "cashier".into(), expires_at: now_ts() + expira_en, ttl },
+        );
+        estado
+    }
+
+    fn vence(estado: &SessionState) -> i64 {
+        estado.sessions.lock().unwrap()["t"].expires_at - now_ts()
+    }
+
+    #[test]
+    fn usar_la_sesion_la_renueva_cuando_ya_gasto_la_mitad() {
+        // Vencía a las doce horas del inicio aunque se estuviera cobrando.
+        let estado = con_sesion(1000, 12 * 3600);
+        assert!(resolver(&estado, "t").is_ok());
+        assert!(vence(&estado) > 12 * 3600 - 10, "quedó con su vida completa otra vez");
+    }
+
+    #[test]
+    fn una_sesion_reciente_no_se_toca() {
+        let estado = con_sesion(11 * 3600, 12 * 3600);
+        resolver(&estado, "t").unwrap();
+        assert!(vence(&estado) <= 11 * 3600);
+    }
+
+    #[test]
+    fn una_sesion_vencida_no_revive() {
+        let estado = con_sesion(-5, 12 * 3600);
+        assert!(resolver(&estado, "t").is_err());
+        assert!(estado.sessions.lock().unwrap().get("t").is_none());
     }
 
     #[test]

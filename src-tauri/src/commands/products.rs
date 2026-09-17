@@ -255,7 +255,7 @@ pub(crate) fn anotar_precio(
 
 #[tauri::command]
 pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
-    require_admin(&sessions, &token)?;
+    let user_id = require_admin(&sessions, &token)?;
     validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, Some(data.stock))?;
     let db = state.conn();
 
@@ -278,9 +278,9 @@ pub fn create_product(state: State<DbState>, sessions: State<SessionState>, toke
 
     if data.stock > 0 {
         db.execute(
-            "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason)
-             VALUES (?1, 'adjustment', ?2, 0, ?2, 'Stock inicial')",
-            params![id, data.stock],
+            "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
+             VALUES (?1, 'adjustment', ?2, 0, ?2, 'Stock inicial', ?3)",
+            params![id, data.stock, user_id],
         ).map_err(|e| e.to_string())?;
     }
 

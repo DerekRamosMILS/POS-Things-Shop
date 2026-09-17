@@ -106,6 +106,46 @@ pub fn set_config(state: State<DbState>, sessions: State<SessionState>, token: S
     Ok(())
 }
 
+/// Guarda varios ajustes juntos: todos o ninguno.
+///
+/// La pantalla los mandaba uno por uno; si el tercero no pasaba la validación,
+/// los dos primeros ya estaban guardados y el mensaje no decía cuáles.
+pub(crate) fn guardar_ajustes(db: &rusqlite::Connection, cambios: &[(String, String)]) -> Result<(), String> {
+    let mut limpios = Vec::with_capacity(cambios.len());
+    for (key, value) in cambios {
+        if es_privada(key) {
+            return Err("Ese valor no se puede cambiar desde aquí".to_string());
+        }
+        limpios.push((key.as_str(), validar_valor(key, value)?));
+    }
+
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        for (key, value) in &limpios {
+            db.execute(
+                "INSERT INTO system_config (key, value, updated_at) VALUES (?1, ?2, datetime('now','localtime'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value],
+            ).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    match resultado {
+        Ok(()) => db.execute_batch("COMMIT;").map_err(|e| e.to_string()),
+        Err(e) => {
+            db.execute_batch("ROLLBACK;").ok();
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn set_configs(state: State<DbState>, sessions: State<SessionState>, token: String, cambios: Vec<(String, String)>) -> Result<(), String> {
+    require_admin(&sessions, &token)?;
+    let db = state.conn();
+    guardar_ajustes(&db, &cambios)
+}
+
 /// Deja un renglón en la bitácora sobre lo que hizo el actualizador.
 ///
 /// Sin esto, una actualización que no llega es indistinguible de una que llegó y
@@ -232,6 +272,37 @@ mod tests {
         assert!(todo.iter().all(|c| c.value != secreto && !c.key.starts_with("relevo_secreto")));
         assert!(es_privada("relevo_secreto") && es_privada(" relevo_secreto_anterior"));
         assert!(!es_privada("relevo_url") && !es_privada("currency_symbol"));
+    }
+
+    fn valor(conn: &rusqlite::Connection, key: &str) -> String {
+        conn.query_row("SELECT value FROM system_config WHERE key = ?1", params![key], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn un_ajuste_invalido_no_deja_guardados_los_demas() {
+        let conn = db();
+        let antes = valor(&conn, "store_name");
+
+        let err = guardar_ajustes(&conn, &[
+            ("store_name".into(), "Otra tienda".into()),
+            ("tax_rate".into(), "16".into()),
+            ("low_stock_threshold".into(), "-5".into()),
+        ]).unwrap_err();
+
+        assert!(err.contains("stock bajo"), "{}", err);
+        assert_eq!(valor(&conn, "store_name"), antes, "nada se guardó");
+        assert_eq!(valor(&conn, "tax_rate"), "0");
+    }
+
+    #[test]
+    fn los_ajustes_validos_se_guardan_juntos() {
+        let conn = db();
+        guardar_ajustes(&conn, &[
+            ("store_name".into(), "Things".into()),
+            ("tax_rate".into(), " 16 ".into()),
+        ]).unwrap();
+        assert_eq!(valor(&conn, "store_name"), "Things");
+        assert_eq!(valor(&conn, "tax_rate"), "16");
     }
 
     #[test]

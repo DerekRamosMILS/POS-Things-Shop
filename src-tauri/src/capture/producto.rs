@@ -240,17 +240,35 @@ pub(crate) fn guardar_producto(
             let mut total = 0;
             for (talla, color) in &combinaciones {
                 let cantidad = piezas_de(&entrada.piezas, talla, color).unwrap_or(existencia).max(0);
-                total += cantidad;
                 db.execute(
                     "INSERT INTO product_variants (product_id, size, color, stock)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![product_id, talla, color, cantidad],
                 ).map_err(|e| e.to_string())?;
+                // La existencia con que llega también es un movimiento: sin él,
+                // el historial de la prenda empezaba sin explicar sus piezas.
+                if cantidad > 0 {
+                    let etiqueta = [talla.as_deref(), color.as_deref()]
+                        .into_iter().flatten().collect::<Vec<_>>().join(" / ");
+                    db.execute(
+                        "INSERT INTO inventory_movements (product_id, variant_id, movement_type, quantity, previous_stock, new_stock, reason)
+                         VALUES (?1, ?2, 'adjustment', ?3, ?4, ?5, ?6)",
+                        params![product_id, db.last_insert_rowid(), cantidad, total, total + cantidad,
+                                format!("Stock inicial desde el celular ({})", etiqueta)],
+                    ).map_err(|e| e.to_string())?;
+                }
+                total += cantidad;
             }
             // El stock del producto es la suma de sus variantes.
             db.execute(
                 "UPDATE products SET has_variants = 1, stock = ?1 WHERE id = ?2",
                 params![total, product_id],
+            ).map_err(|e| e.to_string())?;
+        } else if existencia > 0 {
+            db.execute(
+                "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason)
+                 VALUES (?1, 'adjustment', ?2, 0, ?2, 'Stock inicial desde el celular')",
+                params![product_id, existencia],
             ).map_err(|e| e.to_string())?;
         }
 
@@ -699,4 +717,41 @@ mod tests {
             .unwrap();
         assert_eq!(nombre, "Vestido amarillo");
     }
+    fn movimientos(db: &rusqlite::Connection) -> Vec<(Option<i64>, i32, i32, i32)> {
+        db.prepare("SELECT variant_id, quantity, previous_stock, new_stock FROM inventory_movements ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn la_existencia_con_que_llega_queda_en_el_historial() {
+        let db = db();
+        guardar_producto(&db, entrada("Blusa", Some(250.0), 0)).unwrap();
+
+        assert_eq!(movimientos(&db), vec![(None, 3, 0, 3)]);
+    }
+
+    #[test]
+    fn con_tallas_cada_una_deja_su_renglon_encadenado() {
+        let db = db();
+        let mut e = entrada("Falda", Some(300.0), 0);
+        e.tallas = vec!["CH".into(), "M".into()];
+        e.piezas = vec![
+            PiezasDeVariante { talla: Some("CH".into()), color: None, cantidad: 2 },
+            PiezasDeVariante { talla: Some("M".into()), color: None, cantidad: 5 },
+        ];
+        guardar_producto(&db, e).unwrap();
+
+        let m = movimientos(&db);
+        assert_eq!(m.len(), 2);
+        assert_eq!((m[0].1, m[0].2, m[0].3), (2, 0, 2));
+        assert_eq!((m[1].1, m[1].2, m[1].3), (5, 2, 7));
+        assert!(m.iter().all(|r| r.0.is_some()), "cada renglón dice de qué talla es");
+        let stock: i32 = db.query_row("SELECT stock FROM products", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 7);
+    }
+
 }

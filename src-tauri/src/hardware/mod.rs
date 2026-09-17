@@ -140,28 +140,16 @@ pub fn test_printer(
     spooler::print_raw(&target, "Prueba Things Shop", &bytes)
 }
 
-/// Imprime el ticket de una venta ya registrada.
+/// Arma el ticket de una venta desde lo que quedó guardado.
 ///
-/// Se arma desde lo que quedó guardado en la base, no desde lo que el frontend
-/// tenga en pantalla: el papel dice exactamente lo que se cobró.
-#[tauri::command]
-pub fn print_sale_receipt(
-    state: State<DbState>,
-    sessions: State<SessionState>,
-    token: String,
+/// Devuelve el ticket sin cerrar —el cajón se agrega después, si toca—, el
+/// folio y si entró efectivo.
+fn armar_ticket_venta(
+    db: &rusqlite::Connection,
     sale_id: i64,
-    open_drawer: Option<bool>,
-) -> Result<(), String> {
-    require_auth(&sessions, &token)?;
-    let db = state.conn();
-
-    let setup = printer_setup(&db);
-    if setup.name.is_empty() {
-        return Err("SIN_IMPRESORA".to_string());
-    }
-
-    let symbol = config(&db, "currency_symbol", "$");
-    let width = setup.width;
+    width: usize,
+) -> Result<(escpos::Builder, String, bool), String> {
+    let symbol = config(db, "currency_symbol", "$");
 
     let (folio, subtotal, discount_total, tax, total, payment_method, amount_paid, change, created_at, cashier):
         (String, f64, f64, f64, f64, String, f64, f64, String, Option<String>) = db
@@ -178,9 +166,9 @@ pub fn print_sale_receipt(
     let mut b = escpos::Builder::new(width);
 
     // Encabezado de la tienda
-    b.align_center().bold(true).line(&config(&db, "store_name", "Things Shop")).bold(false);
+    b.align_center().bold(true).line(&config(db, "store_name", "Things Shop")).bold(false);
     for key in ["store_address", "store_phone"] {
-        let value = config(&db, key, "");
+        let value = config(db, key, "");
         if !value.is_empty() {
             for line in escpos::wrap(&value, width) {
                 b.line(&line);
@@ -199,7 +187,7 @@ pub fn print_sale_receipt(
     // Partidas
     let mut stmt = db
         .prepare(
-            "SELECT product_name, variant_label, quantity, unit_price, discount, subtotal
+            "SELECT product_name, variant_label, quantity, unit_price, discount, subtotal, returned_quantity
              FROM sale_items WHERE sale_id = ?1 ORDER BY id",
         )
         .map_err(|e| e.to_string())?;
@@ -213,6 +201,7 @@ pub fn print_sale_receipt(
                 r.get::<_, f64>(3)?,
                 r.get::<_, f64>(4)?,
                 r.get::<_, f64>(5)?,
+                r.get::<_, i32>(6)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -220,7 +209,7 @@ pub fn print_sale_receipt(
         .map_err(|e| e.to_string())?;
     drop(stmt);
 
-    for (name, variant, qty, unit_price, discount, line_total) in items {
+    for (name, variant, qty, unit_price, discount, line_total, devueltas) in items {
         let title = match variant {
             Some(v) if !v.is_empty() => format!("{} ({})", name, v),
             _ => name,
@@ -234,6 +223,11 @@ pub fn print_sale_receipt(
         );
         if discount > 0.0 {
             b.pair("  Descuento", &format!("-{}", money(&symbol, discount)));
+        }
+        // Un ticket reimpreso tiene que decir qué ya volvió: si no, parece que
+        // todo sigue vendido.
+        if devueltas > 0 {
+            b.pair("  DEVUELTAS", &format!("{} pz", devueltas));
         }
     }
 
@@ -249,6 +243,19 @@ pub fn print_sale_receipt(
     b.bold(true).double_size(true);
     b.pair("TOTAL", &money(&symbol, total));
     b.double_size(false).bold(false);
+
+    let reembolsado: f64 = db
+        .query_row(
+            "SELECT COALESCE(SUM(total_refund), 0) FROM returns WHERE sale_id = ?1",
+            params![sale_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+    if reembolsado > 0.0 {
+        b.pair("Devuelto al cliente", &format!("-{}", money(&symbol, reembolsado)));
+        let queda = crate::money::Cents::from_pesos(total) - crate::money::Cents::from_pesos(reembolsado);
+        b.pair("Queda pagado", &money(&symbol, queda.to_pesos()));
+    }
 
     // Desglose del cobro
     let mut stmt = db
@@ -277,7 +284,7 @@ pub fn print_sale_receipt(
     }
 
     // Pie
-    let footer = config(&db, "ticket_footer", "");
+    let footer = config(db, "ticket_footer", "");
     if !footer.is_empty() {
         b.align_center().line("");
         for line in escpos::wrap(&footer, width) {
@@ -286,12 +293,38 @@ pub fn print_sale_receipt(
     }
     b.feed(3).cut();
 
+    let cash_involved =
+        legs.iter().any(|(m, _)| m == "cash") || payment_method == "cash";
+    Ok((b, folio, cash_involved))
+
+}
+
+/// Imprime el ticket de una venta ya registrada.
+///
+/// Se arma desde lo que quedó guardado en la base, no desde lo que el frontend
+/// tenga en pantalla: el papel dice exactamente lo que se cobró.
+#[tauri::command]
+pub fn print_sale_receipt(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    sale_id: i64,
+    open_drawer: Option<bool>,
+) -> Result<(), String> {
+    require_auth(&sessions, &token)?;
+    let db = state.conn();
+
+    let setup = printer_setup(&db);
+    if setup.name.is_empty() {
+        return Err("SIN_IMPRESORA".to_string());
+    }
+
+    let (mut b, folio, cash_involved) = armar_ticket_venta(&db, sale_id, setup.width)?;
+
     // El cajón solo se abre si entró efectivo: no tiene sentido abrirlo en una
     // venta con tarjeta.
     // Un pago mixto puede traer efectivo aunque `payment_method` diga "mixed",
     // así que hay que mirar el desglose además del método principal.
-    let cash_involved =
-        legs.iter().any(|(m, _)| m == "cash") || payment_method == "cash";
     let should_open = open_drawer.unwrap_or_else(|| {
         config_flag(&db, "drawer_open_on_cash", true) && cash_involved
     });
@@ -451,6 +484,43 @@ fn method_label(method: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn un_ticket_reimpreso_dice_lo_que_ya_se_devolvio() {
+        use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+        use crate::commands::sales::registrar_venta;
+        use crate::models::sale::{CreateSaleDto, CreateSaleItemDto};
+
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO users (id, username, password_hash, full_name, role) VALUES (1, 'u', 'x', 'U', 'admin');
+             INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0);
+             INSERT INTO products (id, sku, name, purchase_price, sale_price, stock) VALUES (1, 'V', 'Vestido', 1, 100, 10);",
+        ).unwrap();
+        let venta = registrar_venta(&db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto { product_id: 1, quantity: 3, unit_price: 0.0, discount: 0.0, variant_id: None }],
+            payment_method: "cash".into(), amount_paid: 300.0, payments: vec![], discount_total: 0.0,
+            promotion_id: None, requiere_factura: false, notes: None, customer_id: None, client_request_id: None,
+        }).unwrap();
+        let partida: i64 = db.query_row("SELECT id FROM sale_items", [], |r| r.get(0)).unwrap();
+        let texto = |db: &rusqlite::Connection| {
+            let (b, _, _) = armar_ticket_venta(db, venta.id, 32).unwrap();
+            String::from_utf8_lossy(&b.finish()).to_string()
+        };
+
+        assert!(!texto(&db).contains("DEVUELTAS"), "sin devolución no se menciona");
+
+        registrar_devolucion(&db, 1, CreateReturnDto {
+            sale_id: venta.id, reason: None, refund_method: "cash".into(),
+            items: vec![ReturnItemDto { sale_item_id: partida, quantity: 1 }],
+        }).unwrap();
+
+        let t = texto(&db);
+        assert!(t.contains("DEVUELTAS") && t.contains("1 pz"), "{}", t);
+        assert!(t.contains("-$100.00"), "{}", t);
+        assert!(t.contains("$200.00"), "lo que quedó pagado: {}", t);
+    }
 
     fn db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

@@ -133,11 +133,14 @@ pub fn registrar_apartado(
             if item.quantity <= 0 {
                 return Err("Cantidad inválida en un producto".to_string());
             }
-            let (name, sku, product_stock, price, cost): (String, String, i32, f64, f64) = db.query_row(
-                "SELECT name, sku, stock, sale_price, purchase_price FROM products WHERE id = ?1",
+            let (name, sku, product_stock, price, cost, activo): (String, String, i32, f64, f64, bool) = db.query_row(
+                "SELECT name, sku, stock, sale_price, purchase_price, is_active FROM products WHERE id = ?1",
                 params![item.product_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            ).map_err(|e| e.to_string())?;
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            ).map_err(|_| "Un producto del apartado ya no existe".to_string())?;
+            if !activo {
+                return Err(format!("'{}' está dado de baja y ya no se aparta.", name));
+            }
 
             let (variant_id, variant_label, available) = if let Some(vid) = item.variant_id {
                 let (size, color, vstock): (Option<String>, Option<String>, i32) = db
@@ -632,6 +635,18 @@ mod tests {
         ).unwrap();
         db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
         db
+    }
+
+    #[test]
+    fn un_producto_dado_de_baja_no_se_aparta() {
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "BAJA", 300.0, 10);
+        db.execute("UPDATE products SET is_active = 0 WHERE id = ?1", params![p]).unwrap();
+
+        let err = registrar_apartado(&db, 1, apartado(p, 1, 0.0, "cash")).unwrap_err();
+
+        assert!(err.contains("dado de baja"), "{}", err);
     }
 
     #[test]

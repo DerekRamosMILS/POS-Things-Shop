@@ -379,6 +379,13 @@ base actual en `backups/antes-de-restaurar_<fecha>.db` —con `VACUUM INTO`, que
 incluye lo que todavía estaba en el `-wal`— y si esa copia falla, no restaura.
 Esa copia sale en la lista de respaldos y la rotación nunca la borra.
 
+La restauración se aplica al arrancar, así que la app **se reinicia sola** en
+cuanto queda preparada. Si por algo no se reinicia, una restauración preparada
+hace más de 15 minutos ya no se aplica: se aparta como
+`things_shop.db.restauracion-no-aplicada_<fecha>` y la base se queda como
+estaba. Aplicarla días después dejaba fuera de la vista todo lo vendido
+entretanto.
+
 La prueba `toda_tabla_tiene_decidido_si_se_puede_borrar` falla si alguien agrega
 una tabla sin decidir en cuál de estos grupos va.
 
@@ -464,7 +471,14 @@ que ocurre, y el desglose se muestra al cerrar la caja.
 ## Seguridad
 
 - Contraseñas con Argon2 y salt por usuario
-- Sesiones con token opaco y caducidad configurable (12 h por defecto)
+- Sesiones con token opaco y caducidad configurable (12 h por defecto). La
+  sesión se renueva con el uso: solo vence tras ese tiempo sin actividad, y
+  cuando vence la app regresa sola a la pantalla de inicio
+- Los descuentos por renglón solo los da un administrador; el cobro los
+  rechaza para cualquier otro usuario. Las promociones las crea un
+  administrador y cualquiera puede aplicarlas
+- Un producto dado de baja no se vende ni se aparta, aunque siga en un
+  carrito guardado o se escanee el código de una de sus tallas
 - Cada comando del backend resuelve el usuario desde su sesión; el frontend
   nunca decide quién ejecuta una operación
 - Reportes, usuarios, productos, proveedores y respaldos son solo de administrador

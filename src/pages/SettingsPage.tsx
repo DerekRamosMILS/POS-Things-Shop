@@ -3,6 +3,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { getVersion } from '@tauri-apps/api/app';
 import { useActualizacionStore, motivoDeEspera } from '../stores/useActualizacionStore';
 import * as api from '../api';
+import { relaunch } from '@tauri-apps/plugin-process';
 import CaptureSettings from '../components/CaptureSettings';
 import CategorySettings from '../components/CategorySettings';
 import TamanoSettings from '../components/TamanoSettings';
@@ -101,9 +102,11 @@ export default function SettingsPage() {
         }
         setSaving(true);
         try {
-            for (const cfg of configs) {
-                if (values[cfg.key] !== cfg.value) await api.setConfig(cfg.key, values[cfg.key]);
-            }
+            // Todos juntos: si uno no pasa, no se guarda ninguno.
+            const cambios = configs
+                .filter(cfg => values[cfg.key] !== cfg.value)
+                .map(cfg => [cfg.key, values[cfg.key]] as [string, string]);
+            if (cambios.length > 0) await api.setConfigs(cambios);
             showToast('Configuración guardada'); loadData();
         } catch (err) { showToast(String(err), 'error'); } finally { setSaving(false); }
     };
@@ -120,7 +123,13 @@ export default function SettingsPage() {
             variant: 'danger', confirmLabel: 'Restaurar',
         });
         if (!ok) return;
-        try { const msg = await api.restoreBackup(filename); showToast(msg); }
+        try {
+            const msg = await api.restoreBackup(filename);
+            showToast(msg);
+            // Se reinicia ya. Si la aplicación seguía abierta, lo que se vendiera
+            // antes del siguiente arranque quedaba fuera de la vista al aplicarse.
+            setTimeout(() => { relaunch().catch(err => showToast(`Reinicia la aplicación a mano: ${err}`, 'error')); }, 1500);
+        }
         catch (err) { showToast(String(err), 'error'); }
     };
 
