@@ -223,6 +223,9 @@ struct Captura {
     #[serde(default)]
     tipo: String,
     datos: serde_json::Value,
+    /// El reloj del teléfono al mandar, para medir su desfase con el de la caja.
+    #[serde(default)]
+    reloj: Option<String>,
 }
 
 /// Da de alta una captura tal como llegó del relevo.
@@ -248,13 +251,34 @@ pub(crate) fn aplicar_captura(db: &Connection, cuerpo: &str) -> Resultado {
             Err(e) => rechazo(e),
         },
         "conteo" => match serde_json::from_value::<ConteoDelCelular>(captura.datos) {
-            Ok(c) => match aplicar_conteo(db, None, &c) {
-                Ok(r) => Resultado::Aplicada(format!(
-                    "Conteo de {}: {} → {}",
-                    r.etiqueta, r.antes, r.despues
-                )),
-                Err(e) => rechazo(e),
-            },
+            Ok(mut c) => {
+                if let Some(desfase) = crate::capture::conteo::corregir_por_reloj(
+                    &mut c,
+                    captura.reloj.as_deref(),
+                    chrono::Local::now().naive_local(),
+                ) {
+                    let aviso = format!(
+                        "El reloj del celular va {} minutos {}; la hora del conteo {} se corrigió a {}",
+                        desfase.abs() / 60,
+                        if desfase > 0 { "adelantado" } else { "atrasado" },
+                        c.conteo_id,
+                        c.contado_en
+                    );
+                    log::warn!("{}", aviso);
+                    db.execute(
+                        "INSERT INTO app_logs (level, module, message) VALUES ('warn', 'relevo', ?1)",
+                        params![aviso],
+                    )
+                    .ok();
+                }
+                match aplicar_conteo(db, None, &c) {
+                    Ok(r) => Resultado::Aplicada(format!(
+                        "Conteo de {}: {} → {}",
+                        r.etiqueta, r.antes, r.despues
+                    )),
+                    Err(e) => rechazo(e),
+                }
+            }
             Err(e) => rechazo(format!("El conteo no tiene la forma esperada: {}", e)),
         },
         otro => rechazo(format!("Tipo de captura desconocido: {}", otro)),

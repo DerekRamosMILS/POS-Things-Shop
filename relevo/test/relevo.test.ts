@@ -59,6 +59,34 @@ describe('quién puede entrar', () => {
     });
 });
 
+describe('el reloj del teléfono', () => {
+    it('se guarda junto a la captura, para que la caja corrija el desfase', async () => {
+        const s = secreto();
+        await llamar('/api/subir', {
+            method: 'POST', secreto: s,
+            body: JSON.stringify({
+                captura_id: 'con-reloj', tipo: 'conteo',
+                datos: { conteo_id: 'con-reloj', sku: 'TS-1', contado: 3, contado_en: '2026-01-01 10:00:00' },
+                reloj: '2026-01-01 10:05:00',
+            }),
+        });
+
+        const guardada = await (await llamar('/api/pendiente/con-reloj', { secreto: s })).json() as { reloj: string };
+        expect(guardada.reloj).toBe('2026-01-01 10:05:00');
+    });
+
+    it('un reloj con mala forma se descarta en vez de viajar', async () => {
+        const s = secreto();
+        await llamar('/api/subir', {
+            method: 'POST', secreto: s,
+            body: JSON.stringify({ captura_id: 'reloj-raro', tipo: 'producto', datos: { nombre: 'X' }, reloj: 'ayer' }),
+        });
+
+        const guardada = await (await llamar('/api/pendiente/reloj-raro', { secreto: s })).json() as { reloj: string | null };
+        expect(guardada.reloj).toBeNull();
+    });
+});
+
 describe('un código retirado', () => {
     // Aquí no hay registro de secretos: cualquiera tiene su carpeta. Antes de
     // poder retirar uno, un teléfono sin re-emparejar seguía subiendo con el

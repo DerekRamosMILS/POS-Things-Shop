@@ -613,6 +613,16 @@
     });
   }
 
+  /** La hora de este teléfono como "AAAA-MM-DD HH:MM:SS", igual que la caja. */
+  function horaLocal(d) {
+    return d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0') + ' ' +
+      String(d.getHours()).padStart(2, '0') + ':' +
+      String(d.getMinutes()).padStart(2, '0') + ':' +
+      String(d.getSeconds()).padStart(2, '0');
+  }
+
   function idNuevo() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
     // Los navegadores viejos no lo traen; con la hora y dos números al azar
@@ -655,7 +665,11 @@
             body: JSON.stringify({
               captura_id: item.id,
               tipo: esConteo ? 'conteo' : 'producto',
-              datos: item.datos
+              datos: item.datos,
+              // El reloj de este teléfono al mandar. La caja compara con el suyo
+              // y corrige la hora del conteo si están desfasados: con la hora
+              // mal puesta, un conteo ignoraba lo vendido o lo contaba dos veces.
+              reloj: horaLocal(new Date())
             })
           });
           var data = await r.json();
@@ -857,13 +871,7 @@
     var casillas = $('lineasConteo').querySelectorAll('input');
     // La hora en que se contó, que es lo que permite a la caja respetar lo que
     // se venda de aquí a que reciba esto.
-    var ahora = new Date();
-    var cuando = ahora.getFullYear() + '-' +
-      String(ahora.getMonth() + 1).padStart(2, '0') + '-' +
-      String(ahora.getDate()).padStart(2, '0') + ' ' +
-      String(ahora.getHours()).padStart(2, '0') + ':' +
-      String(ahora.getMinutes()).padStart(2, '0') + ':' +
-      String(ahora.getSeconds()).padStart(2, '0');
+    var cuando = horaLocal(new Date());
 
     var puestos = 0;
     for (var i = 0; i < casillas.length; i++) {

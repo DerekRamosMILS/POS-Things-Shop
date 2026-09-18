@@ -149,7 +149,7 @@ pub fn ajustar_stock(
     })();
 
     match result {
-        Ok(()) => { db.execute_batch("COMMIT;").map_err(|e| e.to_string())?; Ok(()) }
+        Ok(()) => { crate::db::connection::confirmar(db)?; Ok(()) }
         Err(e) => { db.execute_batch("ROLLBACK;").ok(); Err(e) }
     }
 }
@@ -228,7 +228,7 @@ pub fn registrar_compra(
     })();
 
     match result {
-        Ok(()) => { db.execute_batch("COMMIT;").map_err(|e| e.to_string())?; Ok(()) }
+        Ok(()) => { crate::db::connection::confirmar(db)?; Ok(()) }
         Err(e) => { db.execute_batch("ROLLBACK;").ok(); Err(e) }
     }
 }

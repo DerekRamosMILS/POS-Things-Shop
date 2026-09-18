@@ -230,7 +230,7 @@ pub fn registrar_apartado(
 
     match result {
         Ok(l) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             Ok(l)
         }
         Err(e) => {
@@ -335,7 +335,7 @@ pub fn abonar_apartado(
         db.execute_batch("ROLLBACK;").ok();
         return Err(e);
     }
-    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+    crate::db::connection::confirmar(db)?;
 
     get_layaway_internal(db, layaway_id)
 }
@@ -381,7 +381,7 @@ pub fn entregar_apartado(db: &rusqlite::Connection, layaway_id: i64) -> Result<L
         db.execute_batch("ROLLBACK;").ok();
         return Err(e);
     }
-    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+    crate::db::connection::confirmar(db)?;
 
     get_layaway_internal(db, layaway_id)
 }
@@ -546,7 +546,7 @@ pub fn cancelar_apartado(db: &rusqlite::Connection, user_id: i64, layaway_id: i6
 
     match result {
         Ok(()) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             if abonado > 0.0 {
                 db.execute(
                     "INSERT INTO app_logs (level, module, message, user_id)

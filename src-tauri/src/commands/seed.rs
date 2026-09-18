@@ -171,7 +171,7 @@ pub fn seed_demo_data(state: State<DbState>, sessions: State<SessionState>, toke
 
     match result {
         Ok(()) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(&db)?;
             Ok("Datos de prueba cargados: 10 productos, 4 clientes, 2 proveedores y 6 ventas".to_string())
         }
         Err(e) => {

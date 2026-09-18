@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { formatCurrency, formatDateTime, STATUS_LABELS, PAYMENT_METHOD_LABELS } from '../utils';
+import { formatCurrency, formatDateTime, STATUS_LABELS, PAYMENT_METHOD_LABELS, TOPE_LISTA_VENTAS } from '../utils';
 import * as api from '../api';
 import type { Sale } from '../types';
 import { useSessionStore } from '../stores/useSessionStore';
@@ -243,6 +243,14 @@ export default function SalesPage() {
                         <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--t3)' }}>
                             <IcoReceipt />
                             <p style={{ marginTop: 12, fontSize: 13 }}>No se encontraron ventas</p>
+                        </div>
+                    )}
+                    {/* El backend devuelve hasta mil por consulta. Al tocar el tope
+                        hay más ventas que no se están viendo, y callarlo hacía creer
+                        que el historial terminaba ahí. */}
+                    {sales.length >= TOPE_LISTA_VENTAS && (
+                        <div style={{ padding: '12px 16px', textAlign: 'center', fontSize: 12, color: 'var(--warning)' }}>
+                            Se muestran las {TOPE_LISTA_VENTAS} ventas más recientes del filtro. Acota las fechas para ver las anteriores.
                         </div>
                     )}
                 </div>

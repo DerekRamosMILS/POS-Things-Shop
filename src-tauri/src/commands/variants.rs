@@ -243,7 +243,7 @@ pub fn guardar_variantes(
 
     match result {
         Ok(()) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             let mut stmt = db
                 .prepare(&format!("{} WHERE product_id = ?1 AND is_active = 1 ORDER BY id ASC", SEL))
                 .map_err(|e| e.to_string())?;

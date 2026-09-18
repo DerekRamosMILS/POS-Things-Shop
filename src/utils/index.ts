@@ -73,3 +73,11 @@ export const EXPENSE_CATEGORIES = [
     'Mantenimiento',
     'Otros',
 ];
+
+/**
+ * Cuántas ventas devuelve el backend por consulta.
+ *
+ * Tiene que coincidir con el `LIMIT` de `get_sales`: al alcanzarlo, la pantalla
+ * lo dice en vez de dejar creer que eso es todo lo que hay.
+ */
+export const TOPE_LISTA_VENTAS = 1000;

@@ -290,7 +290,7 @@ pub(crate) fn guardar_producto(
 
     match resultado {
         Ok(sku) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             Ok(sku)
         }
         Err(e) => {

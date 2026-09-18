@@ -55,6 +55,23 @@ pub fn recuperar<'a>(
     }
 }
 
+/// Cierra una transacción y, si el cierre falla, la deshace.
+///
+/// `COMMIT` puede fallar —el disco lleno es el caso real— y cuando falla la
+/// transacción **sigue abierta**: la siguiente operación moría con "cannot start
+/// a transaction within a transaction" y la caja quedaba inservible hasta
+/// reiniciar. Deshacerla pierde esa operación, que de todos modos no se guardó,
+/// y deja la base lista para la siguiente.
+pub fn confirmar(db: &Connection) -> Result<(), String> {
+    match db.execute_batch("COMMIT;") {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = db.execute_batch("ROLLBACK;");
+            Err(e.to_string())
+        }
+    }
+}
+
 /// Get the database directory path within the app's data directory
 pub fn get_db_dir() -> PathBuf {
     let app_data = dirs_next().unwrap_or_else(|| PathBuf::from("."));
@@ -310,6 +327,30 @@ pub fn purge_old_logs(conn: &Connection) {
 #[cfg(test)]
 mod tests_candado {
     use super::*;
+
+    /// Una transacción cuyo `COMMIT` falla tiene que quedar deshecha, no abierta.
+    #[test]
+    fn si_el_cierre_falla_la_transaccion_no_se_queda_abierta() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE dueños (id INTEGER PRIMARY KEY);
+             CREATE TABLE cosas (id INTEGER PRIMARY KEY, dueño INTEGER
+                 REFERENCES dueños(id) DEFERRABLE INITIALLY DEFERRED);",
+        ).unwrap();
+
+        // Una llave foránea diferida revienta justo al cerrar, como el disco lleno.
+        db.execute_batch("BEGIN TRANSACTION;").unwrap();
+        db.execute("INSERT INTO cosas (id, dueño) VALUES (1, 99)", []).unwrap();
+        assert!(confirmar(&db).is_err());
+
+        // Lo importante: la base sigue usable y no quedó nada a medias.
+        db.execute_batch("BEGIN TRANSACTION;").expect("la transacción anterior quedó abierta");
+        db.execute("INSERT INTO dueños (id) VALUES (99)", []).unwrap();
+        confirmar(&db).unwrap();
+        let cosas: i64 = db.query_row("SELECT COUNT(*) FROM cosas", [], |r| r.get(0)).unwrap();
+        assert_eq!(cosas, 0, "lo que no se pudo cerrar no se guardó");
+    }
 
     #[test]
     fn un_panic_no_deja_la_base_inservible() {

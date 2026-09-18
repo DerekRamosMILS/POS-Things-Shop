@@ -534,7 +534,7 @@ pub fn registrar_venta(
 
     match result {
         Ok(sale) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             Ok(sale)
         }
         Err(e) => {
@@ -717,7 +717,7 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
 
     match result {
         Ok(aviso) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             Ok(aviso)
         }
         Err(e) => {

@@ -229,7 +229,7 @@ pub fn registrar_devolucion(
 
     match result {
         Ok(total) => {
-            db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+            crate::db::connection::confirmar(db)?;
             Ok(total)
         }
         Err(e) => {

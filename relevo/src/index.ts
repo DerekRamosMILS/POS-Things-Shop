@@ -92,9 +92,6 @@ export default {
 		const carpeta = `t/${huella}`;
 		const claveCatalogo = `c/${huella}`;
 
-		// Que el secreto sirve solo se puede comprobar usándolo: aquí no hay
-		// registro de tiendas ni lista de secretos válidos. Cualquier secreto
-		// tiene su propia carpeta, y sin el correcto no se ve la de nadie más.
 		// Un código que la tienda cambió. Sin esta marca el relevo no tendría cómo
 		// saberlo —no hay lista de secretos—, y un teléfono sin re-emparejar seguía
 		// subiendo con él: recibía "ok", borraba su copia, y la tienda ya nunca
@@ -116,6 +113,9 @@ export default {
 			return json({ ok: true });
 		}
 
+		// Que el secreto sirve solo se puede comprobar usándolo: aquí no hay
+		// registro de tiendas ni lista de secretos válidos. Cualquier secreto
+		// tiene su propia carpeta, y sin el correcto no se ve la de nadie más.
 		if (ruta === '/api/verificar') {
 			return json({ ok: true });
 		}
@@ -124,7 +124,7 @@ export default {
 			const largo = Number(req.headers.get('content-length') ?? '0');
 			if (largo > MAX_BYTES) return error(413, 'La captura es demasiado grande');
 
-			let entrada: { captura_id?: string; tipo?: string; datos?: unknown };
+			let entrada: { captura_id?: string; tipo?: string; datos?: unknown; reloj?: unknown };
 			try {
 				entrada = await req.json();
 			} catch {
@@ -140,6 +140,13 @@ export default {
 			const tipo = entrada.tipo === 'conteo' ? 'conteo' : 'producto';
 			if (entrada.datos === undefined) return error(400, 'La captura viene vacía');
 
+			// El reloj del teléfono al mandar, tal como viene; la caja decide qué
+			// hacer con él. Se guarda solo si tiene la forma esperada.
+			const reloj = typeof entrada.reloj === 'string'
+				&& /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(entrada.reloj.trim())
+				? entrada.reloj.trim()
+				: null;
+
 			const clave = `${carpeta}/${id}`;
 			// Antes de subir se contaban las pendientes con un listado, para frenar
 			// a un teléfono en bucle. Cada listado gasta de un cupo diario pequeño
@@ -147,7 +154,7 @@ export default {
 			// cupo de escrituras, y la cola del teléfono no repite identificadores.
 			const yaEstaba = await env.CAPTURAS.get(clave, 'stream');
 
-			await env.CAPTURAS.put(clave, JSON.stringify({ tipo, datos: entrada.datos }), {
+			await env.CAPTURAS.put(clave, JSON.stringify({ tipo, datos: entrada.datos, reloj }), {
 				expirationTtl: CADUCIDAD_SEGUNDOS,
 				metadata: { tipo, cuando: new Date().toISOString() },
 			});

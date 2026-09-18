@@ -131,7 +131,7 @@ pub(crate) fn guardar_ajustes(db: &rusqlite::Connection, cambios: &[(String, Str
         Ok(())
     })();
     match resultado {
-        Ok(()) => db.execute_batch("COMMIT;").map_err(|e| e.to_string()),
+        Ok(()) => crate::db::connection::confirmar(db),
         Err(e) => {
             db.execute_batch("ROLLBACK;").ok();
             Err(e)

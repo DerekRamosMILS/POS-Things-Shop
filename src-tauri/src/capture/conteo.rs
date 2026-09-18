@@ -45,6 +45,40 @@ pub struct ResultadoConteo {
     pub movido_mientras: i32,
 }
 
+/// Desfase de reloj a partir del cual se corrige la hora del conteo.
+///
+/// Por debajo, la diferencia la explica el viaje: el teléfono manda, el relevo lo
+/// guarda y la caja pasa a recogerlo hasta tres minutos después.
+const DESFASE_TOLERADO_SEGUNDOS: i64 = 10 * 60;
+
+const FORMATO: &str = "%Y-%m-%d %H:%M:%S";
+
+/// Corrige la hora del conteo cuando el reloj del teléfono está desfasado.
+///
+/// La caja le suma al conteo lo que se movió después de la hora en que se contó,
+/// y esa hora la pone el teléfono. Con el reloj adelantado no veía ningún
+/// movimiento posterior y escribía el conteo tal cual, ignorando lo vendido
+/// entre el conteo y su llegada; con el reloj atrasado contaba ventas anteriores
+/// al conteo. El teléfono manda también su reloj al enviar, así que el desfase se
+/// mide y se descuenta.
+///
+/// Devuelve el desfase corregido en segundos, si hubo que corregir.
+pub fn corregir_por_reloj(
+    entrada: &mut ConteoDelCelular,
+    reloj_del_telefono: Option<&str>,
+    ahora: chrono::NaiveDateTime,
+) -> Option<i64> {
+    let reloj = chrono::NaiveDateTime::parse_from_str(reloj_del_telefono?.trim(), FORMATO).ok()?;
+    let contado = chrono::NaiveDateTime::parse_from_str(entrada.contado_en.trim(), FORMATO).ok()?;
+
+    let desfase = (reloj - ahora).num_seconds();
+    if desfase.abs() <= DESFASE_TOLERADO_SEGUNDOS {
+        return None;
+    }
+    entrada.contado_en = (contado - chrono::Duration::seconds(desfase)).format(FORMATO).to_string();
+    Some(desfase)
+}
+
 /// Aplica un conteo, respetando lo que se vendió mientras tanto.
 pub fn aplicar_conteo(
     db: &Connection,
@@ -73,13 +107,18 @@ pub fn aplicar_conteo(
         return Ok(ResultadoConteo { sku, etiqueta, antes, despues, movido_mientras: movido });
     }
 
-    let (product_id, nombre): (i64, String) = db
+    let (product_id, nombre, activo): (i64, String, bool) = db
         .query_row(
-            "SELECT id, name FROM products WHERE sku = ?1",
+            "SELECT id, name, is_active FROM products WHERE sku = ?1",
             params![entrada.sku.trim()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|_| format!("El producto {} ya no existe", entrada.sku))?;
+    // El catálogo del teléfono puede tener días: la prenda pudo darse de baja
+    // mientras tanto, y contarla le movía la existencia a algo que ya no se vende.
+    if !activo {
+        return Err(format!("'{}' está dado de baja; su conteo no se aplicó", nombre));
+    }
 
     let (etiqueta, stock_antes) = match entrada.variant_id {
         Some(vid) => {
@@ -213,7 +252,7 @@ pub fn aplicar_conteo(
         db.execute_batch("ROLLBACK;").ok();
         return Err(e);
     }
-    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+    crate::db::connection::confirmar(db)?;
 
     Ok(ResultadoConteo {
         sku: entrada.sku.trim().to_string(),
@@ -510,4 +549,83 @@ mod tests {
         aplicar_conteo(&db, Some(1), &conteo(9, "2026-01-01 15:00:00")).unwrap();
         assert_eq!(stock(&db), 5);
     }
+    fn en(texto: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(texto, FORMATO).unwrap()
+    }
+
+    #[test]
+    fn un_reloj_adelantado_corre_la_hora_del_conteo_hacia_atras() {
+        // El teléfono cree que es un día después. Sin corregir, la caja no veía
+        // ninguna venta "posterior" al conteo y lo escribía tal cual.
+        let mut c = conteo(12, "2026-01-02 11:00:00");
+        let desfase = corregir_por_reloj(&mut c, Some("2026-01-02 12:00:00"), en("2026-01-01 12:00:00"));
+
+        assert_eq!(desfase, Some(86_400));
+        assert_eq!(c.contado_en, "2026-01-01 11:00:00");
+    }
+
+    #[test]
+    fn un_reloj_atrasado_la_corre_hacia_adelante() {
+        let mut c = conteo(12, "2026-01-01 08:00:00");
+        let desfase = corregir_por_reloj(&mut c, Some("2026-01-01 09:00:00"), en("2026-01-01 12:00:00"));
+
+        assert_eq!(desfase, Some(-10_800));
+        assert_eq!(c.contado_en, "2026-01-01 11:00:00");
+    }
+
+    #[test]
+    fn una_diferencia_de_minutos_es_el_viaje_y_no_se_toca() {
+        // El teléfono manda, el relevo guarda y la caja recoge hasta tres minutos
+        // después: esa diferencia es normal.
+        let mut c = conteo(12, "2026-01-01 11:00:00");
+        assert_eq!(corregir_por_reloj(&mut c, Some("2026-01-01 11:57:00"), en("2026-01-01 12:00:00")), None);
+        assert_eq!(c.contado_en, "2026-01-01 11:00:00");
+    }
+
+    #[test]
+    fn sin_reloj_o_con_uno_ilegible_se_queda_como_vino() {
+        let mut c = conteo(12, "2026-01-01 11:00:00");
+        assert_eq!(corregir_por_reloj(&mut c, None, en("2026-01-01 12:00:00")), None);
+        assert_eq!(corregir_por_reloj(&mut c, Some("ayer por la tarde"), en("2026-01-01 12:00:00")), None);
+        assert_eq!(c.contado_en, "2026-01-01 11:00:00");
+    }
+
+    #[test]
+    fn con_el_reloj_adelantado_lo_vendido_despues_del_conteo_si_se_resta() {
+        // La prueba que importa: el conteo se corrige y entonces la venta que
+        // ocurrió entre contar y llegar vuelve a quedar "después".
+        let db = tienda();
+        let ahora = chrono::Local::now().naive_local();
+        let hace_media_hora = (ahora - chrono::Duration::minutes(30)).format(FORMATO).to_string();
+        db.execute(
+            "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, created_at)
+             VALUES (1, 'sale', -3, 20, 17, ?1)",
+            params![hace_media_hora],
+        ).unwrap();
+
+        // Contó hace una hora, pero su reloj va un día adelantado.
+        let reloj = (ahora + chrono::Duration::days(1)).format(FORMATO).to_string();
+        let contado_en = (ahora + chrono::Duration::days(1) - chrono::Duration::hours(1)).format(FORMATO).to_string();
+        let mut c = conteo(12, &contado_en);
+        corregir_por_reloj(&mut c, Some(&reloj), ahora);
+
+        let r = aplicar_conteo(&db, Some(1), &c).unwrap();
+
+        assert_eq!(r.movido_mientras, -3, "la venta posterior al conteo cuenta");
+        assert_eq!(stock(&db), 9);
+    }
+
+    #[test]
+    fn no_se_cuenta_un_producto_dado_de_baja() {
+        let db = tienda();
+        db.execute("UPDATE products SET is_active = 0 WHERE id = 1", []).unwrap();
+
+        let err = aplicar_conteo(&db, Some(1), &conteo(5, "2026-01-01 15:00:00")).unwrap_err();
+
+        assert!(err.contains("dado de baja"), "{}", err);
+        assert_eq!(stock(&db), 20, "la existencia no se movió");
+        let conteos: i64 = db.query_row("SELECT COUNT(*) FROM conteos", [], |r| r.get(0)).unwrap();
+        assert_eq!(conteos, 0);
+    }
+
 }

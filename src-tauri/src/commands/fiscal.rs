@@ -135,11 +135,22 @@ pub fn get_catalogos_fiscales() -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Un campo listo para el CSV: entrecomillado si hace falta y sin fórmulas.
+///
+/// Excel trata como fórmula todo lo que empieza con `=`, `+`, `-` o `@`, y la
+/// razón social la teclea el mostrador. Se le pone una comilla simple delante:
+/// el texto se ve igual y deja de ser fórmula.
 fn csv_field(value: &str) -> String {
+    let peligroso = value
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'));
+    let value = if peligroso { format!("'{}", value) } else { value.to_string() };
+
     if value.contains(',') || value.contains('"') || value.contains('\n') {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
-        value.to_string()
+        value
     }
 }
 
@@ -256,6 +267,24 @@ pub fn marcar_facturada(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn un_campo_que_parece_formula_deja_de_serlo() {
+        // La razón social la teclea el mostrador; Excel abriría "=1+1" como
+        // fórmula, y "=HYPERLINK(...)" como algo peor.
+        assert_eq!(csv_field("=1+1"), "'=1+1");
+        assert_eq!(csv_field("+52 81 1234"), "'+52 81 1234");
+        assert_eq!(csv_field("-Ropa"), "'-Ropa");
+        assert_eq!(csv_field("@todos"), "'@todos");
+        assert_eq!(csv_field("Boutique Ana"), "Boutique Ana");
+    }
+
+    #[test]
+    fn un_campo_con_coma_o_comillas_se_entrecomilla() {
+        assert_eq!(csv_field("Ropa, S.A."), "\"Ropa, S.A.\"");
+        assert_eq!(csv_field("Casa \"Ana\""), "\"Casa \"\"Ana\"\"\"");
+        assert_eq!(csv_field("=SUMA(A1,A2)"), "\"'=SUMA(A1,A2)\"");
+    }
 
     #[test]
     fn accepts_a_well_formed_company_rfc() {

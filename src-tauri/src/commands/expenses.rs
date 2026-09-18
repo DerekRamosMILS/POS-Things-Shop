@@ -72,7 +72,7 @@ pub fn registrar_gasto(
         db.execute_batch("ROLLBACK;").ok();
         return Err(e);
     }
-    db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
+    crate::db::connection::confirmar(db)?;
 
     let id = db.last_insert_rowid();
     db.query_row(
@@ -219,7 +219,7 @@ pub fn quitar_gasto(db: &rusqlite::Connection, id: i64) -> Result<(), String> {
 fn en_transaccion(db: &rusqlite::Connection, f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
     match f() {
-        Ok(()) => db.execute_batch("COMMIT;").map_err(|e| e.to_string()),
+        Ok(()) => crate::db::connection::confirmar(db),
         Err(e) => {
             db.execute_batch("ROLLBACK;").ok();
             Err(e)
