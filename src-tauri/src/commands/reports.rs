@@ -55,13 +55,34 @@ pub struct DashboardStats {
 const NETO_VENTA: &str =
     "(s.total - COALESCE((SELECT SUM(r.total_refund) FROM returns r WHERE r.sale_id = s.id), 0))";
 
-/// Utilidad de una partida, solo por las piezas que no se devolvieron.
+/// Costo unitario con el que se calcula la utilidad de una partida.
 ///
-/// Usa el costo guardado al vender (`unit_cost > 0`) y, en renglones viejos que
-/// no lo tienen, el costo actual del producto.
-const UTILIDAD_PARTIDA: &str =
-    "(si.subtotal * (si.quantity - si.returned_quantity) / si.quantity
-      - COALESCE(NULLIF(si.unit_cost, 0), p.purchase_price) * (si.quantity - si.returned_quantity))";
+/// El bueno es el que se guardó al vender (`unit_cost > 0`). Los renglones de
+/// antes de que existiera esa columna no lo tienen, y caían al costo *actual* del
+/// producto: subirle el costo a una prenda rehacía hacia atrás la utilidad de
+/// todos los meses en que se vendía más barata, sin que nada lo dijera.
+///
+/// Para esos renglones se busca en el historial de costos el primer cambio
+/// posterior a la venta: su `old_price` es lo que costaba ese día. Si no hay
+/// ningún cambio posterior, el costo de hoy sigue siendo el de entonces.
+///
+/// Depende de que la consulta tenga `sales s` y `products p` a la vista.
+const COSTO_AL_VENDER: &str = "COALESCE(
+        NULLIF(si.unit_cost, 0),
+        (SELECT ph.old_price FROM price_history ph
+          WHERE ph.product_id = si.product_id AND ph.tipo = 'costo'
+            AND ph.created_at > s.created_at
+          ORDER BY ph.created_at ASC, ph.id ASC LIMIT 1),
+        p.purchase_price)";
+
+/// Utilidad de una partida, solo por las piezas que no se devolvieron.
+fn utilidad_partida() -> String {
+    format!(
+        "(si.subtotal * (si.quantity - si.returned_quantity) / si.quantity
+          - {} * (si.quantity - si.returned_quantity))",
+        COSTO_AL_VENDER
+    )
+}
 
 /// Filtro de antigüedad, como parámetro `?1` con la forma `-30`.
 const DESDE: &str = "datetime('now', ?1 || ' days', 'localtime')";
@@ -117,7 +138,7 @@ pub(crate) fn panel(db: &rusqlite::Connection) -> Result<DashboardStats, String>
              JOIN sales s ON si.sale_id = s.id
              JOIN products p ON si.product_id = p.id
              WHERE date(s.created_at) = date('now','localtime') AND s.status = 'completed'",
-            UTILIDAD_PARTIDA
+            utilidad_partida()
         ))?,
     })
 }
@@ -244,7 +265,7 @@ pub(crate) fn reporte_diario(db: &rusqlite::Connection, days: i32) -> Result<Vec
              JOIN products p ON si.product_id = p.id
              WHERE s.status = 'completed' AND s.created_at >= {}
              GROUP BY date(s.created_at)",
-            UTILIDAD_PARTIDA, DESDE
+            utilidad_partida(), DESDE
         ),
         params![since],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
@@ -346,7 +367,7 @@ pub(crate) fn por_cajero(db: &rusqlite::Connection, days: i32) -> Result<Vec<Cas
              JOIN products p ON si.product_id = p.id
              WHERE s.status = 'completed' AND s.created_at >= {}
              GROUP BY s.user_id",
-            UTILIDAD_PARTIDA, DESDE
+            utilidad_partida(), DESDE
         ),
         params![since],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
@@ -426,6 +447,44 @@ mod tests {
         let fecha: String = db.query_row("SELECT date('now','localtime')", [], |r| r.get(0)).unwrap();
         reporte_diario(db, 30).unwrap().into_iter().find(|d| d.date == fecha)
             .unwrap_or_else(|| panic!("el reporte no trae el día de hoy"))
+    }
+
+    #[test]
+    fn subir_un_costo_no_reescribe_la_utilidad_de_lo_ya_vendido() {
+        // Los renglones de antes de que se guardara el costo al vender caían al
+        // costo *de hoy*: subirle el costo a una prenda rehacía hacia atrás la
+        // utilidad de los meses en que se vendía más barata. Con el historial de
+        // costos se puede saber cuánto costaba el día de la venta.
+        let db = tienda();
+        let venta = cobrar(&db, 1, vec![("cash", 100.0)]);
+        // Un renglón viejo, sin costo propio, como los de antes de la migración 005.
+        db.execute("UPDATE sale_items SET unit_cost = 0 WHERE sale_id = ?1", params![venta]).unwrap();
+
+        assert_eq!(panel(&db).unwrap().today_profit, 50.0, "costó 50 y se vendió en 100");
+
+        // Más tarde sube el proveedor y se anota el cambio.
+        crate::commands::products::anotar_precio(&db, 1, "costo", 50.0, 80.0, 1).unwrap();
+        db.execute(
+            "UPDATE price_history SET created_at = datetime(created_at, '+1 hour') WHERE tipo = 'costo'",
+            [],
+        ).unwrap();
+        db.execute("UPDATE products SET purchase_price = 80.0 WHERE id = 1", []).unwrap();
+
+        assert_eq!(
+            panel(&db).unwrap().today_profit, 50.0,
+            "la utilidad de una venta que ya pasó no se mueve"
+        );
+    }
+
+    #[test]
+    fn un_renglon_viejo_sin_historial_sigue_usando_el_costo_de_hoy() {
+        // Es lo único que se puede saber de una venta anterior a que se guardara
+        // nada: se mantiene como estaba, no se cuenta utilidad de más.
+        let db = tienda();
+        let venta = cobrar(&db, 1, vec![("cash", 100.0)]);
+        db.execute("UPDATE sale_items SET unit_cost = 0 WHERE sale_id = ?1", params![venta]).unwrap();
+
+        assert_eq!(panel(&db).unwrap().today_profit, 50.0);
     }
 
     fn hace(db: &rusqlite::Connection, dias: i32) -> String {

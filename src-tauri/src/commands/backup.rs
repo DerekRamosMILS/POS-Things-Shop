@@ -3,7 +3,7 @@ use chrono::Local;
 use rusqlite::Connection;
 use tauri::State;
 
-use crate::db::connection::{DbState, get_db_dir, get_db_path};
+use crate::db::connection::{DbState, get_db_dir};
 use crate::session::{require_admin, SessionState};
 
 /// Read the configured maximum number of backups to retain (default 30).
@@ -22,19 +22,12 @@ fn max_backups(db: &Connection) -> usize {
 /// Flush the WAL and copy the DB file into the backups folder. Shared by the
 /// manual backup command and the automatic backup on register close.
 pub fn perform_backup(db: &Connection) -> Result<String, String> {
-    backup_into(db, &get_db_path(), &get_db_dir().join("backups"))
+    backup_into(db, &get_db_dir().join("backups"))
 }
 
-/// Núcleo del respaldo, con rutas explícitas para poder ejercitarlo en pruebas
-/// sobre un directorio temporal en lugar del de la aplicación.
-pub fn backup_into(
-    db: &Connection,
-    db_path: &std::path::Path,
-    backup_dir: &std::path::Path,
-) -> Result<String, String> {
-    // Sin esto el respaldo se lleva la base sin los cambios que siguen en el WAL.
-    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").map_err(|e| e.to_string())?;
-
+/// Núcleo del respaldo, con la carpeta explícita para poder ejercitarlo en
+/// pruebas sobre un directorio temporal en lugar del de la aplicación.
+pub fn backup_into(db: &Connection, backup_dir: &std::path::Path) -> Result<String, String> {
     fs::create_dir_all(backup_dir).map_err(|e| e.to_string())?;
 
     // Si en el mismo segundo se piden dos respaldos, el sufijo evita pisar uno.
@@ -46,7 +39,8 @@ pub fn backup_into(
         n += 1;
     }
 
-    fs::copy(db_path, &backup_file).map_err(|e| format!("Error al crear backup: {}", e))?;
+    crate::db::connection::copia_consistente(db, &backup_file)
+        .map_err(|e| format!("Error al crear backup: {}", e))?;
 
     rotate_backups(backup_dir, max_backups(db)).ok();
 
@@ -71,7 +65,7 @@ pub fn export_database(state: State<DbState>, sessions: State<SessionState>, tok
     require_admin(&sessions, &token)?;
     let db = state.conn();
 
-    let mensaje = exportar_a(&db, &get_db_path(), &crate::photos::photos_dir(), std::path::Path::new(&path))?;
+    let mensaje = exportar_a(&db, &crate::photos::photos_dir(), std::path::Path::new(&path))?;
 
     // Se anota para poder avisar cuando lleve mucho sin hacerse: los respaldos
     // de todos los días viven en este mismo disco, así que la copia que de
@@ -105,13 +99,9 @@ pub fn dias_sin_copia_externa(state: State<DbState>, sessions: State<SessionStat
 /// Núcleo de la exportación, con rutas explícitas para poder probarlo.
 pub fn exportar_a(
     db: &Connection,
-    db_path: &std::path::Path,
     fotos_dir: &std::path::Path,
     destino_elegido: &std::path::Path,
 ) -> Result<String, String> {
-    // Sin esto la copia se lleva la base sin lo que sigue en el WAL.
-    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").map_err(|e| e.to_string())?;
-
     let carpeta = destino_elegido.join(format!(
         "things-shop-{}",
         Local::now().format("%Y%m%d_%H%M%S")
@@ -119,7 +109,7 @@ pub fn exportar_a(
     let fotos_destino = carpeta.join("fotos");
     fs::create_dir_all(&fotos_destino).map_err(|e| format!("Error al exportar: {}", e))?;
 
-    fs::copy(db_path, carpeta.join("things-shop.db"))
+    crate::db::connection::copia_consistente(db, &carpeta.join("things-shop.db"))
         .map_err(|e| format!("Error al exportar: {}", e))?;
 
     let mut fotos = 0usize;
@@ -149,24 +139,34 @@ pub fn exportar_a(
 #[tauri::command]
 pub fn restore_backup(state: State<DbState>, sessions: State<SessionState>, token: String, filename: String) -> Result<String, String> {
     require_admin(&sessions, &token)?;
-    // Guard against path traversal — only plain filenames from the backups dir.
-    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
-        return Err("Nombre de respaldo inválido".to_string());
-    }
 
-    let backup_dir = get_db_dir().join("backups");
-    let source = backup_dir.join(&filename);
-    if !source.exists() {
-        return Err("El respaldo seleccionado no existe".to_string());
-    }
-
-    // Flush current WAL so the pending copy is complete/consistent.
+    // Se baja el WAL al archivo antes de nada: la copia que se guarda de la base
+    // actual sale de él.
     {
         let db = state.conn();
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").ok();
     }
 
-    crate::db::connection::preparar_restauracion(&get_db_dir(), &source)?;
+    preparar_respaldo(&get_db_dir(), &filename)
+}
+
+/// Núcleo de la restauración, con la carpeta explícita para poder probarlo.
+///
+/// Valida el nombre y **el contenido** antes de dejarlo preparado: lo que no se
+/// rechaza aquí se descubre después del reinicio, cuando ya no hay pantalla a la
+/// que avisarle.
+pub fn preparar_respaldo(db_dir: &std::path::Path, filename: &str) -> Result<String, String> {
+    // Guard against path traversal — only plain filenames from the backups dir.
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err("Nombre de respaldo inválido".to_string());
+    }
+
+    let source = db_dir.join("backups").join(filename);
+    if !source.exists() {
+        return Err("El respaldo seleccionado no existe".to_string());
+    }
+    crate::db::connection::revisar_respaldo(&source)?;
+    crate::db::connection::preparar_restauracion(db_dir, &source)?;
 
     Ok("Respaldo listo. La aplicación se va a reiniciar para completar la restauración.".to_string())
 }
@@ -270,7 +270,7 @@ mod tests {
         fs::write(fotos.join("una_t.jpg"), [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
         fs::write(fotos.join("notas.txt"), b"esto no es una foto").unwrap();
 
-        let mensaje = exportar_a(&conn, &db_path, &fotos, &destino).unwrap();
+        let mensaje = exportar_a(&conn, &fotos, &destino).unwrap();
         assert!(mensaje.contains("2 fotos"), "mensaje inesperado: {}", mensaje);
 
         let carpeta = fs::read_dir(&destino).unwrap().next().unwrap().unwrap().path();
@@ -298,7 +298,7 @@ mod tests {
         add_product(&conn, "ANTES-2");
         let at_backup = count_products(&conn);
 
-        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        let name = backup_into(&conn, &backups).unwrap();
         assert!(backups.join(&name).exists(), "el archivo de respaldo debe existir");
 
         // La tienda sigue operando después del respaldo.
@@ -327,7 +327,7 @@ mod tests {
 
         let conn = open_db(&db_path);
         add_product(&conn, "UNO");
-        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        let name = backup_into(&conn, &backups).unwrap();
         drop(conn);
 
         let pending = dir.path().join(PENDING_RESTORE);
@@ -354,7 +354,7 @@ mod tests {
 
         let conn = open_db(&db_path);
         add_product(&conn, "ANTES");
-        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        let name = backup_into(&conn, &backups).unwrap();
         add_product(&conn, "DESPUES");
         drop(conn);
 
@@ -398,7 +398,7 @@ mod tests {
         let conn = open_db(&db_path);
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;").unwrap();
         add_product(&conn, "ANTES");
-        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        let name = backup_into(&conn, &backups).unwrap();
         add_product(&conn, "SOLO-EN-EL-WAL");
 
         // La foto de disco de una tienda que se apagó de golpe: base + WAL.
@@ -442,7 +442,7 @@ mod tests {
 
         let conn = open_db(&db_path);
         add_product(&conn, "VIEJO");
-        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        let name = backup_into(&conn, &backups).unwrap();
         crate::db::connection::preparar_restauracion(dir.path(), &backups.join(&name)).unwrap();
         add_product(&conn, "VENDIDO-DESPUES");
         drop(conn);
@@ -466,7 +466,7 @@ mod tests {
         let backups = dir.path().join("backups");
         let conn = open_db(&db_path);
         add_product(&conn, "UNO");
-        let name = backup_into(&conn, &db_path, &backups).unwrap();
+        let name = backup_into(&conn, &backups).unwrap();
         add_product(&conn, "DOS");
         drop(conn);
         fs::copy(backups.join(&name), dir.path().join(PENDING_RESTORE)).unwrap();
@@ -523,11 +523,118 @@ mod tests {
         let conn = open_db(&db_path);
         add_product(&conn, "UNO");
 
-        let first = backup_into(&conn, &db_path, &backups).unwrap();
-        let second = backup_into(&conn, &db_path, &backups).unwrap();
+        let first = backup_into(&conn, &backups).unwrap();
+        let second = backup_into(&conn, &backups).unwrap();
 
         assert_ne!(first, second);
         assert!(backups.join(&first).exists());
         assert!(backups.join(&second).exists());
+    }
+
+    #[test]
+    fn el_respaldo_se_lleva_la_ultima_venta_aunque_no_se_pueda_truncar_el_wal() {
+        // `wal_checkpoint` avisa que no pudo en un renglón, no con un error, así
+        // que el aviso se perdía y se copiaba el `.db` sin lo que seguía en el
+        // `-wal`: el respaldo salía sin lo último vendido y nadie se enteraba.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("things_shop.db");
+        let backups = dir.path().join("backups");
+
+        let conn = open_db(&db_path);
+        conn.execute_batch("PRAGMA wal_autocheckpoint=0;").unwrap();
+
+        // Un lector con su transacción ya abierta: el checkpoint solo puede bajar
+        // al `.db` hasta donde llega la foto de ese lector, y no más.
+        let mirona = Connection::open(&db_path).unwrap();
+        mirona.execute_batch("BEGIN; SELECT COUNT(*) FROM products;").unwrap();
+
+        add_product(&conn, "LA-ULTIMA");
+
+        let nombre = backup_into(&conn, &backups).unwrap();
+
+        let copia = Connection::open(backups.join(&nombre)).unwrap();
+        assert_eq!(count_products(&copia), 1, "el respaldo tiene que traer lo último vendido");
+    }
+
+    #[test]
+    fn la_copia_para_llevarse_tambien_trae_lo_ultimo_vendido() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("things_shop.db");
+        let fotos = dir.path().join("fotos");
+        let destino = dir.path().join("usb");
+        fs::create_dir_all(&fotos).unwrap();
+        fs::create_dir_all(&destino).unwrap();
+
+        let conn = open_db(&db_path);
+        conn.execute_batch("PRAGMA wal_autocheckpoint=0;").unwrap();
+        let mirona = Connection::open(&db_path).unwrap();
+        mirona.execute_batch("BEGIN; SELECT COUNT(*) FROM products;").unwrap();
+        add_product(&conn, "LA-ULTIMA");
+
+        exportar_a(&conn, &fotos, &destino).unwrap();
+
+        let carpeta = fs::read_dir(&destino).unwrap().next().unwrap().unwrap().path();
+        let copia = Connection::open(carpeta.join("things-shop.db")).unwrap();
+        assert_eq!(count_products(&copia), 1, "la copia de la USB tiene que traer lo último vendido");
+    }
+
+    #[test]
+    fn un_respaldo_dañado_no_pasa_por_bueno() {
+        // Sin revisarlo, un respaldo ilegible se descubría el día que hacía
+        // falta, que es el único día en que ya no se puede hacer nada.
+        let dir = tempfile::tempdir().unwrap();
+        let falso = dir.path().join("backup_20260101_000000.db");
+        fs::write(&falso, b"esto no es una base de datos").unwrap();
+
+        assert!(crate::db::connection::revisar(&falso).is_err());
+    }
+
+    #[test]
+    fn un_archivo_que_no_es_respaldo_no_se_llega_a_preparar() {
+        // Prepararlo dejaba la aplicación abriendo un aviso de error y cerrándose
+        // en cada arranque, con la tienda parada y sin pantalla que lo explicara.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("backups")).unwrap();
+        fs::write(dir.path().join("backups/backup_20260101_000000.db"), b"no es una base").unwrap();
+
+        let e = preparar_respaldo(dir.path(), "backup_20260101_000000.db").unwrap_err();
+
+        assert!(e.contains("dañado"), "mensaje inesperado: {}", e);
+        assert!(!dir.path().join(PENDING_RESTORE).exists(), "no debe quedar nada preparado");
+    }
+
+    #[test]
+    fn una_base_de_otra_cosa_no_pasa_por_respaldo() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("backups")).unwrap();
+        let ajena = dir.path().join("backups/backup_20260101_000000.db");
+        let conn = Connection::open(&ajena).unwrap();
+        conn.execute_batch("CREATE TABLE cosas (id INTEGER);").unwrap();
+        drop(conn);
+
+        let e = preparar_respaldo(dir.path(), "backup_20260101_000000.db").unwrap_err();
+
+        assert!(e.contains("no de Things Shop"), "mensaje inesperado: {}", e);
+        assert!(!dir.path().join(PENDING_RESTORE).exists(), "no debe quedar nada preparado");
+    }
+
+    #[test]
+    fn un_respaldo_de_verdad_si_se_prepara() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("things_shop.db");
+        let conn = open_db(&db_path);
+        add_product(&conn, "UNO");
+        let nombre = backup_into(&conn, &dir.path().join("backups")).unwrap();
+
+        preparar_respaldo(dir.path(), &nombre).unwrap();
+
+        assert!(dir.path().join(PENDING_RESTORE).exists(), "debe quedar preparado");
+    }
+
+    #[test]
+    fn un_nombre_con_ruta_no_saca_nada_de_la_carpeta_de_respaldos() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(preparar_respaldo(dir.path(), "../../otra/cosa.db").is_err());
+        assert!(!dir.path().join(PENDING_RESTORE).exists());
     }
 }

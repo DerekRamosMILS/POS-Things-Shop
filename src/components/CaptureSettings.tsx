@@ -112,6 +112,21 @@ export default function CaptureSettings({ compacto = false }: { compacto?: boole
                 {estado && estado.recibidas > 0 && ` Recibidos desde que se abrió: ${estado.recibidas}.`}
             </p>
 
+            {vista && vista.catalogo_recortado > 0 && (
+                <div style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 14, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.22)' }}>
+                    <p style={{ fontSize: 12, color: 'var(--t2)', fontWeight: 700, marginBottom: 6 }}>
+                        {vista.catalogo_recortado === 1
+                            ? '1 prenda no cabe en el catálogo del celular'
+                            : `${vista.catalogo_recortado} prendas no caben en el catálogo del celular`}
+                    </p>
+                    <p style={{ fontSize: 11, color: 'var(--t3)', lineHeight: 1.5 }}>
+                        El teléfono recibe las primeras por orden de nombre. Las que quedan fuera no
+                        aparecen ahí para contarlas: hay que darles de baja lo que ya no se vende, o
+                        contarlas desde la computadora.
+                    </p>
+                </div>
+            )}
+
             {vista && vista.rechazadas_total > 0 && (
                 <div style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 14, background: 'rgba(245,168,66,0.08)', border: '1px solid rgba(245,168,66,0.22)' }}>
                     <p style={{ fontSize: 12, color: 'var(--t2)', fontWeight: 700, marginBottom: 6 }}>

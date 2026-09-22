@@ -289,7 +289,17 @@ el error si no se pudo. Es lo primero que hay que leer cuando algo no aparece.
 | Qué pasa | Lo capturado: nombre, precio, tallas, colores, piezas y fotos. Y el catálogo para poder contar: nombres, códigos y tallas, **sin existencias** |
 | Qué no pasa nunca | Ventas, clientes, caja, inventario. El punto de venta solo baja; no expone nada |
 | Cuánto se queda | Lo normal es segundos: se recoge, se confirma y se borra. Lo que nadie recoja caduca solo a los 30 días (el catálogo, a los 60) |
-| Cuánto cabe | 8 MB por captura, 5 MB el catálogo |
+| Cuánto cabe | 8 MB por captura, 5 MB el catálogo, 5 000 prendas |
+
+El catálogo lleva las primeras 5 000 prendas activas por orden de nombre. Una
+prenda que no está en él no se puede contar desde el celular, y desde el teléfono
+eso se ve igual que si no existiera, así que la pantalla de captura **avisa**
+cuántas quedaron fuera si alguna vez pasa.
+
+Un conteo que llega sin talla para una prenda que sí tiene tallas se rechaza: el
+total de ese producto es la suma de sus tallas, y escribirlo directo rompe esa
+cuenta sin que nada lo delate. Pasa cuando el catálogo del teléfono es más viejo
+que las tallas; el mensaje pide volver a escanear el QR.
 
 El borrado va **después** de que la captura quedó guardada en la tienda, nunca
 antes: entre el relevo y la base de datos de la tienda, la copia que importa es
@@ -358,6 +368,14 @@ mientras la dirección y las rutas no cambien. Los detalles de dentro están en
 Dentro de esa carpeta: `things_shop.db` (base de datos), `backups/` (respaldos
 rotados) y `things-shop.log` (bitácora, rotada a los 5 MB).
 
+Todas las copias —el respaldo automático al cerrar turno, el manual y la que se
+lleva a la USB— se hacen con `VACUUM INTO` y no copiando el archivo. Copiar el
+`.db` se lleva solo lo que ya bajó a él y deja fuera lo que sigue en el `-wal`,
+que es justo lo último que se vendió; y un `wal_checkpoint` antes de copiar no
+alcanza, porque cuando no puede lo avisa en un renglón en vez de en un error.
+Cada copia se abre y se le corre `PRAGMA quick_check` antes de darla por buena:
+un respaldo dañado tiene que doler el día que se hace, no el día que hace falta.
+
 ### Nada del negocio se borra
 
 No depende de que cada pantalla lo haga bien: lo garantiza la base de datos, con
@@ -378,6 +396,12 @@ detiene. Por eso, antes de reemplazarla, la app guarda una copia completa de la
 base actual en `backups/antes-de-restaurar_<fecha>.db` —con `VACUUM INTO`, que
 incluye lo que todavía estaba en el `-wal`— y si esa copia falla, no restaura.
 Esa copia sale en la lista de respaldos y la rotación nunca la borra.
+
+El respaldo elegido se revisa **antes** de prepararlo: tiene que abrirse como
+base de datos, pasar `quick_check` y traer las migraciones de Things Shop. Un
+archivo dañado se preparaba igual y la aplicación se cerraba con un aviso de
+error en cada arranque, con la tienda parada y la única salida por línea de
+comandos.
 
 La restauración se aplica al arrancar, así que la app **se reinicia sola** en
 cuanto queda preparada. Si por algo no se reinicia, una restauración preparada
@@ -467,6 +491,16 @@ fondo de apertura
 
 Cada uno de esos movimientos se registra contra el turno abierto en el momento en
 que ocurre, y el desglose se muestra al cerrar la caja.
+
+### De dónde sale la utilidad
+
+Del costo que se guardó en la partida al vender (`sale_items.unit_cost`), no del
+costo de hoy. Las ventas anteriores a que existiera esa columna no lo traen, y
+caían al costo actual del producto: subirle el costo a una prenda reescribía hacia
+atrás la utilidad de todos los meses en que se vendía más barata. Para esas
+partidas se busca en el historial de costos (`price_history` con `tipo = 'costo'`)
+el primer cambio posterior a la venta —su `old_price` es lo que costaba ese día— y
+solo si no hay ninguno se usa el costo actual, que entonces sí es el mismo.
 
 ## Seguridad
 

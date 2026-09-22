@@ -2,6 +2,7 @@
  * Una sesión vencida a media jornada tiene que sacar a la pantalla de inicio,
  * no dejar la caja fallando con el mismo mensaje en cada acción.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const tauriInvoke = vi.fn();
@@ -40,5 +41,25 @@ describe('la sesión vencida', () => {
         await expect(getSales()).rejects.toBe('Stock insuficiente');
 
         expect(useSessionStore.getState().user).not.toBeNull();
+    });
+});
+
+describe('el mensaje que la reconoce', () => {
+    it('es el que de verdad manda el backend', () => {
+        // `esSesionVencida` busca una frase dentro del texto que devuelve Rust.
+        // Nada ataba las dos puntas: reescribir el mensaje en `session.rs` dejaba
+        // la pantalla sin sacar a nadie a iniciar sesión, en silencio, y esta misma
+        // prueba seguía pasando porque tenía los mensajes copiados a mano.
+        const rust = readFileSync('src-tauri/src/session.rs', 'utf-8');
+        const resolver = rust.slice(rust.indexOf('fn resolver'));
+        const fin = resolver.indexOf('\n}');
+        const cuerpo = resolver.slice(0, fin > 0 ? fin : undefined);
+
+        const mensajes = [...cuerpo.matchAll(/Err\("([^"]+)"\.to_string\(\)\)/g)].map(m => m[1]);
+
+        expect(mensajes.length).toBeGreaterThanOrEqual(2);
+        for (const mensaje of mensajes) {
+            expect(esSesionVencida(mensaje), `el backend dice "${mensaje}" y la pantalla no lo reconoce`).toBe(true);
+        }
     });
 });

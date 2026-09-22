@@ -181,16 +181,21 @@ pub fn registrar_compra(
         return Err("El costo de compra no puede ser negativo".to_string());
     }
 
-    let (current_stock, has_variants, costo_antes): (i32, i32, f64) = db
+    let (current_stock, has_variants, costo_antes, nombre, activo): (i32, i32, f64, String, bool) = db
         .query_row(
-            "SELECT stock, has_variants, purchase_price FROM products WHERE id = ?1",
+            "SELECT stock, has_variants, purchase_price, name, is_active FROM products WHERE id = ?1",
             params![data.product_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .map_err(|_| "El producto no existe".to_string())?;
 
     if has_variants == 1 {
         return Err("Este producto usa variantes; recibe la compra por talla/color en Productos".to_string());
+    }
+    // Meterle mercancía a una prenda dada de baja la deja con existencia que no
+    // se puede vender ni aparece en ninguna lista: se pierde de vista.
+    if !activo {
+        return Err(format!("'{}' está dado de baja: reactívalo antes de recibirle mercancía.", nombre));
     }
 
     let new_stock = current_stock + data.quantity;
@@ -241,7 +246,17 @@ pub fn get_low_stock_products(
 ) -> Result<Vec<crate::models::product::Product>, String> {
     require_auth(&sessions, &token)?;
     let db = state.conn();
+    poco_stock(&db)
+}
 
+/// Núcleo del aviso de stock bajo, con la conexión explícita.
+///
+/// Descarta lo que ya se descartó (`low_stock_ignored`). El panel no lo miraba y
+/// la lista de productos y las notificaciones sí: apagar un aviso lo callaba en
+/// dos lugares de tres, y volvía a aparecer donde más se ve.
+pub(crate) fn poco_stock(
+    db: &rusqlite::Connection,
+) -> Result<Vec<crate::models::product::Product>, String> {
     let mut stmt = db.prepare(
         "SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id,
                 p.purchase_price, p.sale_price, p.stock, p.min_stock, p.is_active,
@@ -250,7 +265,7 @@ pub fn get_low_stock_products(
          FROM products p
          LEFT JOIN categories c ON p.category_id = c.id
          LEFT JOIN suppliers s ON p.supplier_id = s.id
-         WHERE p.stock <= p.min_stock AND p.is_active = 1
+         WHERE p.stock <= p.min_stock AND p.is_active = 1 AND p.low_stock_ignored = 0
          ORDER BY p.stock ASC"
     ).map_err(|e| e.to_string())?;
 
@@ -453,4 +468,53 @@ mod tests {
         assert_eq!(de_venta, 0);
     }
 
+    #[test]
+    fn el_aviso_de_stock_bajo_respeta_lo_que_ya_se_descarto() {
+        // Apagar el aviso lo callaba en la lista de productos y en las
+        // notificaciones, pero el panel lo seguía enseñando.
+        let db = tienda();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, min_stock)
+             VALUES (90, 'BAJO', 'Se acaba', 1, 2, 1, 5), (91, 'MUDO', 'Ya lo sé', 1, 2, 1, 5)",
+            [],
+        ).unwrap();
+        db.execute("UPDATE products SET low_stock_ignored = 1 WHERE id = 91", []).unwrap();
+
+        let avisados: Vec<String> = poco_stock(&db).unwrap().into_iter().map(|p| p.sku).collect();
+
+        assert!(avisados.contains(&"BAJO".to_string()));
+        assert!(!avisados.contains(&"MUDO".to_string()), "lo descartado no vuelve: {:?}", avisados);
+    }
+
+    #[test]
+    fn el_aviso_de_stock_bajo_deja_fuera_lo_dado_de_baja() {
+        let db = tienda();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, min_stock, is_active)
+             VALUES (92, 'RETIRADO', 'Ya no', 1, 2, 0, 5, 0)",
+            [],
+        ).unwrap();
+
+        let avisados: Vec<String> = poco_stock(&db).unwrap().into_iter().map(|p| p.sku).collect();
+        assert!(!avisados.contains(&"RETIRADO".to_string()));
+    }
+
+    #[test]
+    fn no_se_le_recibe_mercancia_a_una_prenda_dada_de_baja() {
+        // Quedaba con existencia que no se puede vender ni sale en ninguna lista.
+        let db = tienda();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, is_active)
+             VALUES (93, 'FUERA', 'Ya no se vende', 10, 20, 0, 0)",
+            [],
+        ).unwrap();
+
+        let e = registrar_compra(&db, 1, RegisterPurchaseDto {
+            product_id: 93, quantity: 5, purchase_price: None,
+        }).unwrap_err();
+
+        assert!(e.contains("dado de baja"), "mensaje inesperado: {}", e);
+        let stock: i32 = db.query_row("SELECT stock FROM products WHERE id = 93", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 0);
+    }
 }

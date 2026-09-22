@@ -107,17 +107,26 @@ pub fn aplicar_conteo(
         return Ok(ResultadoConteo { sku, etiqueta, antes, despues, movido_mientras: movido });
     }
 
-    let (product_id, nombre, activo): (i64, String, bool) = db
+    let (product_id, nombre, activo, con_tallas): (i64, String, bool, bool) = db
         .query_row(
-            "SELECT id, name, is_active FROM products WHERE sku = ?1",
+            "SELECT id, name, is_active, has_variants = 1 FROM products WHERE sku = ?1",
             params![entrada.sku.trim()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .map_err(|_| format!("El producto {} ya no existe", entrada.sku))?;
     // El catálogo del teléfono puede tener días: la prenda pudo darse de baja
     // mientras tanto, y contarla le movía la existencia a algo que ya no se vende.
     if !activo {
         return Err(format!("'{}' está dado de baja; su conteo no se aplicó", nombre));
+    }
+    // El total de un producto con tallas es la suma de sus tallas: escribirlo
+    // directo rompe esa cuenta y nada lo delata hasta el siguiente conteo por
+    // talla. Pasa cuando el catálogo del celular es más viejo que las tallas.
+    if con_tallas && entrada.variant_id.is_none() {
+        return Err(format!(
+            "'{}' ahora se cuenta por tallas; vuelve a escanear el código de la computadora para traer el catálogo al día",
+            nombre
+        ));
     }
 
     let (etiqueta, stock_antes) = match entrada.variant_id {
@@ -390,6 +399,25 @@ mod tests {
         let m: i32 = db.query_row("SELECT stock FROM product_variants WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(m, 5);
         assert_eq!(stock(&db), 17, "el total es la suma de las tallas");
+    }
+
+    #[test]
+    fn un_conteo_sin_talla_no_pisa_el_total_de_un_producto_con_tallas() {
+        // El catálogo del celular puede tener semanas: una prenda que ganó tallas
+        // después sigue apareciendo sin ellas. El conteo caía sobre el total del
+        // producto, que es la suma de sus tallas, y esa suma dejaba de cuadrar sin
+        // que nada lo dijera. `ajustar_stock` sí se niega; esto no lo hacía.
+        let db = tienda();
+        con_tallas(&db);
+
+        let e = aplicar_conteo(&db, Some(1), &conteo(5, "2026-01-01 15:00:00")).unwrap_err();
+
+        assert!(e.contains("tallas"), "mensaje inesperado: {}", e);
+        assert_eq!(stock(&db), 20, "el total no se toca");
+        assert_eq!(stock_de(&db, 1), 8);
+        assert_eq!(stock_de(&db, 2), 12);
+        let conteos: i64 = db.query_row("SELECT COUNT(*) FROM conteos", [], |r| r.get(0)).unwrap();
+        assert_eq!(conteos, 0, "no queda anotado como aplicado");
     }
 
     /// Deja el producto con dos tallas y devuelve sus ids.

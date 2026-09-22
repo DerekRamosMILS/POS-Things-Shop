@@ -218,11 +218,27 @@ pub fn update_user(state: State<DbState>, sessions: State<SessionState>, token: 
     require_admin(&sessions, &token)?;
     let db = state.conn();
 
+    let cerrar_sesiones = editar_usuario(&db, &data)?;
+
+    // A deactivated or demoted user must not keep an open session.
+    if cerrar_sesiones {
+        db.execute("DELETE FROM sessions WHERE user_id = ?1", params![data.id]).ok();
+        if let Ok(mut map) = sessions.sessions.lock() {
+            map.retain(|_, s| s.user_id != data.id);
+        }
+    }
+
+    Ok(())
+}
+
+/// Núcleo de la edición, con la conexión explícita. Devuelve si hay que cerrarle
+/// las sesiones abiertas.
+pub fn editar_usuario(db: &rusqlite::Connection, data: &UpdateUserDto) -> Result<bool, String> {
     // Never allow removing the last active administrator.
-    let cur_role: String = db.query_row(
-        "SELECT role FROM users WHERE id = ?1",
+    let (cur_username, cur_role): (String, String) = db.query_row(
+        "SELECT username, role FROM users WHERE id = ?1",
         params![data.id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
 
     let losing_admin = cur_role == "admin" && (data.role != "admin" || !data.is_active);
@@ -237,19 +253,45 @@ pub fn update_user(state: State<DbState>, sessions: State<SessionState>, token: 
         }
     }
 
-    db.execute(
-        "UPDATE users SET username=?1, full_name=?2, role=?3, is_active=?4, updated_at=datetime('now','localtime') WHERE id=?5",
-        params![data.username, data.full_name, data.role, data.is_active as i32, data.id],
-    ).map_err(|e| e.to_string())?;
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        db.execute(
+            "UPDATE users SET username=?1, full_name=?2, role=?3, is_active=?4, updated_at=datetime('now','localtime') WHERE id=?5",
+            params![data.username, data.full_name, data.role, data.is_active as i32, data.id],
+        ).map_err(|e| e.to_string())?;
 
-    // A deactivated or demoted user must not keep an open session.
-    if !data.is_active || data.role != cur_role {
-        db.execute("DELETE FROM sessions WHERE user_id = ?1", params![data.id]).ok();
-        if let Ok(mut map) = sessions.sessions.lock() {
-            map.retain(|_, s| s.user_id != data.id);
+        if data.username != cur_username {
+            mover_bloqueo(db, &cur_username, &data.username)?;
         }
-    }
+        Ok(())
+    })();
 
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    crate::db::connection::confirmar(db)?;
+
+    Ok(!data.is_active || data.role != cur_role)
+}
+
+/// Le pasa al nombre nuevo el bloqueo por intentos fallidos del nombre viejo.
+///
+/// El bloqueo se guarda por nombre de usuario, no por id: al renombrar a alguien
+/// se quedaba colgado de un nombre que ya nadie usa, así que una cuenta bloqueada
+/// se destrababa con solo cambiarle el nombre. Si el nombre nuevo ya traía lo
+/// suyo, se queda con lo más estricto de los dos.
+fn mover_bloqueo(db: &rusqlite::Connection, viejo: &str, nuevo: &str) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO login_attempts (username, failures, locked_until)
+         SELECT ?2, failures, locked_until FROM login_attempts WHERE username = ?1
+         ON CONFLICT(username) DO UPDATE SET
+             failures = MAX(failures, excluded.failures),
+             locked_until = MAX(locked_until, excluded.locked_until)",
+        params![viejo, nuevo],
+    ).map_err(|e| e.to_string())?;
+    db.execute("DELETE FROM login_attempts WHERE username = ?1", params![viejo])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -597,5 +639,94 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    fn usuario(conn: &rusqlite::Connection, id: i64, nombre: &str, rol: &str) {
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role) VALUES (?1, ?2, 'x', ?2, ?3)",
+            params![id, nombre, rol],
+        ).unwrap();
+    }
+
+    fn bloqueo(conn: &rusqlite::Connection, nombre: &str) -> Option<(i64, i64)> {
+        conn.query_row(
+            "SELECT failures, locked_until FROM login_attempts WHERE username = ?1",
+            params![nombre],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).ok()
+    }
+
+    #[test]
+    fn renombrar_a_alguien_no_le_quita_el_bloqueo() {
+        // El bloqueo se guarda por nombre, no por id: al renombrar se quedaba
+        // colgado de un nombre que ya nadie usa y la cuenta se destrababa sola.
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+        usuario(&conn, 2, "ana", "cashier");
+        let hasta = now_ts() + 300;
+        conn.execute(
+            "INSERT INTO login_attempts (username, failures, locked_until) VALUES ('ana', 5, ?1)",
+            params![hasta],
+        ).unwrap();
+
+        editar_usuario(&conn, &UpdateUserDto {
+            id: 2, username: "ana.lopez".to_string(), full_name: "Ana López".to_string(),
+            role: "cashier".to_string(), is_active: true,
+        }).unwrap();
+
+        assert_eq!(bloqueo(&conn, "ana"), None, "no se queda colgado del nombre viejo");
+        assert_eq!(bloqueo(&conn, "ana.lopez"), Some((5, hasta)), "el bloqueo sigue a la cuenta");
+        assert!(lockout_remaining(&conn, "ana.lopez") > 0);
+    }
+
+    #[test]
+    fn al_renombrar_se_queda_lo_mas_estricto_de_los_dos_bloqueos() {
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+        usuario(&conn, 2, "ana", "cashier");
+        let lejos = now_ts() + 900;
+        conn.execute(
+            "INSERT INTO login_attempts (username, failures, locked_until) VALUES ('ana', 2, ?1), ('ana.lopez', 5, ?2)",
+            params![now_ts() + 60, lejos],
+        ).unwrap();
+
+        editar_usuario(&conn, &UpdateUserDto {
+            id: 2, username: "ana.lopez".to_string(), full_name: "Ana".to_string(),
+            role: "cashier".to_string(), is_active: true,
+        }).unwrap();
+
+        assert_eq!(bloqueo(&conn, "ana.lopez"), Some((5, lejos)));
+    }
+
+    #[test]
+    fn sin_cambiar_el_nombre_el_bloqueo_se_queda_donde_estaba() {
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+        usuario(&conn, 2, "ana", "cashier");
+        conn.execute(
+            "INSERT INTO login_attempts (username, failures, locked_until) VALUES ('ana', 3, 0)", [],
+        ).unwrap();
+
+        editar_usuario(&conn, &UpdateUserDto {
+            id: 2, username: "ana".to_string(), full_name: "Ana María".to_string(),
+            role: "cashier".to_string(), is_active: true,
+        }).unwrap();
+
+        assert_eq!(bloqueo(&conn, "ana"), Some((3, 0)));
+    }
+
+    #[test]
+    fn no_se_puede_quedar_la_tienda_sin_administrador() {
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+
+        let e = editar_usuario(&conn, &UpdateUserDto {
+            id: 1, username: "jefa".to_string(), full_name: "Jefa".to_string(),
+            role: "cashier".to_string(), is_active: true,
+        }).unwrap_err();
+
+        assert!(e.contains("administrador"), "mensaje inesperado: {}", e);
+        let rol: String = conn.query_row("SELECT role FROM users WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(rol, "admin", "no se le cambió el rol");
     }
 }

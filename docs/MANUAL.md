@@ -101,7 +101,9 @@ Se crean solos al cerrar la caja, si está activado en Ajustes. También se pued
 crear a mano y exportar a una memoria USB.
 
 **Restaurar reemplaza todo lo posterior al respaldo.** El cambio se aplica al
-reiniciar la aplicación, no en el momento.
+reiniciar la aplicación, no en el momento. Antes de reemplazar nada se guarda una
+copia de la base como está, así que restaurar el respaldo equivocado se puede
+deshacer. Si el respaldo elegido está dañado, la aplicación lo dice y no lo usa.
 
 ### Configuración que conviene revisar
 

@@ -399,6 +399,8 @@ export interface VistaRelevo {
     estado: EstadoRelevo;
     rechazadas: CapturaRechazada[];
     rechazadas_total: number;
+    /** Prendas activas que no cupieron en el catálogo del teléfono. */
+    catalogo_recortado: number;
 }
 
 export interface ProductImage {

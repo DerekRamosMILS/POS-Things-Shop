@@ -95,15 +95,11 @@ pub fn set_config(state: State<DbState>, sessions: State<SessionState>, token: S
     if es_privada(&key) {
         return Err("Ese valor no se puede cambiar desde aquí".to_string());
     }
-    let value = validar_valor(&key, &value)?;
     let db = state.conn();
-
-    db.execute(
-        "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES (?1, ?2, datetime('now','localtime'))",
-        params![key, value],
-    ).map_err(|e| e.to_string())?;
-
-    Ok(())
+    // Por el mismo camino que la pantalla: este tenía su propio SQL con un
+    // `INSERT OR REPLACE`, que en SQLite borra el renglón y lo vuelve a insertar.
+    // Como no nombraba `description`, la descripción del ajuste se perdía.
+    guardar_ajustes(&db, std::slice::from_ref(&(key, value)))
 }
 
 /// Guarda varios ajustes juntos: todos o ninguno.
@@ -233,6 +229,35 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run_migrations(&conn).unwrap();
         conn
+    }
+
+    fn descripcion(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT description FROM system_config WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn guardar_un_ajuste_no_le_borra_la_descripcion() {
+        // `INSERT OR REPLACE` borra el renglón y lo vuelve a insertar: al no
+        // nombrar `description`, la dejaba en nulo. Y lo que se borra no vuelve.
+        let conn = db();
+        assert_eq!(descripcion(&conn, "tax_rate").as_deref(), Some("Tasa de impuesto (0-100)"));
+
+        guardar_ajustes(&conn, &[("tax_rate".to_string(), "16".to_string())]).unwrap();
+
+        assert_eq!(
+            conn.query_row("SELECT value FROM system_config WHERE key = 'tax_rate'", [], |r| r.get::<_, String>(0)).unwrap(),
+            "16"
+        );
+        assert_eq!(
+            descripcion(&conn, "tax_rate").as_deref(),
+            Some("Tasa de impuesto (0-100)"),
+            "la descripción tiene que sobrevivir"
+        );
     }
 
     fn bitacora(conn: &rusqlite::Connection) -> Vec<String> {

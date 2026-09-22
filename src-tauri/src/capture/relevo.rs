@@ -152,6 +152,22 @@ pub(crate) struct TallaParaContar {
     etiqueta: String,
 }
 
+/// Cuántas prendas caben en el catálogo que se le manda al teléfono.
+///
+/// El tope es del relevo, que no acepta un cuerpo mayor a unos megas. Sin fotos
+/// caben de sobra para una tienda de ropa, pero el recorte tiene que decirse:
+/// una prenda que no está en el catálogo no se puede contar desde el celular, y
+/// desde el teléfono eso se ve igual que si no existiera.
+pub(crate) const TOPE_CATALOGO: i64 = 5000;
+
+/// Cuántas prendas activas se quedaron fuera del catálogo por el tope.
+pub(crate) fn prendas_fuera_del_catalogo(db: &Connection) -> i64 {
+    let activas: i64 = db
+        .query_row("SELECT COUNT(*) FROM products WHERE is_active = 1", [], |r| r.get(0))
+        .unwrap_or(0);
+    (activas - TOPE_CATALOGO).max(0)
+}
+
 /// Lo que el teléfono necesita para contar: nombres, códigos y tallas.
 ///
 /// **Sin existencias.** Lo que la caja cree que hay es inventario, y el
@@ -159,7 +175,10 @@ pub(crate) struct TallaParaContar {
 /// al perchero ve la verdad, y la caja le suma después lo vendido mientras tanto.
 pub(crate) fn catalogo_para_contar(db: &Connection) -> Result<Vec<PrendaParaContar>, String> {
     let mut stmt = db
-        .prepare("SELECT id, sku, name FROM products WHERE is_active = 1 ORDER BY name ASC, id ASC LIMIT 5000")
+        .prepare(&format!(
+            "SELECT id, sku, name FROM products WHERE is_active = 1 ORDER BY name ASC, id ASC LIMIT {}",
+            TOPE_CATALOGO
+        ))
         .map_err(|e| e.to_string())?;
     let filas: Vec<(i64, String, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
@@ -661,6 +680,8 @@ pub struct VistaRelevo {
     estado: EstadoRelevo,
     rechazadas: Vec<CapturaRechazada>,
     rechazadas_total: i64,
+    /// Prendas activas que no cupieron en el catálogo del teléfono, si alguna.
+    catalogo_recortado: i64,
 }
 
 fn vista(db: &Connection, relevo: &RelevoState) -> Result<VistaRelevo, String> {
@@ -695,6 +716,7 @@ fn vista(db: &Connection, relevo: &RelevoState) -> Result<VistaRelevo, String> {
         estado: relevo.estado(),
         rechazadas,
         rechazadas_total,
+        catalogo_recortado: prendas_fuera_del_catalogo(db),
     })
 }
 
@@ -865,6 +887,30 @@ mod tests {
         assert_eq!(url_del_relevo(&conn), URL_PREDETERMINADA);
         guardar(&conn, CLAVE_URL, "https://otro.ejemplo///", "").unwrap();
         assert_eq!(url_del_relevo(&conn), "https://otro.ejemplo");
+    }
+
+    #[test]
+    fn el_catalogo_avisa_cuando_no_cupieron_todas_las_prendas() {
+        // Una prenda fuera del catálogo no se puede contar desde el celular, y
+        // desde el teléfono se ve igual que si no existiera. El recorte era mudo.
+        let conn = db();
+        let mut sql = String::from("INSERT INTO products (sku, name, purchase_price, sale_price, stock) VALUES ");
+        let cuantas = TOPE_CATALOGO + 2;
+        for n in 0..cuantas {
+            if n > 0 { sql.push(','); }
+            sql.push_str(&format!("('S{n}','P{n}',1,2,1)"));
+        }
+        conn.execute_batch(&sql).unwrap();
+
+        assert_eq!(catalogo_para_contar(&conn).unwrap().len() as i64, TOPE_CATALOGO);
+        let fuera = prendas_fuera_del_catalogo(&conn);
+        assert!(fuera >= 2, "debe avisar de las que se quedaron fuera, dijo {}", fuera);
+    }
+
+    #[test]
+    fn sin_pasarse_del_tope_no_hay_nada_que_avisar() {
+        let conn = db();
+        assert_eq!(prendas_fuera_del_catalogo(&conn), 0);
     }
 
     #[test]

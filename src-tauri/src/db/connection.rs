@@ -156,6 +156,30 @@ pub const PENDING_RESTORE_CUANDO: &str = "things_shop.db.restore-pending.cuando"
 /// actualización— dejaba fuera de la vista todo lo vendido entretanto.
 pub const VIGENCIA_RESTAURACION_SEGUNDOS: i64 = 15 * 60;
 
+/// Comprueba que un archivo sirve como respaldo de esta aplicación.
+///
+/// Sin esto solo se miraba el nombre. Un archivo dañado o que no era una base se
+/// preparaba igual, se ponía en su lugar al arrancar y entonces `init_db` fallaba:
+/// la aplicación abría un aviso de error y se cerraba, en cada arranque, con la
+/// tienda parada y la única salida por línea de comandos a 2000 km. Se revisa
+/// aquí, que es donde todavía hay alguien enfrente a quien decírselo.
+pub fn revisar_respaldo(archivo: &std::path::Path) -> Result<(), String> {
+    revisar(archivo).map_err(|_| {
+        "Ese archivo no se puede leer como base de datos: está dañado o no es un respaldo.".to_string()
+    })?;
+
+    let conn = Connection::open(archivo).map_err(|e| e.to_string())?;
+    let migraciones: i64 = conn
+        .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
+        .map_err(|_| {
+            "Ese archivo es una base de datos, pero no de Things Shop.".to_string()
+        })?;
+    if migraciones == 0 {
+        return Err("Ese respaldo está vacío: no tiene nada que restaurar.".to_string());
+    }
+    Ok(())
+}
+
 /// Deja un respaldo preparado para aplicarse al reiniciar, con su hora.
 pub fn preparar_restauracion(db_dir: &std::path::Path, origen: &std::path::Path) -> Result<(), String> {
     fs::copy(origen, db_dir.join(PENDING_RESTORE))
@@ -240,6 +264,33 @@ pub fn apply_pending_restore(db_path: &std::path::Path) {
 /// rotación de respaldos no la toca nunca.
 pub const PREFIJO_ANTES_DE_RESTAURAR: &str = "antes-de-restaurar_";
 
+/// Deja en `destino` una copia consistente de la base abierta, ya revisada.
+///
+/// Con `VACUUM INTO` y no copiando el archivo. Copiar el `.db` se lleva solo lo
+/// que ya bajó a él y deja fuera lo que todavía vive en el `-wal`, que es
+/// justamente lo último que se vendió. Un `wal_checkpoint` antes de copiar no
+/// alcanza: cuando no puede, lo dice en un renglón y no con un error, así que el
+/// aviso se pierde y la copia sale incompleta sin que nadie se entere.
+///
+/// La copia nace además compactada, y se revisa antes de darla por buena: un
+/// respaldo dañado tiene que doler hoy, no el día que hace falta.
+pub fn copia_consistente(db: &Connection, destino: &std::path::Path) -> Result<(), String> {
+    db.execute("VACUUM INTO ?1", [destino.to_string_lossy().to_string()])
+        .map_err(|e| e.to_string())?;
+    revisar(destino)
+}
+
+/// Abre un archivo de base y comprueba que está sano.
+pub fn revisar(archivo: &std::path::Path) -> Result<(), String> {
+    let revision: String = Connection::open(archivo)
+        .and_then(|c| c.query_row("PRAGMA quick_check", [], |r| r.get(0)))
+        .map_err(|e| e.to_string())?;
+    if revision != "ok" {
+        return Err(format!("la copia salió dañada: {}", revision));
+    }
+    Ok(())
+}
+
 /// Guarda la base actual en `backups/` antes de que un respaldo la reemplace.
 ///
 /// Con `VACUUM INTO` y no copiando el archivo: lo último que se vendió puede
@@ -261,16 +312,7 @@ fn guardar_antes_de_restaurar(db_path: &std::path::Path) -> Result<Option<PathBu
     }
 
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-    conn.execute("VACUUM INTO ?1", [destino.to_string_lossy().to_string()])
-        .map_err(|e| e.to_string())?;
-    drop(conn);
-
-    let revision: String = Connection::open(&destino)
-        .and_then(|c| c.query_row("PRAGMA quick_check", [], |r| r.get(0)))
-        .map_err(|e| e.to_string())?;
-    if revision != "ok" {
-        return Err(format!("la copia salió dañada: {}", revision));
-    }
+    copia_consistente(&conn, &destino)?;
     Ok(Some(destino))
 }
 
