@@ -1,5 +1,5 @@
 // Guardado de la página para que abra sin la computadora.
-const CACHE = 'things-shop-captura-v5';
+const CACHE = 'things-shop-captura-v6';
 const CONCHA = '/';
 
 // Lo que se guarda de entrada. La página es lo único imprescindible; el resto
@@ -92,8 +92,14 @@ self.addEventListener('fetch', (e) => {
         if (r && r.ok) {
           const copia = r.clone();
           caches.open(CACHE).then((c) => c.put(CONCHA, copia)).catch(() => {});
+          return r;
         }
-        return r;
+        // Contestó, pero mal: el relevo caído, Cloudflare con su propia página de
+        // error, un despliegue a medias. Entregar eso dejaba al teléfono mirando
+        // un error en lugar de la captura, y con ella se volvía inalcanzable la
+        // cola de lo ya capturado, que vive dentro de la página. Una respuesta
+        // rota no es mejor que la copia guardada: es peor.
+        return (await conchaGuardada()) || paginaSinConexion();
       } catch (err) {
         return (await conchaGuardada()) || paginaSinConexion();
       }

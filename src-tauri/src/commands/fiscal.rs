@@ -170,20 +170,42 @@ pub fn exportar_pendientes_factura(
 ) -> Result<usize, String> {
     require_admin(&sessions, &token)?;
     let db = state.conn();
+    let csv = armar_csv_pendientes(&db, desde.as_deref(), hasta.as_deref())?;
+    let count = csv.lines().count().saturating_sub(1);
 
+    std::fs::write(&path, csv).map_err(|e| format!("No se pudo guardar el archivo: {}", e))?;
+    log::info!("Exportadas {} ventas pendientes de facturar a {}", count, path);
+
+    Ok(count)
+}
+
+/// Núcleo de la exportación, con la conexión explícita para poder probarlo.
+pub(crate) fn armar_csv_pendientes(
+    db: &rusqlite::Connection,
+    desde: Option<&str>,
+    hasta: Option<&str>,
+) -> Result<String, String> {
     // La marca de orden de bytes es lo que hace que Excel abra el archivo como
     // UTF-8. Sin ella, en una computadora en español "Rodríguez" llega como
     // "RodrÃ­guez" y el contador tiene que corregir la razón social a mano.
     let mut out = String::from("\u{FEFF}");
     out.push_str(
         "folio,fecha,rfc,razon_social,regimen_fiscal,cp_fiscal,uso_cfdi,\
-         subtotal,descuento,impuesto,total,forma_pago\n",
+         subtotal,descuento,impuesto,total,devuelto,forma_pago\n",
     );
 
     let mut stmt = db
         .prepare(
+            // `devuelto` va en su propia columna y los importes se dejan tal como
+            // se cobraron: una venta con devolución parcial sigue siendo
+            // 'completed' y se exportaba por su monto entero, sin que nada dijera
+            // que parte de esa mercancía ya volvió. Qué se factura y qué se
+            // acredita lo decide quien lleva la contabilidad; lo que no puede
+            // pasar es que no lo vea.
             "SELECT folio, created_at, fiscal_rfc, fiscal_razon_social, fiscal_regimen,
-                    fiscal_cp, fiscal_uso_cfdi, subtotal, discount_total, tax, total, payment_method
+                    fiscal_cp, fiscal_uso_cfdi, subtotal, discount_total, tax, total,
+                    COALESCE((SELECT SUM(r.total_refund) FROM returns r WHERE r.sale_id = sales.id), 0),
+                    payment_method
              FROM sales
              WHERE requiere_factura = 1
                AND uuid_fiscal IS NULL
@@ -208,7 +230,8 @@ pub fn exportar_pendientes_factura(
                 format!("{:.2}", r.get::<_, f64>(8)?),
                 format!("{:.2}", r.get::<_, f64>(9)?),
                 format!("{:.2}", r.get::<_, f64>(10)?),
-                r.get::<_, String>(11)?,
+                format!("{:.2}", r.get::<_, f64>(11)?),
+                r.get::<_, String>(12)?,
             ])
         })
         .map_err(|e| e.to_string())?
@@ -216,16 +239,12 @@ pub fn exportar_pendientes_factura(
         .map_err(|e| e.to_string())?;
     drop(stmt);
 
-    let count = rows.len();
     for row in rows {
         out.push_str(&row.iter().map(|f| csv_field(f)).collect::<Vec<_>>().join(","));
         out.push('\n');
     }
 
-    std::fs::write(&path, out).map_err(|e| format!("No se pudo guardar el archivo: {}", e))?;
-    log::info!("Exportadas {} ventas pendientes de facturar a {}", count, path);
-
-    Ok(count)
+    Ok(out)
 }
 
 /// Registra el folio fiscal que devolvió el PAC, para no volver a exportarla.
@@ -370,5 +389,96 @@ mod tests {
         assert_eq!(csv_field("Ropa y Mas, S.A."), "\"Ropa y Mas, S.A.\"");
         assert_eq!(csv_field("Simple"), "Simple");
         assert_eq!(csv_field("Dijo \"hola\""), "\"Dijo \"\"hola\"\"\"");
+    }
+
+    fn tienda_con_venta_por_facturar() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0)", []).unwrap();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (1, 'P', 'P', 50.0, 100.0, 100)",
+            [],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO customers (id, name, rfc, razon_social, regimen_fiscal, cp_fiscal, uso_cfdi)
+             VALUES (1, 'Ana', 'XAXX010101000', 'Ana Lopez', '616', '01000', 'G01')",
+            [],
+        ).unwrap();
+        db
+    }
+
+    fn vender_por_facturar(db: &rusqlite::Connection, piezas: i32) -> i64 {
+        use crate::models::sale::{CreateSaleDto, CreateSaleItemDto};
+        crate::commands::sales::registrar_venta(db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto {
+                product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
+            }],
+            payment_method: "cash".to_string(),
+            amount_paid: 100_000.0,
+            payments: vec![],
+            discount_total: 0.0,
+            promotion_id: None,
+            requiere_factura: true,
+            notes: None,
+            customer_id: Some(1),
+            client_request_id: None,
+        }).unwrap().id
+    }
+
+    #[test]
+    fn la_exportacion_dice_si_algo_de_esa_venta_ya_se_devolvio() {
+        // Una devolución parcial deja la venta como 'completed' con su total
+        // original: se exportaba entera y nada decía que parte de esa mercancía
+        // ya volvió. Quien factura no tenía cómo enterarse.
+        use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+        let db = tienda_con_venta_por_facturar();
+        let venta = vender_por_facturar(&db, 3);
+        let partida: i64 = db
+            .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![venta], |r| r.get(0))
+            .unwrap();
+        registrar_devolucion(&db, 1, CreateReturnDto {
+            sale_id: venta, reason: None, refund_method: "cash".to_string(),
+            items: vec![ReturnItemDto { sale_item_id: partida, quantity: 1 }],
+        }).unwrap();
+
+        let csv = armar_csv_pendientes(&db, None, None).unwrap();
+
+        assert!(csv.contains("total,devuelto,forma_pago"), "falta la columna: {}", csv);
+        let renglon = csv.lines().nth(1).expect("la venta tiene que salir");
+        assert!(renglon.contains("300.00,100.00"), "renglón inesperado: {}", renglon);
+    }
+
+    #[test]
+    fn una_venta_sin_devoluciones_sale_con_cero_devuelto() {
+        let db = tienda_con_venta_por_facturar();
+        vender_por_facturar(&db, 2);
+
+        let csv = armar_csv_pendientes(&db, None, None).unwrap();
+        let renglon = csv.lines().nth(1).unwrap();
+
+        assert!(renglon.contains("200.00,0.00"), "renglón inesperado: {}", renglon);
+    }
+
+    #[test]
+    fn una_venta_devuelta_entera_ya_no_se_factura() {
+        use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+        let db = tienda_con_venta_por_facturar();
+        let venta = vender_por_facturar(&db, 1);
+        let partida: i64 = db
+            .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![venta], |r| r.get(0))
+            .unwrap();
+        registrar_devolucion(&db, 1, CreateReturnDto {
+            sale_id: venta, reason: None, refund_method: "cash".to_string(),
+            items: vec![ReturnItemDto { sale_item_id: partida, quantity: 1 }],
+        }).unwrap();
+
+        let csv = armar_csv_pendientes(&db, None, None).unwrap();
+        assert_eq!(csv.lines().count(), 1, "solo el encabezado: {}", csv);
     }
 }

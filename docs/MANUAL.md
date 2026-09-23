@@ -121,7 +121,10 @@ Captura los datos fiscales del cliente en **Clientes → Datos para facturar**. 
 **Reportes → Por facturar** se exportan las ventas marcadas que aún no tienen
 folio fiscal, en CSV, para entregárselo al contador o al PAC.
 
-El sistema no timbra facturas: prepara los datos.
+El sistema no timbra facturas: prepara los datos. La columna **devuelto** dice
+cuánto de esa venta ya se le regresó al cliente: los importes van como se
+cobraron, y qué se factura y qué se acredita lo decide quien lleva la
+contabilidad.
 
 ### Cuando algo falla
 

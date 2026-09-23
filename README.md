@@ -324,6 +324,12 @@ alcance entra en la siguiente. El listado de KV es *eventualmente consistente* y
 puede enseñar algo que ya se borró, lo cual no estorba porque la tienda reconoce
 por `captura_id` lo que ya tiene.
 
+La página de captura se guarda en el teléfono para abrir sin la computadora, y se
+pide fresca en cada apertura. Si el relevo contesta **mal** —caído, un despliegue a
+medias, la página de error de Cloudflare—, se usa la guardada: entregar esa
+respuesta dejaba al teléfono mirando un error, y con él inalcanzable la cola de lo
+ya capturado, que vive dentro de la página.
+
 ### Cuando no llega algo del celular
 
 En este orden, que va de lo más probable a lo menos:
