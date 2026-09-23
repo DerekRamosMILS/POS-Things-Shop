@@ -77,6 +77,13 @@ empuja. `release.yml` corre las pruebas en un runner de Windows, construye el
 instalador, lo firma y publica el release con su `latest.json`. Unos diez
 minutos. La tienda lo recibe sola (ver la sección siguiente).
 
+El script sube la rama y la etiqueta en un solo `git push --atomic`: o viajan las dos
+o no viaja nada. Por separado había un estado intermedio malo —si fallaba el segundo
+empuje, `main` quedaba con el commit de release y sin etiqueta, nada se construía, y
+reintentar chocaba con la etiqueta local—. Y si la etiqueta ya existe porque el CI
+falló con esa versión, el script dice si está en origin o solo en local y qué hacer:
+no se reutiliza el número, se arregla y se publica la siguiente.
+
 **No etiquetes a mano.** La versión vive en `package.json`, `tauri.conf.json` y
 `Cargo.toml`, y el actualizador compara la que trae horneada el binario contra la
 que anuncia el manifiesto. Si la etiqueta va por delante de los archivos, se

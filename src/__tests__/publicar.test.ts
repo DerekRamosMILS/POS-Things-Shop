@@ -5,6 +5,7 @@
  * infinito, porque la app compara la versión que trae horneada contra la que
  * anuncia el manifiesto. Es barato de probar y caro de descubrir en producción.
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error -- script de Node sin tipos; se prueba su lógica pura.
 import { resolverVersion, esMayor } from '../../scripts/publicar.mjs';
@@ -52,5 +53,47 @@ describe('comparar versiones', () => {
 
     it('no deja retroceder', () => {
         expect(esMayor('0.1.0', '0.2.0')).toBe(false);
+    });
+});
+
+describe('cómo sube los cambios', () => {
+    /**
+     * La rama y la etiqueta viajan juntas o no viajan.
+     *
+     * Empujarlas por separado dejaba un estado intermedio malo: si fallaba el
+     * segundo `push` —un corte de red a la mitad—, `main` se quedaba con el commit
+     * de release y sin etiqueta. Nada se construye, la tienda no recibe nada, y
+     * reintentar choca con la etiqueta que ya existe en local. Quien publica lo hace
+     * cada varias semanas y no tiene por qué saber salir de eso a mano.
+     */
+    const GUION = readFileSync('scripts/publicar.mjs', 'utf-8');
+
+    it('empuja la rama y la etiqueta en una sola orden atómica', () => {
+        expect(GUION).toMatch(/'push',\s*'--atomic',\s*'origin',\s*'main'/);
+    });
+
+    it('no quedan empujes sueltos', () => {
+        const empujes = [...GUION.matchAll(/sh\('git',\s*\['push'/g)].length;
+        expect(empujes, 'un solo push: la rama y la etiqueta juntas').toBe(1);
+    });
+
+    it('se niega a publicar con cosas sin commitear o fuera de main', () => {
+        // Las dos rejas que evitan publicar algo que nadie más tiene.
+        expect(GUION).toMatch(/status', '--porcelain/);
+        expect(GUION).toMatch(/Las versiones se publican desde main/);
+        expect(GUION, 'y que main esté al día con origin').toMatch(/rev-parse', 'origin\/main/);
+    });
+
+    it('si la etiqueta ya existe, dice cómo salir de ahí', () => {
+        // Pasa cuando el CI falló después de subir la etiqueta: la versión quedó
+        // marcada y sin release. "Ya existe" a secas deja sin salida a quien publica
+        // cada varias semanas.
+        const bloque = GUION.slice(GUION.indexOf('etiquetas.includes'));
+        const hasta = bloque.indexOf('\n}');
+        const cuerpo = bloque.slice(0, hasta > 0 ? hasta : undefined);
+
+        expect(cuerpo, 'tiene que decir si está en origin o solo en local').toMatch(/ls-remote/);
+        expect(cuerpo, 'y qué hacer').toMatch(/publica la siguiente|pnpm publicar patch/);
+        expect(cuerpo, 'sin sugerir reutilizar el número').toMatch(/el actualizador solo avanza/);
     });
 });

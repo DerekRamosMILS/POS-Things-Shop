@@ -149,7 +149,16 @@ if (!esMayor(nueva, actual)) {
 
 const etiquetas = sh('git', ['tag', '--list']).split('\n');
 if (etiquetas.includes(`v${nueva}`)) {
-    morir(`La etiqueta v${nueva} ya existe.`);
+    // Pasa cuando el CI falló después de subir la etiqueta: la versión quedó
+    // marcada y sin release. Decir solo "ya existe" deja a quien publica —cada
+    // varias semanas— sin saber por dónde salir, así que se explica el camino.
+    const yaEsta = sh('git', ['ls-remote', '--tags', 'origin', `v${nueva}`]);
+    morir(
+        `La etiqueta v${nueva} ya existe${yaEsta ? ' y ya está en origin' : ' solo en local'}.\n` +
+        `      Si el CI falló con esa versión, no la reutilices: el actualizador solo avanza.\n` +
+        `      Arregla lo que falló y publica la siguiente (pnpm publicar patch).` +
+        (yaEsta ? '' : `\n      Si quieres reintentar esa misma versión, borra la etiqueta local: git tag -d v${nueva}`)
+    );
 }
 
 // ── Adelante ─────────────────────────────────────────────────────────────────
@@ -170,9 +179,14 @@ sh('git', ['add', ARCHIVOS.paquete, ARCHIVOS.tauri, ARCHIVOS.cargo, 'src-tauri/C
 sh('git', ['commit', '-m', `release: v${nueva}`]);
 sh('git', ['tag', '-a', `v${nueva}`, '-m', `Things Shop POS v${nueva}`]);
 
+// Los dos en una sola orden y con `--atomic`: o se suben la rama y la etiqueta, o
+// no se sube nada. Empujarlos por separado tenía un estado intermedio malo: si
+// fallaba el de la etiqueta —un corte de red a la mitad— `main` quedaba con el
+// commit de release y sin etiqueta. Nada se construye, la tienda no recibe nada, y
+// reintentar choca con la etiqueta que ya existe en local. Quien publica lo hace
+// cada varias semanas y no tiene por qué saber salir de eso a mano.
 console.log('  · Empujando a origin');
-sh('git', ['push', 'origin', 'main']);
-sh('git', ['push', 'origin', `v${nueva}`]);
+sh('git', ['push', '--atomic', 'origin', 'main', `v${nueva}`]);
 
 const repo = sh('git', ['remote', 'get-url', 'origin']).replace(/\.git$/, '');
 console.log(`
