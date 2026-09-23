@@ -153,25 +153,40 @@ pub fn cerrar_caja(
 ///
 /// Que falle el respaldo no puede impedir cerrar la caja: queda en la bitácora.
 fn respaldar_al_cerrar(db: &rusqlite::Connection) {
-    let activado = db
-        .query_row(
-            "SELECT value FROM system_config WHERE key = 'auto_backup'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .map(|v| matches!(v.trim(), "1" | "true" | "si" | "sí"))
-        .unwrap_or(true);
+    respaldar_turno(db, &crate::db::connection::get_db_dir().join("backups"));
+}
 
-    if !activado {
+/// Si el ajuste pide respaldar al cerrar el turno.
+///
+/// Por omisión sí: una tienda que nunca tocó el ajuste tiene que quedar
+/// respaldada, no al revés. Acepta las formas en que alguien pudo escribirlo a
+/// mano en la base.
+pub(crate) fn respaldo_automatico_activado(db: &rusqlite::Connection) -> bool {
+    db.query_row(
+        "SELECT value FROM system_config WHERE key = 'auto_backup'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|v| matches!(v.trim(), "1" | "true" | "si" | "sí"))
+    .unwrap_or(true)
+}
+
+/// Núcleo del respaldo al cerrar, con la carpeta explícita para poder probarlo.
+///
+/// Esta rutina existe porque la tienda creía tener respaldos automáticos y no
+/// tenía ninguno: el ajuste estaba en la pantalla y no lo leía nadie. Que no
+/// tuviera ni una prueba era la forma más fácil de que volviera a pasar.
+pub(crate) fn respaldar_turno(db: &rusqlite::Connection, carpeta: &std::path::Path) {
+    if !respaldo_automatico_activado(db) {
         return;
     }
 
-    // Una base en memoria —las pruebas— no tiene archivo que copiar.
+    // Una base en memoria —las pruebas que no van por aquí— no tiene archivo.
     if db.path().map(|p| p.is_empty()).unwrap_or(true) {
         return;
     }
 
-    match crate::commands::backup::perform_backup(db) {
+    match crate::commands::backup::backup_into(db, carpeta) {
         Ok(nombre) => {
             log::info!("Respaldo automático al cerrar turno: {}", nombre);
             db.execute(
@@ -541,5 +556,115 @@ mod dia_completo {
         });
         assert!(r.is_err(), "sin turno abierto no hay dónde registrar el dinero");
         let _ = &mut m;
+    }
+
+    /// Una tienda de verdad: base en disco, con turno abierto y una venta.
+    fn tienda_en_disco(dir: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(dir.join("things_shop.db")).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        conn.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 500.0)", []).unwrap();
+        conn
+    }
+
+    fn respaldos(carpeta: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(carpeta)
+            .map(|d| d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".db"))
+                .collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn cerrar_el_turno_deja_un_respaldo() {
+        // La rutina existe porque la tienda creía tener respaldos automáticos y no
+        // tenía ninguno: el ajuste estaba en la pantalla y no lo leía nadie. No
+        // tenía ni una prueba, que es la forma más fácil de que vuelva a pasar.
+        let dir = tempfile::tempdir().unwrap();
+        let conn = tienda_en_disco(dir.path());
+        let carpeta = dir.path().join("backups");
+
+        respaldar_turno(&conn, &carpeta);
+
+        assert_eq!(respaldos(&carpeta).len(), 1, "tiene que quedar el archivo");
+        let bitacora: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM app_logs WHERE module = 'respaldo' AND level = 'info'",
+                [], |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bitacora, 1, "y quedar anotado, para poder verlo de lejos");
+    }
+
+    #[test]
+    fn con_el_ajuste_apagado_no_respalda() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = tienda_en_disco(dir.path());
+        conn.execute("UPDATE system_config SET value = '0' WHERE key = 'auto_backup'", []).unwrap();
+        let carpeta = dir.path().join("backups");
+
+        respaldar_turno(&conn, &carpeta);
+
+        assert!(respaldos(&carpeta).is_empty());
+    }
+
+    #[test]
+    fn una_tienda_que_nunca_toco_el_ajuste_queda_respaldada() {
+        // Por omisión sí. Al revés sería peor: quien no sabe del ajuste es
+        // justamente quien más necesita el respaldo.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        conn.execute("DELETE FROM system_config WHERE key = 'auto_backup'", []).unwrap();
+
+        assert!(respaldo_automatico_activado(&conn));
+    }
+
+    #[test]
+    fn el_ajuste_entiende_como_lo_pudo_escribir_alguien() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        let poner = |v: &str| {
+            conn.execute("UPDATE system_config SET value = ?1 WHERE key = 'auto_backup'", params![v]).unwrap();
+        };
+
+        for si in ["1", "true", "si", "sí", " 1 "] {
+            poner(si);
+            assert!(respaldo_automatico_activado(&conn), "{:?} debería ser sí", si);
+        }
+        for no in ["0", "false", "no", ""] {
+            poner(no);
+            assert!(!respaldo_automatico_activado(&conn), "{:?} debería ser no", no);
+        }
+    }
+
+    #[test]
+    fn un_respaldo_que_falla_no_impide_cerrar_la_caja() {
+        // Cerrar el turno es lo que la tienda tiene que poder hacer siempre. Si el
+        // disco está lleno o la carpeta no se puede crear, queda en la bitácora.
+        let dir = tempfile::tempdir().unwrap();
+        let conn = tienda_en_disco(dir.path());
+        // Un archivo donde debería ir la carpeta: crearla va a fallar.
+        let carpeta = dir.path().join("backups");
+        std::fs::write(&carpeta, b"no soy una carpeta").unwrap();
+
+        respaldar_turno(&conn, &carpeta);
+
+        let fallo: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM app_logs WHERE module = 'respaldo' AND level = 'error'",
+                [], |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fallo, 1, "el fallo tiene que quedar dicho");
+
+        // Y el corte se puede cerrar igual.
+        let cerrado = cerrar_caja(&conn, 1, CloseRegisterDto { closing_amount: 500.0 }).unwrap();
+        assert_eq!(cerrado.status, "closed");
     }
 }
