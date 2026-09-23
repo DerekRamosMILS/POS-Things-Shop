@@ -60,6 +60,12 @@ jobs:
         with:
           node-version: 22
       - run: pnpm install --frozen-lockfile
+      # El relevo se despliega a Cloudflare, y `vitest` quita los tipos con esbuild
+      # sin mirarlos: sin esto, un error de tipos en el worker pasaba el CI y se
+      # publicaba. Es el único componente en producción que no se puede inspeccionar
+      # desde aquí.
+      - name: Tipos del relevo
+        run: pnpm typecheck
       - name: Pruebas del relevo
         run: pnpm test
 

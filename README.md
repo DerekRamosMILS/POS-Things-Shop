@@ -38,8 +38,16 @@ pnpm test                         # pruebas del frontend
 pnpm build                        # typecheck + bundle del frontend
 cd src-tauri && cargo test        # pruebas del backend
 cd src-tauri && cargo clippy      # linter de Rust
-cd relevo && pnpm test            # pruebas del buzón (corren en el runtime de Workers)
+cd relevo && pnpm test            # tipos + pruebas del buzón (en el runtime de Workers)
 ```
+
+Las pruebas del relevo comprueban los tipos primero. `vitest` los quita con esbuild
+**sin mirarlos**, así que un error de tipos en el worker pasaba el CI y se publicaba a
+Cloudflare —el único componente en producción que no se puede inspeccionar desde
+aquí—. Había uno: el `cursor` del listado de KV solo existe cuando el listado no está
+completo, y se desestructuraba como si estuviera siempre. En ejecución funcionaba, pero
+nada lo sostenía. Los bindings salen de `wrangler types`, no de una copia a mano que
+pueda separarse de `wrangler.jsonc`.
 
 Las pruebas del frontend corren con un `localStorage` puesto a mano
 (`src/__tests__/entorno.ts`). El entorno de jsdom no trae uno, y sin eso el

@@ -15,9 +15,10 @@
  * capturó con el teléfono y todavía no llega a su casa.
  */
 
-interface Env {
-	CAPTURAS: KVNamespace;
-}
+// `Env` y los tipos del runtime los genera `wrangler types` desde wrangler.jsonc,
+// en `worker-configuration.d.ts`. Declararlo aquí a mano lo duplicaba: agregar un
+// binding a la configuración y no tocarlo aquí dejaba las dos versiones distintas
+// sin que nada lo dijera.
 
 /** Cuánto aguanta una captura sin que nadie la recoja. */
 const CADUCIDAD_SEGUNDOS = 30 * 24 * 60 * 60;
@@ -74,7 +75,10 @@ function secretoDe(req: Request): string | null {
 }
 
 export default {
-	async fetch(req: Request, env: Env): Promise<Response> {
+	// El tercer parámetro es el que Cloudflare pasa siempre; se declara aunque hoy
+	// no se use, porque su ausencia hacía que la firma no coincidiera con la del
+	// runtime y sin comprobación de tipos eso no se notaba.
+	async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(req.url);
 		const ruta = url.pathname;
 
@@ -195,19 +199,22 @@ export default {
 		// Lo que el punto de venta todavía no se ha llevado, sin el contenido:
 		// así puede enseñar cuántas hay sin bajarse los megas de las fotos.
 		if (ruta === '/api/pendientes' && req.method === 'GET') {
-			const { keys, list_complete, cursor } = await env.CAPTURAS.list({
+			// El resultado de KV es una unión: `cursor` solo existe cuando el
+			// listado **no** está completo. Desestructurarlo a ciegas lo daba por
+			// presente siempre; sin comprobación de tipos eso pasaba callado.
+			const listado = await env.CAPTURAS.list({
 				prefix: `${carpeta}/`,
 				limit: 200,
 				cursor: url.searchParams.get('cursor') ?? undefined,
 			});
 			return json({
 				ok: true,
-				pendientes: keys.map((k) => ({
+				pendientes: listado.keys.map((k) => ({
 					captura_id: k.name.slice(carpeta.length + 1),
 					...(k.metadata as Record<string, unknown> | undefined),
 				})),
-				completo: list_complete,
-				cursor: list_complete ? null : cursor,
+				completo: listado.list_complete,
+				cursor: listado.list_complete ? null : listado.cursor,
 			});
 		}
 
