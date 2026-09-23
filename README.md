@@ -549,6 +549,24 @@ Y una nota que vale más que el arreglo: la prueba que existía afirmaba
 comportamiento correcto, así que ninguna corrida en verde iba a delatarlo. **Una
 prueba también puede proteger un bug.**
 
+### Lo que crece para siempre necesita índice
+
+Desde la 026 el historial del negocio no se borra, así que esas tablas solo crecen.
+Una consulta que las recorra sin índice se vuelve más lenta cada mes, en la
+computadora más lenta del negocio, y nada avisa: se nota como "la aplicación está
+pesada".
+
+El caso que lo destapó fue de cosecha propia. La utilidad de las partidas viejas
+—las de antes de que se guardara el costo al vender— se busca en `price_history` con
+una subconsulta por partida, y esa tabla no tenía **ningún** índice: medido sobre
+4000 cambios de costo y 3000 partidas legadas, la consulta pasa de **222 ms a 1 ms**,
+y la pantalla de Reportes carga tres de esas. La 028 agrega ese índice, el de los
+gastos por turno y el de las capturas rechazadas por fecha.
+
+La prueba `ninguna_consulta_caliente_recorre_una_tabla_que_crece` le pregunta a
+SQLite con `EXPLAIN QUERY PLAN` si va a recorrer la tabla entera, en vez de confiar en
+que los índices "se vean bien".
+
 ### Revisiones de consistencia
 
 Los arreglos impiden que se produzcan nuevas inconsistencias, pero **ninguna

@@ -112,6 +112,10 @@ fn migration_list() -> Vec<(&'static str, &'static str)> {
             "027_historial_de_costos",
             include_str!("../../migrations/027_historial_de_costos.sql"),
         ),
+        (
+            "028_indices_de_lo_que_crece",
+            include_str!("../../migrations/028_indices_de_lo_que_crece.sql"),
+        ),
     ]
 }
 
@@ -169,7 +173,9 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 27);
+        // Se actualiza a mano a propósito: si alguien agrega el archivo y olvida
+        // registrarlo en `migration_list`, o al revés, esto lo dice.
+        assert_eq!(applied, 28);
     }
 
     #[test]
@@ -179,7 +185,7 @@ mod tests {
         let applied: i64 = conn
             .query_row("SELECT COUNT(*) FROM _migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 27);
+        assert_eq!(applied, 28);
     }
 
     /// La 017 reconstruye `sales` para corregir su restricción. Una reconstrucción
@@ -530,5 +536,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!((caja, descripcion.as_str(), monto), (1, "Bolsas", 55.5));
+    }
+
+    /// Las consultas que se recorren solas sobre tablas que crecen para siempre.
+    ///
+    /// Desde la 026 el historial no se borra, así que una consulta sin índice se
+    /// vuelve más lenta cada mes en la computadora más lenta del negocio, y no hay
+    /// nada que avise: se nota como "la aplicación está pesada". El caso que motivó
+    /// esto fue de cosecha propia —la utilidad de las partidas viejas se busca en
+    /// `price_history` con una subconsulta por partida y la tabla no tenía ningún
+    /// índice: 222 ms contra 1 ms sobre 4000 cambios de costo—.
+    ///
+    /// `EXPLAIN QUERY PLAN` dice si SQLite va a recorrer la tabla entera. Se le
+    /// pregunta a él en vez de confiar en que los índices "se vean bien".
+    #[test]
+    fn ninguna_consulta_caliente_recorre_una_tabla_que_crece() {
+        let conn = fresh();
+        let calientes: [(&str, &str); 4] = [
+            (
+                "la utilidad busca el costo de cuando se vendió",
+                "SELECT ph.old_price FROM price_history ph
+                 WHERE ph.product_id = 1 AND ph.tipo = 'costo' AND ph.created_at > '2020-01-01'
+                 ORDER BY ph.created_at ASC, ph.id ASC LIMIT 1",
+            ),
+            (
+                "los gastos del turno",
+                "SELECT amount FROM expenses WHERE cash_register_id = 1",
+            ),
+            (
+                "un conteo que ya llegó antes",
+                "SELECT stock_antes FROM conteos WHERE conteo_id = 'x'",
+            ),
+            (
+                "las devoluciones de una venta",
+                "SELECT total_refund FROM returns WHERE sale_id = 1",
+            ),
+        ];
+
+        for (que, sql) in calientes {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {}", sql)).unwrap();
+            let plan: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let texto = plan.join(" | ");
+            assert!(
+                !texto.contains("SCAN"),
+                "{}: SQLite recorre la tabla entera. Falta un índice.\n  plan: {}",
+                que, texto
+            );
+        }
     }
 }
