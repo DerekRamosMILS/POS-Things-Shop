@@ -63,6 +63,17 @@ export function formatTime(date: string): string {
     });
 }
 
+/**
+ * Largo mínimo de una contraseña, el mismo que exige el backend.
+ *
+ * Estaba escrito tres veces —8 en Rust, 8 en el cambio obligatorio y 6 en la
+ * pantalla de usuarios—, y por esa tercera copia un administrador creaba una
+ * cajera con seis caracteres: la pantalla la aceptaba prometiendo que bastaban y
+ * el backend la rechazaba pidiendo ocho. La prueba `contrasena` falla si este
+ * número deja de coincidir con `MIN_PASSWORD_LEN` de `users.rs`.
+ */
+export const MIN_CONTRASENA = 8;
+
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
     return classes.filter(Boolean).join(' ');
 }

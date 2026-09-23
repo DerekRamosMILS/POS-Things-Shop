@@ -428,6 +428,22 @@ entretanto.
 La prueba `toda_tabla_tiene_decidido_si_se_puede_borrar` falla si alguien agrega
 una tabla sin decidir en cuál de estos grupos va.
 
+### Qué se puede editar en Ajustes
+
+Solo lo que tiene etiqueta en `src/pages/ajustesVisibles.ts`. La reja dibujaba toda
+clave de `system_config` que no fuera de hardware, con el nombre técnico por
+etiqueta cuando no tenía una, y por ahí se colaban cosas que no son ajustes sino
+rastro interno: `version_instalada` —que se escribe en cada arranque y es el rastro
+de si la actualización llegó—, `ultima_copia_externa` —de la que depende el aviso
+de que hace mucho no sale una copia del equipo— y la huella del catálogo del
+relevo. Editarlas a mano hace mentir a lo que se apoya en ellas.
+
+Era una lista negra de claves escondidas, y a una lista negra siempre le falta
+algo: cada clave nueva que Rust escriba aparece sola en la pantalla. Ahora es al
+revés, y la prueba `ajustesVisibles` cuida las dos puntas: que ningún rastro
+interno se ofrezca, y que ningún ajuste sembrado al arrancar se quede sin etiqueta
+y desaparezca.
+
 ### Cuando la pantalla se cae
 
 El `ErrorBoundary` evita que la cajera se quede mirando una ventana en blanco y
@@ -579,7 +595,11 @@ están `hoyLocal()` y `fechaLocal(dias)` en `src/utils`, y una prueba que falla 
 
 ## Seguridad
 
-- Contraseñas con Argon2 y salt por usuario
+- Contraseñas con Argon2 y salt por usuario, de ocho caracteres para arriba. El
+  mínimo vive en `MIN_PASSWORD_LEN` (Rust) y la pantalla lo toma de
+  `MIN_CONTRASENA`; una prueba falla si dejan de coincidir. Estaba escrito tres
+  veces y una de las copias decía seis: la pantalla aceptaba una de seis
+  prometiendo que bastaba y el backend la rechazaba pidiendo ocho
 - Sesiones con token opaco y caducidad configurable (12 h por defecto). La
   sesión se renueva con el uso: solo vence tras ese tiempo sin actividad, y
   cuando vence la app regresa sola a la pantalla de inicio

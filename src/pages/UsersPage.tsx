@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSessionStore } from '../stores/useSessionStore';
 import * as api from '../api';
+import { MIN_CONTRASENA } from '../utils';
 import type { User } from '../types';
 import { useToast } from '../contexts/ToastContext';
 
@@ -55,8 +56,8 @@ export default function UsersPage() {
 
     const handleCreate = async () => {
         if (!form.username || !form.full_name || (!editingUser && !form.password)) return;
-        if (!editingUser && form.password.length < 6) {
-            showToast('La contraseña debe tener al menos 6 caracteres', 'error'); return;
+        if (!editingUser && form.password.length < MIN_CONTRASENA) {
+            showToast(`La contraseña debe tener al menos ${MIN_CONTRASENA} caracteres`, 'error'); return;
         }
         setProcessing(true);
         try {
@@ -71,8 +72,8 @@ export default function UsersPage() {
 
     const handleChangePassword = async () => {
         if (!passwordUser || !newPassword) return;
-        if (newPassword.length < 6) {
-            showToast('La contraseña debe tener al menos 6 caracteres', 'error'); return;
+        if (newPassword.length < MIN_CONTRASENA) {
+            showToast(`La contraseña debe tener al menos ${MIN_CONTRASENA} caracteres`, 'error'); return;
         }
         setProcessing(true);
         try {

@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { useSessionStore } from '../stores/useSessionStore';
 import { useToast } from '../contexts/ToastContext';
 import * as api from '../api';
+import { MIN_CONTRASENA } from '../utils';
 
-const MIN_LENGTH = 8;
+
 
 /**
  * Blocking screen shown when the backend flags the account with
@@ -20,8 +21,8 @@ export default function ChangePasswordPage() {
 
     const submit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (next.length < MIN_LENGTH) {
-            setError(`La nueva contraseña debe tener al menos ${MIN_LENGTH} caracteres`);
+        if (next.length < MIN_CONTRASENA) {
+            setError(`La nueva contraseña debe tener al menos ${MIN_CONTRASENA} caracteres`);
             return;
         }
         if (next !== confirm) { setError('Las contraseñas no coinciden'); return; }
@@ -54,7 +55,7 @@ export default function ChangePasswordPage() {
                     </h2>
                     <p style={{ fontSize: 13, color: 'var(--t3)', marginBottom: 20 }}>
                         Por seguridad no puedes seguir con la contraseña asignada. Elige una
-                        de al menos {MIN_LENGTH} caracteres.
+                        de al menos {MIN_CONTRASENA} caracteres.
                     </p>
 
                     <form onSubmit={submit}>

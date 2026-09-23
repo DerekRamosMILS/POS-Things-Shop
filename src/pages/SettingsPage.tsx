@@ -9,6 +9,7 @@ import CategorySettings from '../components/CategorySettings';
 import TamanoSettings from '../components/TamanoSettings';
 import HardwareSettings from '../components/HardwareSettings';
 import { hoyLocal } from '../utils';
+import { ETIQUETAS_DE_AJUSTES, HARDWARE_KEYS, esAjusteVisible } from './ajustesVisibles';
 import type { SystemConfig } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
@@ -20,14 +21,9 @@ const MULTILINE_KEYS = ['ticket_footer'];
 // Kept out of the editable grid: it is plumbing, not a shop setting.
 // Fuera del formulario: son piezas internas, no ajustes de la tienda. Verlas
 // como cajitas de texto sin explicación solo invita a romper algo.
-const HIDDEN_KEYS = ['demo_seeded', 'update_endpoint', 'sku_counter', 'terminal_id'];
-// Estas se editan en su propia tarjeta, no en la reja genérica de la tienda.
-const HARDWARE_KEYS = [
-    'printer_name', 'printer_width', 'printer_auto_print',
-    'drawer_kick_command', 'drawer_open_on_cash',
-    'scanner_enabled', 'scanner_suffix', 'scanner_prefix',
-    'scanner_max_gap_ms', 'scanner_min_length',
-];
+// Lo que se puede editar y cómo se llama vive aparte, para poder probarlo: antes
+// era una lista negra de claves escondidas, y a una lista negra siempre le falta
+// algo. Ahora solo se ve lo que tiene etiqueta.
 
 // ─── Inline SVGs ─────────────────────────────────────────────────────────────
 const IcoSave     = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>;
@@ -84,8 +80,9 @@ export default function SettingsPage() {
     const loadData = async () => {
         try {
             const [cAll, b] = await Promise.all([api.getAllConfig(), api.getBackupList()]);
-            // Hide internal-only flags from the editable settings UI.
-            const c = cAll.filter(cfg => !HIDDEN_KEYS.includes(cfg.key));
+            // Solo lo que es un ajuste de verdad: el resto es rastro interno que
+            // editar a mano hace mentir a lo que se apoya en él.
+            const c = cAll.filter(cfg => esAjusteVisible(cfg.key) || HARDWARE_KEYS.includes(cfg.key));
             api.getLogPath().then(setLogPath).catch(() => {});
             setConfigs(c); setBackupList(b);
             api.diasSinCopiaExterna().then(setDiasSinCopia).catch(() => setDiasSinCopia(undefined));
@@ -207,20 +204,7 @@ export default function SettingsPage() {
         finally { setPwSaving(false); }
     };
 
-    const labels: Record<string, string> = {
-        store_name: 'Nombre de la Tienda',
-        store_address: 'Dirección',
-        store_phone: 'Teléfono',
-        store_email: 'Email',
-        ticket_footer: 'Pie de Ticket',
-        tax_rate: 'Tasa de Impuesto (%)',
-        currency_symbol: 'Símbolo de Moneda',
-        low_stock_threshold: 'Umbral de Stock Mínimo',
-        auto_backup: 'Respaldo Automático al Cerrar Turno',
-        max_backups: 'Máximo de Respaldos a Conservar',
-        session_hours: 'Duración de la Sesión (horas)',
-        log_retention_days: 'Días de Bitácora a Conservar',
-    };
+    const labels = ETIQUETAS_DE_AJUSTES;
 
     const changedCount = configs.filter(cfg => values[cfg.key] !== cfg.value).length;
 
@@ -272,7 +256,7 @@ export default function SettingsPage() {
                     Datos de la Tienda
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 14 }}>
-                    {configs.filter(cfg => !HARDWARE_KEYS.includes(cfg.key)).map(cfg => {
+                    {configs.filter(cfg => esAjusteVisible(cfg.key)).map(cfg => {
                         const changed = values[cfg.key] !== cfg.value;
                         const borderColor = changed ? 'rgba(240,197,71,0.5)' : undefined;
                         return (
