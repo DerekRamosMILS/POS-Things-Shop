@@ -477,6 +477,24 @@ Las excepciones se enumeran con su motivo, y una segunda prueba falla si alguna
 excepción se queda sin corresponder a nada: una entrada muerta esconde el siguiente
 caso. `app_logs` no cuenta, porque es rastro y puede fallar sin consecuencia.
 
+### Invariantes
+
+Tres cosas que tienen que ser verdad siempre, probadas sobre secuencias largas en
+vez de sobre el caso que se le ocurrió a alguien:
+
+| Invariante | Qué lo rompería |
+|---|---|
+| La existencia de una prenda es la suma de sus movimientos | Un camino que cambie el stock sin dejar renglón, o que anote un monto distinto del que movió |
+| La existencia de una talla es la suma de sus movimientos, y el total del producto la suma de sus tallas | Quitar una talla y que su mercancía se esfume; contar una talla y mover otra |
+| El efectivo esperado del turno es igual a lo que dicen las tablas de ventas, abonos, devoluciones y gastos | Un movimiento que entre al cajón sin sumarse a la columna del corte, o al revés |
+
+Los dos del inventario se cruzan contra ocho caminos —venta, devolución,
+cancelación, compra, ajuste, reserva y cancelación de apartado, conteo del celular
+y edición de tallas—. El del cajón, contra una jornada de dieciséis movimientos con
+precios que no dividen bien. Las tres están falsificadas: quitar el renglón que
+cierra el reparto en tallas, el movimiento de una compra, la columna de un abono o
+la de un gasto hace fallar la prueba que corresponde.
+
 ### Revisiones de consistencia
 
 Los arreglos impiden que se produzcan nuevas inconsistencias, pero **ninguna

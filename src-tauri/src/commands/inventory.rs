@@ -517,4 +517,256 @@ mod tests {
         let stock: i32 = db.query_row("SELECT stock FROM products WHERE id = 93", [], |r| r.get(0)).unwrap();
         assert_eq!(stock, 0);
     }
+
+    // ─── El invariante del inventario ───────────────────────────────────────
+    //
+    // La existencia de una prenda tiene que ser siempre la suma de sus
+    // movimientos. Es lo que hace que el historial sirva para algo: si no cuadra,
+    // el inventario dice un número y su explicación dice otro, y no hay forma de
+    // saber cuál está mal. Lo tocan siete caminos —venta, devolución, cancelación
+    // de venta, reserva y cancelación de apartado, compra, ajuste y conteo del
+    // celular— y ninguna prueba lo miraba entero.
+
+    /// La existencia guardada de un producto y la que dicen sus movimientos.
+    fn existencia_y_movimientos(db: &rusqlite::Connection, product_id: i64) -> (i32, i32) {
+        let stock: i32 = db
+            .query_row("SELECT stock FROM products WHERE id = ?1", params![product_id], |r| r.get(0))
+            .unwrap();
+        let suma: i32 = db
+            .query_row(
+                "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements WHERE product_id = ?1",
+                params![product_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (stock, suma)
+    }
+
+    /// Una tienda con caja abierta y una prenda que empieza con su movimiento.
+    fn tienda_con_historial() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 1000.0)", []).unwrap();
+        // Por el camino de verdad, que deja el movimiento del stock inicial.
+        crate::commands::products::crear_producto(&db, 1, crate::models::product::CreateProductDto {
+            sku: "CAM".into(), barcode: None, name: "Camisa".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 50.0, sale_price: 100.0, stock: 100, min_stock: 2,
+        }).unwrap();
+        db
+    }
+
+    fn vender(db: &rusqlite::Connection, piezas: i32) -> i64 {
+        use crate::models::sale::{CreateSaleDto, CreateSaleItemDto};
+        crate::commands::sales::registrar_venta(db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto { product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None }],
+            payment_method: "cash".to_string(), amount_paid: 1_000_000.0, payments: vec![],
+            discount_total: 0.0, promotion_id: None, requiere_factura: false,
+            notes: None, customer_id: None, client_request_id: None,
+        }).unwrap().id
+    }
+
+    #[test]
+    fn la_existencia_siempre_es_la_suma_de_sus_movimientos() {
+        use crate::commands::layaways::{cancelar_apartado, registrar_apartado};
+        use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+        use crate::models::layaway::{CreateLayawayDto, CreateLayawayItemDto};
+
+        let db = tienda_con_historial();
+        let revisar = |paso: &str| {
+            let (stock, movimientos) = existencia_y_movimientos(&db, 1);
+            assert_eq!(stock, movimientos, "tras {}: existencia {} vs movimientos {}", paso, stock, movimientos);
+        };
+        revisar("el alta");
+
+        // Venta.
+        let venta = vender(&db, 7);
+        revisar("una venta");
+
+        // Devolución parcial de esa venta.
+        let partida: i64 = db
+            .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![venta], |r| r.get(0))
+            .unwrap();
+        registrar_devolucion(&db, 1, CreateReturnDto {
+            sale_id: venta, reason: None, refund_method: "cash".to_string(),
+            items: vec![ReturnItemDto { sale_item_id: partida, quantity: 3 }],
+        }).unwrap();
+        revisar("una devolución parcial");
+
+        // Otra venta, cancelada entera.
+        let cancelable = vender(&db, 5);
+        revisar("otra venta");
+        crate::commands::sales::cancelar_venta(&db, 1, cancelable).unwrap();
+        revisar("cancelar esa venta");
+
+        // Compra.
+        registrar_compra(&db, 1, RegisterPurchaseDto { product_id: 1, quantity: 20, purchase_price: Some(55.0) }).unwrap();
+        revisar("una compra");
+
+        // Ajuste a mano, en los dos sentidos.
+        ajustar_stock(&db, 1, AdjustStockDto { product_id: 1, quantity: -4, reason: "Merma".into() }).unwrap();
+        revisar("un ajuste negativo");
+        ajustar_stock(&db, 1, AdjustStockDto { product_id: 1, quantity: 9, reason: "Apareció".into() }).unwrap();
+        revisar("un ajuste positivo");
+
+        // Apartado: reserva y cancelación.
+        let apartado = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![CreateLayawayItemDto { product_id: 1, quantity: 6, unit_price: 0.0, variant_id: None }],
+            initial_payment: 0.0, payment_method: "cash".to_string(), notes: None, due_date: None,
+        }).unwrap();
+        revisar("reservar un apartado");
+        cancelar_apartado(&db, 1, apartado.id).unwrap();
+        revisar("cancelar el apartado");
+
+        // Conteo desde el celular, hacia arriba y hacia abajo.
+        let (antes, _) = existencia_y_movimientos(&db, 1);
+        for contado in [antes + 11, antes - 5] {
+            let id = format!("c-{}", contado);
+            crate::capture::conteo::aplicar_conteo(&db, Some(1), &crate::capture::conteo::ConteoDelCelular {
+                conteo_id: id,
+                sku: "CAM".to_string(),
+                variant_id: None,
+                contado,
+                contado_en: "2099-01-01 10:00:00".to_string(),
+            }).unwrap();
+            revisar("un conteo del celular");
+        }
+
+        // Y que de verdad hubo movimiento: si todo diera cero, el invariante se
+        // cumpliría trivialmente y esta prueba no valdría nada.
+        let cuantos: i64 = db
+            .query_row("SELECT COUNT(*) FROM inventory_movements WHERE product_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(cuantos >= 9, "se esperaban movimientos de todos los caminos, hubo {}", cuantos);
+        let (stock, _) = existencia_y_movimientos(&db, 1);
+        assert!(stock > 0, "la prenda tiene que quedar con existencia");
+    }
+
+    /// La existencia de una talla y la que dicen sus movimientos.
+    fn talla_y_movimientos(db: &rusqlite::Connection, variant_id: i64) -> (i32, i32) {
+        let stock: i32 = db
+            .query_row("SELECT stock FROM product_variants WHERE id = ?1", params![variant_id], |r| r.get(0))
+            .unwrap();
+        let suma: i32 = db
+            .query_row(
+                "SELECT COALESCE(SUM(quantity), 0) FROM inventory_movements WHERE variant_id = ?1",
+                params![variant_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (stock, suma)
+    }
+
+    /// El total del producto y la suma de sus tallas activas.
+    fn total_y_suma_de_tallas(db: &rusqlite::Connection, product_id: i64) -> (i32, i32) {
+        let stock: i32 = db
+            .query_row("SELECT stock FROM products WHERE id = ?1", params![product_id], |r| r.get(0))
+            .unwrap();
+        let suma: i32 = db
+            .query_row(
+                "SELECT COALESCE(SUM(stock), 0) FROM product_variants WHERE product_id = ?1 AND is_active = 1",
+                params![product_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (stock, suma)
+    }
+
+    #[test]
+    fn cada_talla_es_la_suma_de_sus_movimientos_y_el_total_la_suma_de_las_tallas() {
+        // Dos invariantes encadenados. El de las tallas es el que más caminos tiene
+        // y el que ya se rompió una vez: hasta la migración 024, cambiar la
+        // existencia de una talla desde Productos no dejaba ningún movimiento.
+        use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+        use crate::commands::variants::guardar_variantes;
+        use crate::models::sale::{CreateSaleDto, CreateSaleItemDto};
+        use crate::models::variant::SaveVariantDto;
+
+        let db = tienda_con_historial();
+
+        // `stock_original: None` es "vengo a poner esta existencia", que es lo que
+        // hace el formulario cuando alguien la escribe a mano.
+        let talla = |id: Option<i64>, size: &str, stock: i32| SaveVariantDto {
+            id, size: Some(size.to_string()), color: None, sku: None, barcode: None, stock,
+            stock_original: None,
+        };
+
+        let puestas = guardar_variantes(&db, 1, 1, vec![
+            talla(None, "M", 8), talla(None, "G", 12), talla(None, "XG", 5),
+        ]).unwrap();
+        let ids: Vec<i64> = puestas.iter().map(|v| v.id).collect();
+
+        let revisar = |paso: &str| {
+            for id in &ids {
+                let existe: i64 = db
+                    .query_row("SELECT COUNT(*) FROM product_variants WHERE id = ?1 AND is_active = 1", params![id], |r| r.get(0))
+                    .unwrap();
+                if existe == 0 { continue; }
+                let (stock, mov) = talla_y_movimientos(&db, *id);
+                assert_eq!(stock, mov, "tras {}: la talla {} tiene {} y sus movimientos dicen {}", paso, id, stock, mov);
+            }
+            let (total, suma) = total_y_suma_de_tallas(&db, 1);
+            assert_eq!(total, suma, "tras {}: el total dice {} y las tallas suman {}", paso, total, suma);
+            // Y el invariante de arriba, que también tiene que valer con tallas: el
+            // total del producto es la suma de **todos** sus movimientos, los de
+            // talla y los que no la llevan. Es lo que hace que una talla quitada no
+            // pueda llevarse su mercancía sin dejar rastro.
+            let (stock, movimientos) = existencia_y_movimientos(&db, 1);
+            assert_eq!(
+                stock, movimientos,
+                "tras {}: el producto tiene {} y sus movimientos dicen {}", paso, stock, movimientos
+            );
+        };
+        revisar("poner las tallas");
+
+        // Vender una talla.
+        let venta = crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto {
+            items: vec![CreateSaleItemDto { product_id: 1, quantity: 3, unit_price: 0.0, discount: 0.0, variant_id: Some(ids[0]) }],
+            payment_method: "cash".to_string(), amount_paid: 100_000.0, payments: vec![],
+            discount_total: 0.0, promotion_id: None, requiere_factura: false,
+            notes: None, customer_id: None, client_request_id: None,
+        }).unwrap().id;
+        revisar("vender una talla");
+
+        // Devolver parte.
+        let partida: i64 = db
+            .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![venta], |r| r.get(0))
+            .unwrap();
+        registrar_devolucion(&db, 1, CreateReturnDto {
+            sale_id: venta, reason: None, refund_method: "cash".to_string(),
+            items: vec![ReturnItemDto { sale_item_id: partida, quantity: 1 }],
+        }).unwrap();
+        revisar("devolver una pieza de esa talla");
+
+        // Contar una talla desde el celular.
+        crate::capture::conteo::aplicar_conteo(&db, Some(1), &crate::capture::conteo::ConteoDelCelular {
+            conteo_id: "ct-1".to_string(), sku: "CAM".to_string(),
+            variant_id: Some(ids[1]), contado: 20,
+            contado_en: "2099-01-01 10:00:00".to_string(),
+        }).unwrap();
+        revisar("contar una talla");
+
+        // Cambiar existencias desde Productos: el caso de la migración 024.
+        guardar_variantes(&db, 1, 1, vec![
+            talla(Some(ids[0]), "M", 30), talla(Some(ids[1]), "G", 1), talla(Some(ids[2]), "XG", 5),
+        ]).unwrap();
+        revisar("cambiar existencias desde Productos");
+
+        // Y quitar una talla, que se lleva su mercancía del total.
+        guardar_variantes(&db, 1, 1, vec![
+            talla(Some(ids[0]), "M", 30), talla(Some(ids[1]), "G", 1),
+        ]).unwrap();
+        revisar("quitar una talla");
+
+        let cuantos: i64 = db
+            .query_row("SELECT COUNT(*) FROM inventory_movements WHERE variant_id IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert!(cuantos >= 7, "se esperaban movimientos por talla de todos los caminos, hubo {}", cuantos);
+    }
 }

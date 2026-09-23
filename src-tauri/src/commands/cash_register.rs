@@ -667,4 +667,142 @@ mod dia_completo {
         let cerrado = cerrar_caja(&conn, 1, CloseRegisterDto { closing_amount: 500.0 }).unwrap();
         assert_eq!(cerrado.status, "closed");
     }
+
+    // ─── El invariante del cajón ────────────────────────────────────────────
+    //
+    // El efectivo esperado se acumula en columnas del turno a medida que pasa cada
+    // movimiento. La otra forma de saberlo es sumar los movimientos uno por uno
+    // desde las tablas donde quedaron. Las dos cuentas tienen que dar lo mismo
+    // siempre, no solo en el día que se me ocurrió probar: si se separan, el corte
+    // reporta un faltante que no existe y alguien cuenta billetes buscándolo.
+
+    /// El efectivo del cajón sumado desde donde quedó cada movimiento.
+    fn efectivo_desde_las_tablas(db: &rusqlite::Connection, register_id: i64) -> Cents {
+        let uno = |sql: &str| -> Cents {
+            Cents::from_pesos(db.query_row(sql, params![register_id], |r| r.get::<_, f64>(0)).unwrap())
+        };
+        let fondo = uno("SELECT opening_amount FROM cash_registers WHERE id = ?1");
+        // Ventas en efectivo: el desglose por forma de pago, que es lo que entró.
+        let ventas = uno(
+            "SELECT COALESCE(SUM(sp.amount), 0) FROM sale_payments sp
+             JOIN sales s ON s.id = sp.sale_id
+             WHERE s.cash_register_id = ?1 AND sp.method = 'cash'",
+        );
+        let abonos = uno(
+            "SELECT COALESCE(SUM(amount), 0) FROM layaway_payments
+             WHERE cash_register_id = ?1 AND payment_method = 'cash'",
+        );
+        let devoluciones = uno(
+            "SELECT COALESCE(SUM(total_refund), 0) FROM returns
+             WHERE cash_register_id = ?1 AND refund_method = 'cash'",
+        );
+        let gastos = uno("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE cash_register_id = ?1");
+        fondo + ventas + abonos - devoluciones - gastos
+    }
+
+    #[test]
+    fn el_cajon_cuadra_con_sus_movimientos_en_una_jornada_larga() {
+        use crate::commands::layaways::{abonar_apartado, registrar_apartado};
+        use crate::commands::returns::{registrar_devolucion, CreateReturnDto, ReturnItemDto};
+        use crate::models::layaway::{CreateLayawayDto, CreateLayawayItemDto};
+        use crate::models::sale::{CreateSaleDto, CreateSaleItemDto, PaymentSplitDto};
+
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 743.21)", []).unwrap();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (1, 'P', 'P', 50.0, 137.77, 100000)", [],
+        ).unwrap();
+        let register_id: i64 = db
+            .query_row("SELECT id FROM cash_registers WHERE status = 'open'", [], |r| r.get(0))
+            .unwrap();
+
+        let revisar = |paso: &str| {
+            let turno = get_register_by_id(&db, register_id).unwrap();
+            let por_columnas = Cents::from_pesos(expected_cash(&turno));
+            let por_movimientos = efectivo_desde_las_tablas(&db, register_id);
+            assert_eq!(
+                por_columnas, por_movimientos,
+                "tras {}: el turno dice {} y los movimientos dicen {}",
+                paso, por_columnas, por_movimientos
+            );
+        };
+        revisar("abrir la caja");
+
+        // Una jornada con precios que no dividen bien, en muchas combinaciones.
+        let mut ventas: Vec<i64> = Vec::new();
+        for piezas in [1, 3, 7, 2, 11, 5] {
+            let venta = crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto {
+                items: vec![CreateSaleItemDto { product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None }],
+                payment_method: "cash".to_string(), amount_paid: 1_000_000.0, payments: vec![],
+                discount_total: 0.0, promotion_id: None, requiere_factura: false,
+                notes: None, customer_id: None, client_request_id: None,
+            }).unwrap().id;
+            ventas.push(venta);
+            revisar("una venta en efectivo");
+        }
+
+        // Pagos mixtos: parte tarjeta, parte efectivo.
+        for (tarjeta, piezas) in [(100.0, 3), (50.0, 2), (7.77, 1)] {
+            let total = 137.77 * piezas as f64;
+            crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto {
+                items: vec![CreateSaleItemDto { product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None }],
+                payment_method: "mixed".to_string(), amount_paid: total, payments: vec![
+                    PaymentSplitDto { method: "card".to_string(), amount: tarjeta },
+                    PaymentSplitDto { method: "cash".to_string(), amount: total - tarjeta },
+                ],
+                discount_total: 0.0, promotion_id: None, requiere_factura: false,
+                notes: None, customer_id: None, client_request_id: None,
+            }).unwrap();
+            revisar("una venta mixta");
+        }
+
+        // Abonos de apartado, en efectivo y en tarjeta.
+        let apartado = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![CreateLayawayItemDto { product_id: 1, quantity: 9, unit_price: 0.0, variant_id: None }],
+            initial_payment: 133.33, payment_method: "cash".to_string(), notes: None, due_date: None,
+        }).unwrap();
+        revisar("apartar con anticipo");
+        abonar_apartado(&db, 1, apartado.id, 77.77, "cash").unwrap();
+        revisar("un abono en efectivo");
+        abonar_apartado(&db, 1, apartado.id, 100.0, "card").unwrap();
+        revisar("un abono con tarjeta");
+
+        // Devoluciones, en efectivo y en tarjeta.
+        for (i, metodo) in [(0usize, "cash"), (1, "card"), (2, "cash")] {
+            let venta = ventas[i];
+            let partida: i64 = db
+                .query_row("SELECT id FROM sale_items WHERE sale_id = ?1", params![venta], |r| r.get(0))
+                .unwrap();
+            registrar_devolucion(&db, 1, CreateReturnDto {
+                sale_id: venta, reason: None, refund_method: metodo.to_string(),
+                items: vec![ReturnItemDto { sale_item_id: partida, quantity: 1 }],
+            }).unwrap();
+            revisar("una devolución");
+        }
+
+        // Gastos.
+        for monto in [35.50, 7.07, 199.99] {
+            crate::commands::expenses::registrar_gasto(&db, 1, None, crate::models::expense::CreateExpenseDto {
+                category: "Operativos".to_string(), description: "Bolsas".to_string(), amount: monto,
+            }).unwrap();
+            revisar("un gasto");
+        }
+
+        // Y al cerrar contando justo lo esperado, no hay diferencia.
+        let turno = get_register_by_id(&db, register_id).unwrap();
+        let esperado = expected_cash(&turno);
+        let cerrado = cerrar_caja(&db, 1, CloseRegisterDto { closing_amount: esperado }).unwrap();
+        assert_eq!(cerrado.difference, Some(0.0), "contando lo esperado no puede haber diferencia");
+
+        // Que la jornada movió dinero de verdad: si todo fuera cero, el invariante
+        // se cumpliría trivialmente.
+        assert!(esperado > 743.21, "la jornada tiene que haber dejado dinero, quedó en {}", esperado);
+    }
 }
