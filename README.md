@@ -453,6 +453,19 @@ herramientas del navegador abiertas y en la compilación de producción no va a
 ninguna parte, así que la caja se recuperaba y nadie se enteraba nunca. A 2000 km
 eso convierte "a veces se pone raro" en algo imposible de perseguir.
 
+### Escribir en dos tablas es todo o nada
+
+Es la clase de bug que más veces ha aparecido aquí: dos `execute` seguidos, el
+segundo falla, y queda un gasto editado con el corte sin ajustar, un abono cobrado
+con el saldo sin bajar, una prenda con existencia y sin el movimiento que la
+explica. Nada de eso se ve hasta que alguien cuenta billetes o revisa un historial.
+
+La prueba `transacciones` lee el Rust de producción —recortando los módulos de
+prueba— y busca funciones que escriban en dos o más tablas sin abrir transacción.
+Las excepciones se enumeran con su motivo, y una segunda prueba falla si alguna
+excepción se queda sin corresponder a nada: una entrada muerta esconde el siguiente
+caso. `app_logs` no cuenta, porque es rastro y puede fallar sin consecuencia.
+
 ### Revisiones de consistencia
 
 Los arreglos impiden que se produzcan nuevas inconsistencias, pero **ninguna

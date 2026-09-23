@@ -267,9 +267,26 @@ pub(crate) fn anotar_precio(
 #[tauri::command]
 pub fn create_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateProductDto) -> Result<Product, String> {
     let user_id = require_admin(&sessions, &token)?;
-    validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, Some(data.stock))?;
     let db = state.conn();
+    crear_producto(&db, user_id, data)
+}
 
+/// Núcleo del alta, con la conexión explícita.
+///
+/// El producto y el movimiento que explica su existencia inicial van juntos o no
+/// van. Eran dos escrituras sueltas: si fallaba la segunda, quedaba una prenda con
+/// existencia y sin un renglón que dijera de dónde salió, que es el mismo hueco de
+/// auditoría que se cerró en `ajustar_stock`. Y desde la migración
+/// `026_nada_se_borra` esa prenda ya no se puede borrar para volver a intentarlo.
+pub(crate) fn crear_producto(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    data: CreateProductDto,
+) -> Result<Product, String> {
+    validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, Some(data.stock))?;
+
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<i64, String> {
     db.execute(
         "INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, purchase_price, sale_price, stock, min_stock)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -295,7 +312,19 @@ pub fn create_product(state: State<DbState>, sessions: State<SessionState>, toke
         ).map_err(|e| e.to_string())?;
     }
 
-    get_product_by_id(&db, id)
+        Ok(id)
+    })();
+
+    match resultado {
+        Ok(id) => {
+            crate::db::connection::confirmar(db)?;
+            get_product_by_id(db, id)
+        }
+        Err(e) => {
+            db.execute_batch("ROLLBACK;").ok();
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -539,5 +568,81 @@ mod tests {
 
         let p = buscar_por_codigo(&conn, "7500000000001").unwrap().unwrap();
         assert!(p.is_active);
+    }
+
+    #[test]
+    fn una_prenda_no_queda_con_existencia_sin_movimiento_que_la_explique() {
+        // Eran dos escrituras sueltas: el producto y el movimiento del stock
+        // inicial. Si fallaba la segunda quedaba una prenda con existencia y sin
+        // un renglón que dijera de dónde salió, y desde la 026 ya no se puede
+        // borrar para volver a intentarlo. El fallo se provoca con un usuario que
+        // no existe: el movimiento tiene llave foránea a `users`.
+        let conn = db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+
+        let e = crear_producto(&conn, 999, CreateProductDto {
+            sku: "TS-000001".into(), barcode: None, name: "Vestido".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 100.0, sale_price: 250.0, stock: 5, min_stock: 1,
+        }).unwrap_err();
+
+        assert!(!e.is_empty());
+        let productos: i64 = conn
+            .query_row("SELECT COUNT(*) FROM products WHERE sku = 'TS-000001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(productos, 0, "la prenda no puede quedarse sin su movimiento");
+        let movimientos: i64 = conn
+            .query_row("SELECT COUNT(*) FROM inventory_movements", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(movimientos, 0);
+    }
+
+    #[test]
+    fn un_alta_normal_deja_la_prenda_y_su_movimiento() {
+        let conn = db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+
+        let p = crear_producto(&conn, 1, CreateProductDto {
+            sku: "TS-000002".into(), barcode: None, name: "Blusa".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 50.0, sale_price: 120.0, stock: 3, min_stock: 1,
+        }).unwrap();
+
+        assert_eq!(p.stock, 3);
+        let (cantidad, razon): (i32, String) = conn
+            .query_row(
+                "SELECT quantity, reason FROM inventory_movements WHERE product_id = ?1",
+                params![p.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cantidad, 3);
+        assert_eq!(razon, "Stock inicial");
+    }
+
+    #[test]
+    fn un_alta_sin_existencia_no_inventa_un_movimiento() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+
+        crear_producto(&conn, 1, CreateProductDto {
+            sku: "TS-000003".into(), barcode: None, name: "Falda".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 50.0, sale_price: 120.0, stock: 0, min_stock: 1,
+        }).unwrap();
+
+        let movimientos: i64 = conn
+            .query_row("SELECT COUNT(*) FROM inventory_movements", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(movimientos, 0);
     }
 }

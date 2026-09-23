@@ -301,20 +301,49 @@ pub fn change_password(state: State<DbState>, sessions: State<SessionState>, tok
     require_admin(&sessions, &token)?;
     let db = state.conn();
 
-    let password_hash = hash_password(&data.new_password)?;
+    poner_contrasena(&db, data.user_id, &data.new_password)?;
 
-    db.execute(
-        "UPDATE users SET password_hash=?1, must_change_password=1, updated_at=datetime('now','localtime') WHERE id=?2",
-        params![password_hash, data.user_id],
-    ).map_err(|e| e.to_string())?;
-
-    // Force the target back through login with the new password.
-    db.execute("DELETE FROM sessions WHERE user_id = ?1", params![data.user_id]).ok();
     if let Ok(mut map) = sessions.sessions.lock() {
         map.retain(|_, s| s.user_id != data.user_id);
     }
 
     Ok(())
+}
+
+/// Cambia la contraseña de alguien y le cierra las sesiones, las dos o ninguna.
+///
+/// Eran dos escrituras sueltas, y el borrado de sesiones iba con `.ok()`: si
+/// fallaba, quedaba la contraseña nueva puesta y el renglón de la sesión vieja en
+/// la base. Esa sesión revive en el siguiente arranque —`load_sessions` la lee de
+/// ahí—, así que quien tenía el token de antes seguía dentro con una contraseña que
+/// ya se le cambió. Se restablece una contraseña justamente cuando eso importa.
+pub(crate) fn poner_contrasena(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    nueva: &str,
+) -> Result<(), String> {
+    let password_hash = hash_password(nueva)?;
+
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        let filas = db.execute(
+            "UPDATE users SET password_hash=?1, must_change_password=1, updated_at=datetime('now','localtime') WHERE id=?2",
+            params![password_hash, user_id],
+        ).map_err(|e| e.to_string())?;
+        if filas == 0 {
+            return Err("El usuario no existe".to_string());
+        }
+        // Force the target back through login with the new password.
+        db.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    crate::db::connection::confirmar(db)
 }
 
 /// Any signed-in user changes their own password, proving the current one first.
@@ -375,18 +404,34 @@ pub fn restablecer_admin(
         return Err(format!("'{}' no es administrador", usuario));
     }
 
-    let hash = hash_password(nueva)?;
-    db.execute(
-        "UPDATE users SET password_hash = ?1, is_active = 1, must_change_password = 1,
-                updated_at = datetime('now','localtime')
-         WHERE id = ?2",
-        params![hash, id],
-    )
-    .map_err(|e| e.to_string())?;
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let resultado = (|| -> Result<(), String> {
+        let hash = hash_password(nueva)?;
+        db.execute(
+            "UPDATE users SET password_hash = ?1, is_active = 1, must_change_password = 1,
+                    updated_at = datetime('now','localtime')
+             WHERE id = ?2",
+            params![hash, id],
+        )
+        .map_err(|e| e.to_string())?;
 
-    // Las sesiones abiertas con la contraseña vieja dejan de servir.
-    db.execute("DELETE FROM sessions WHERE user_id = ?1", params![id]).ok();
-    db.execute("DELETE FROM login_attempts WHERE username = ?1", params![usuario]).ok();
+        // Las sesiones abiertas con la contraseña vieja dejan de servir. Iba con
+        // `.ok()`: si fallaba, la contraseña quedaba cambiada y la sesión vieja en
+        // la base, lista para revivir en el siguiente arranque. Esto se ejecuta
+        // cuando alguien ya no debe poder entrar; es lo último que puede fallar en
+        // silencio.
+        db.execute("DELETE FROM sessions WHERE user_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        db.execute("DELETE FROM login_attempts WHERE username = ?1", params![usuario])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if let Err(e) = resultado {
+        db.execute_batch("ROLLBACK;").ok();
+        return Err(e);
+    }
+    crate::db::connection::confirmar(db)?;
 
     db.execute(
         "INSERT INTO app_logs (level, module, message, user_id)
@@ -728,5 +773,89 @@ mod tests {
         assert!(e.contains("administrador"), "mensaje inesperado: {}", e);
         let rol: String = conn.query_row("SELECT role FROM users WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(rol, "admin", "no se le cambió el rol");
+    }
+
+    fn sesiones_de(conn: &rusqlite::Connection, user_id: i64) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM sessions WHERE user_id = ?1", params![user_id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn cambiar_la_contrasena_no_deja_viva_la_sesion_vieja() {
+        // El borrado de sesiones iba con `.ok()`: si fallaba, quedaba la contraseña
+        // nueva y el renglón de la sesión vieja en la base, que revive en el
+        // siguiente arranque porque `load_sessions` la lee de ahí.
+        let conn = db();
+        usuario(&conn, 1, "ana", "cashier");
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, role, expires_at) VALUES ('viejo', 1, 'cashier', ?1)",
+            params![now_ts() + 9999],
+        ).unwrap();
+
+        poner_contrasena(&conn, 1, "contrasenanueva").unwrap();
+
+        assert_eq!(sesiones_de(&conn, 1), 0, "la sesión vieja no puede quedarse");
+        let obliga: i64 = conn
+            .query_row("SELECT must_change_password FROM users WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(obliga, 1, "y tiene que cambiarla al entrar");
+    }
+
+    #[test]
+    fn si_la_contrasena_no_pasa_no_se_toca_nada() {
+        // Demasiado corta: ni se cambia el hash ni se cierran sesiones. Antes el
+        // orden lo garantizaba por casualidad; ahora lo garantiza la transacción.
+        let conn = db();
+        usuario(&conn, 1, "ana", "cashier");
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, role, expires_at) VALUES ('viejo', 1, 'cashier', ?1)",
+            params![now_ts() + 9999],
+        ).unwrap();
+        let antes: String = conn
+            .query_row("SELECT password_hash FROM users WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+
+        assert!(poner_contrasena(&conn, 1, "corta").is_err());
+
+        assert_eq!(sesiones_de(&conn, 1), 1, "la sesión sigue porque no hubo cambio");
+        let despues: String = conn
+            .query_row("SELECT password_hash FROM users WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(antes, despues);
+    }
+
+    #[test]
+    fn restablecer_a_un_administrador_le_cierra_todo() {
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, role, expires_at) VALUES ('viejo', 1, 'admin', ?1)",
+            params![now_ts() + 9999],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO login_attempts (username, failures, locked_until) VALUES ('jefa', 5, ?1)",
+            params![now_ts() + 600],
+        ).unwrap();
+
+        restablecer_admin(&conn, "jefa", "otracontrasena").unwrap();
+
+        assert_eq!(sesiones_de(&conn, 1), 0);
+        assert_eq!(bloqueo(&conn, "jefa"), None, "y se destraba para poder entrar");
+    }
+
+    #[test]
+    fn restablecer_a_quien_no_es_administrador_no_cambia_nada() {
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+        usuario(&conn, 2, "ana", "cashier");
+        let antes: String = conn
+            .query_row("SELECT password_hash FROM users WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+
+        assert!(restablecer_admin(&conn, "ana", "otracontrasena").is_err());
+
+        let despues: String = conn
+            .query_row("SELECT password_hash FROM users WHERE id = 2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(antes, despues);
     }
 }
