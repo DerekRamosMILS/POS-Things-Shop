@@ -205,10 +205,18 @@ fn promotion_discount(
         return Ok(Cents::ZERO);
     }
 
-    Ok(match discount_type.as_str() {
-        "percentage" => base.percent(value.min(100.0)),
-        _ => Cents::from_pesos(value).min(base),
-    })
+    // Explícito a propósito: el comodín de antes cobraba cualquier tipo raro
+    // como monto fijo, y una promo mal escrita descontaba pesos donde debía
+    // descontar por ciento. Vale más frenar la venta con un motivo que cobrar
+    // de menos sin que nadie se entere.
+    match discount_type.as_str() {
+        "percentage" => Ok(base.percent(value.min(100.0))),
+        "fixed" => Ok(Cents::from_pesos(value).min(base)),
+        otro => Err(format!(
+            "La promoción tiene un tipo de descuento inválido ({}). Corrígela o quítala de la venta.",
+            otro
+        )),
+    }
 }
 
 /// Human-readable label for a variant, e.g. "M / Negro".

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { formatCurrency } from '../utils';
+import { formatCurrency, fechaLarga } from '../utils';
 import * as api from '../api';
 import { T } from '../theme';
 import type { DashboardStats, TopProduct, Product, DailySalesReport } from '../types';
@@ -154,7 +154,7 @@ export default function DashboardPage() {
     }
 
     const now = new Date();
-    const dateStr = now.toLocaleDateString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const dateStr = fechaLarga(now);
 
     const kpis = [
         { label: 'Ventas del Día', value: formatCurrency(stats.today_sales), sub: `${stats.today_count} transacciones hoy`, color: T.primary, sparkData: [5200, 7800, 6100, 9200, 11400, 8900, stats.today_sales], icon: IcoDollar(T.primary) },
@@ -175,7 +175,7 @@ export default function DashboardPage() {
                             Datos locales
                         </span>
                     </div>
-                    <p className="page-subtitle" style={{ textTransform: 'capitalize' }}>{dateStr}</p>
+                    <p className="page-subtitle">{dateStr}</p>
                 </div>
                 <button
                     onClick={() => loadData(true)} disabled={refreshing}

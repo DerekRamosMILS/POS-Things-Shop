@@ -33,6 +33,14 @@ fn validar(
         "category" | "product" => {}
         otro => return Err(format!("Alcance de promoción desconocido: {}", otro)),
     }
+    // El único tipo que se reconoce por nombre es "percentage"; al cobrar,
+    // cualquier otro se cobra como monto fijo. Un tipo escrito de otra forma no
+    // falla: descuenta la cantidad equivocada. La tabla trae un CHECK que lo
+    // impide, pero ya se perdió un CHECK así antes (migración 017), y aquí el
+    // mensaje además es legible.
+    if tipo != "percentage" && tipo != "fixed" {
+        return Err(format!("Tipo de descuento desconocido: {}", tipo));
+    }
     if nombre.trim().is_empty() {
         return Err("Ponle nombre a la promoción".to_string());
     }
@@ -187,5 +195,42 @@ mod tests {
         assert!(validar("Enero", "percentage", 10.0, "2026-12-31", "2026-01-01", "all", None).is_err(),
                 "un rango al revés nunca se aplicaría");
         assert!(validar("Enero", "percentage", 100.0, "2026-01-01", "2026-01-01", "all", None).is_ok());
+    }
+
+    #[test]
+    fn un_tipo_de_descuento_desconocido_se_rechaza_al_guardarlo() {
+        // Al cobrar, cualquier tipo que no sea "percentage" se trata como monto
+        // fijo. Una promo guardada como "porcentaje" descontaría diez pesos
+        // donde debía descontar el diez por ciento: en un ticket de dos mil, son
+        // mil novecientos noventa de diferencia, sin una sola señal en pantalla.
+        for tipo in ["porcentaje", "PERCENTAGE", "", "monto_fijo"] {
+            assert!(
+                validar("Enero", tipo, 10.0, "2026-01-01", "2026-12-31", "all", None).is_err(),
+                "se aceptó el tipo {:?}",
+                tipo
+            );
+        }
+        assert!(validar("Enero", "percentage", 10.0, "2026-01-01", "2026-12-31", "all", None).is_ok());
+        assert!(validar("Enero", "fixed", 10.0, "2026-01-01", "2026-12-31", "all", None).is_ok());
+    }
+
+    #[test]
+    fn la_base_tambien_niega_un_tipo_de_descuento_inventado() {
+        // `promotion_discount` ya no reinterpreta un tipo raro, pero además no
+        // debería poder existir uno. La migración 001 lo restringe; la 017 está
+        // ahí porque una restricción así se perdió al reconstruir una tabla. Si
+        // alguien reconstruye `promotions` y se le olvida el CHECK, esto lo dice.
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        let insertar = |tipo: &str| {
+            db.execute(
+                "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, applies_to)
+                 VALUES ('Enero', ?1, 10.0, '2026-01-01', '2026-12-31', 'all')",
+                rusqlite::params![tipo],
+            )
+        };
+        assert!(insertar("porcentaje").is_err(), "la base aceptó un tipo inventado");
+        assert!(insertar("percentage").is_ok());
+        assert!(insertar("fixed").is_ok());
     }
 }

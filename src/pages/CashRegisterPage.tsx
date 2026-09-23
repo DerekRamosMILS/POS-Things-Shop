@@ -5,6 +5,7 @@ import * as api from '../api';
 import { cashBreakdown, expectedCash as computeExpectedCash, montoContado, round2 } from '../utils/cash';
 import type { CashRegister, Expense } from '../types';
 import { useToast } from '../contexts/ToastContext';
+import { AVISO_CAJA_CERRADA } from './cajaCerrada';
 
 // ─── Inline SVGs ─────────────────────────────────────────────────────────────
 const IcoPlus    = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>;
@@ -173,7 +174,7 @@ export default function CashRegisterPage() {
                 <div className="card" style={{ padding: '28px 32px' }}>
                     <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--primary)', marginBottom: 8 }}>Caja cerrada</p>
                     <h2 style={{ fontSize: 20, fontWeight: 900, color: 'var(--t1)', marginBottom: 10, lineHeight: 1.3 }}>Abre un turno para registrar ventas con control de efectivo.</h2>
-                    <p style={{ fontSize: 13, color: 'var(--t2)', lineHeight: 1.6 }}>Las ventas pueden seguir operando, pero el corte de caja, gastos del turno y diferencias se vuelven más confiables cuando hay una caja activa.</p>
+                    <p style={{ fontSize: 13, color: 'var(--t2)', lineHeight: 1.6 }}>{AVISO_CAJA_CERRADA}</p>
                 </div>
             )}
 

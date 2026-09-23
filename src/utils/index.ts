@@ -34,6 +34,23 @@ export function fechaLocal(dias: number): string {
     return d.toLocaleDateString('en-CA');
 }
 
+/**
+ * Fecha larga en español, con mayúscula sólo al principio.
+ *
+ * El dashboard la pintaba con `textTransform: 'capitalize'`, que sube todas las
+ * palabras: "Miércoles, 23 De Septiembre De 2026". En español las preposiciones
+ * van en minúscula, y eso se lee todo el día en la pantalla principal.
+ */
+export function fechaLarga(d: Date): string {
+    const texto = d.toLocaleDateString('es-MX', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+    });
+    return texto.charAt(0).toUpperCase() + texto.slice(1);
+}
+
 export function formatDate(date: string): string {
     // Una fecha sin hora la interpreta el navegador como medianoche **UTC**, que
     // en México es el día anterior por la tarde: se mostraba un día antes. Con
