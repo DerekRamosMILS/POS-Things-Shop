@@ -95,6 +95,10 @@ export default function SettingsPage() {
         } catch (err) { showToast(String(err), 'error'); } finally { setLoading(false); }
     };
 
+    /// Si un ajuste está editado en pantalla y todavía no guardado en la base.
+    const sinGuardar = (key: string) =>
+        configs.some(cfg => cfg.key === key && values[key] !== cfg.value);
+
     const handleSave = async () => {
         for (const key of NUMERIC_KEYS) {
             if (values[key] !== undefined && values[key] !== '' && Number.isNaN(Number(values[key]))) {
@@ -364,6 +368,7 @@ export default function SettingsPage() {
             <HardwareSettings
                 values={values}
                 onChange={(key, value) => setValues(v => ({ ...v, [key]: value }))}
+                sinGuardar={sinGuardar}
             />
 
             {/* Security + maintenance */}

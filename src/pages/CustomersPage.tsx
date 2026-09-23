@@ -5,6 +5,7 @@ import * as api from '../api';
 import type { CatalogoFiscal, Customer } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { useSessionStore } from '../stores/useSessionStore';
 
 const IcoPlus = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>;
 const IcoX = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>;
@@ -23,6 +24,9 @@ function IcoBtn({ onClick, children, hoverColor = 'var(--primary)', hoverBg = 'r
 }
 
 export default function CustomersPage() {
+    // Dar de baja a un cliente lo reserva el backend al administrador: enseñar el
+    // botón a la cajera la llevaba hasta el diálogo para recibir un "No autorizado".
+    const isAdmin = useSessionStore(st => st.user?.role === 'admin');
     const [customers, setCustomers] = useState<Customer[]>([]);
     const [loading, setLoading] = useState(true);
     const [showForm, setShowForm] = useState(false);
@@ -148,7 +152,7 @@ export default function CustomersPage() {
                                     <td>
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
                                             <IcoBtn onClick={() => openEdit(c)}><IcoEdit /></IcoBtn>
-                                            {c.is_active && <IcoBtn onClick={() => handleDelete(c)} hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)"><IcoTrash /></IcoBtn>}
+                                            {c.is_active && isAdmin && <IcoBtn onClick={() => handleDelete(c)} hoverColor="var(--danger)" hoverBg="rgba(244,82,112,0.10)"><IcoTrash /></IcoBtn>}
                                         </div>
                                     </td>
                                 </tr>

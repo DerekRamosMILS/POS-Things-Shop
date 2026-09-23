@@ -7,10 +7,13 @@ import {
     type CalibrationSample,
     type ScannerSuffix,
 } from '../utils/scanner';
+import { mensajeDePrueba } from '../utils/impresora';
 
 interface Props {
     values: Record<string, string>;
     onChange: (key: string, value: string) => void;
+    /** Si un ajuste está editado y todavía no guardado. */
+    sinGuardar: (key: string) => boolean;
 }
 
 const SUFFIX_LABELS: Record<ScannerSuffix, string> = {
@@ -26,7 +29,7 @@ const SUFFIX_LABELS: Record<ScannerSuffix, string> = {
  * comprar: la impresora se elige de las instaladas en Windows, el comando del
  * cajón es editable y el lector se calibra escaneando cualquier código.
  */
-export default function HardwareSettings({ values, onChange }: Props) {
+export default function HardwareSettings({ values, onChange, sinGuardar }: Props) {
     const { showToast } = useToast();
     const [printers, setPrinters] = useState<string[]>([]);
     const [loadingPrinters, setLoadingPrinters] = useState(false);
@@ -69,8 +72,13 @@ export default function HardwareSettings({ values, onChange }: Props) {
     const runTest = async (openDrawer: boolean) => {
         setTesting(true);
         try {
+            // A propósito con lo que hay en pantalla: probar antes de guardar es
+            // para lo que sirve. Pero el ticket de verdad sale por lo guardado, y
+            // eso hay que decirlo o la prueba engaña.
             await api.testPrinter(values.printer_name || null, openDrawer);
-            showToast(openDrawer ? 'Ticket enviado y cajón accionado' : 'Ticket de prueba enviado');
+            const pendiente = sinGuardar('printer_name') || sinGuardar('drawer_kick_command');
+            showToast(mensajeDePrueba({ conCajon: openDrawer, sinGuardar: pendiente }),
+                pendiente ? 'warning' : 'success');
         } catch (err) { showToast(String(err), 'error'); }
         finally { setTesting(false); }
     };

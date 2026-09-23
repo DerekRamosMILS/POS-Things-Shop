@@ -194,9 +194,11 @@ export default function MainLayout() {
         {/* Nav */}
         <div className="sidebar-nav-wrap" data-overflowing={navOverflowing}>
         <nav className="sidebar-nav" ref={navRef} onScroll={updateNavOverflow}>
-          <NavLink to="/dashboard" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
-            <span className="nav-icon"><IconDashboard /></span>Dashboard
-          </NavLink>
+          {isAdmin && (
+            <NavLink to="/dashboard" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+              <span className="nav-icon"><IconDashboard /></span>Dashboard
+            </NavLink>
+          )}
           <NavLink to="/pos" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
             <span className="nav-icon"><IconPOS /></span>Punto de Venta
           </NavLink>

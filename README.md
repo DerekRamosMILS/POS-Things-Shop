@@ -590,6 +590,11 @@ están `hoyLocal()` y `fechaLocal(dias)` en `src/utils`, y una prueba que falla 
   carrito guardado o se escanee el código de una de sus tallas
 - Cada comando del backend resuelve el usuario desde su sesión; el frontend
   nunca decide quién ejecuta una operación
-- Reportes, usuarios, productos, proveedores y respaldos son solo de administrador
+- Reportes, usuarios, productos, proveedores, respaldos y el Dashboard son solo de
+  administrador. El rol se decide en Rust con `require_admin`; la pantalla no es
+  una frontera de seguridad, solo evita ofrecer lo que va a ser negado. La prueba
+  `permisosDePantalla` cruza las dos cosas: falla si una pantalla que la cajera
+  puede abrir pide un comando de administrador, y si el menú ofrece un enlace que
+  el enrutado rechaza
 - Cada cobro lleva un identificador único: reenviar el mismo devuelve la venta
   original en vez de duplicarla

@@ -15,6 +15,10 @@ const STATUS_BADGE: Record<string, string> = { active: 'badge-warning', complete
 
 export default function LayawaysPage() {
     const { user } = useSessionStore();
+    // Cancelar devuelve mercancía al inventario y el backend lo reserva al
+    // administrador. Enseñar el botón a la cajera la hacía pasar por el diálogo
+    // de advertencia para recibir un "No autorizado" al final.
+    const isAdmin = user?.role === 'admin';
     const [layaways, setLayaways] = useState<Layaway[]>([]);
     const [loading, setLoading] = useState(true);
     const [statusFilter, setStatusFilter] = useState<'active' | 'completed' | 'cancelled' | 'all'>('active');
@@ -223,7 +227,7 @@ export default function LayawaysPage() {
                                     )}
                                     <div style={{ display: 'flex', gap: 10 }}>
                                         <button onClick={() => printReceipt(detail.id)} className="btn btn-ghost" style={{ flex: 1, justifyContent: 'center' }}>Comprobante</button>
-                                        <button onClick={handleCancel} disabled={processing} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>Cancelar apartado</button>
+                                        {isAdmin && <button onClick={handleCancel} disabled={processing} className="btn btn-danger" style={{ flex: 1, justifyContent: 'center' }}>Cancelar apartado</button>}
                                         <button onClick={handleComplete} disabled={processing || balance > 0.001} className="btn btn-primary" style={{ flex: 1, justifyContent: 'center' }}>
                                             {processing && <IcoLoader />} Entregar
                                         </button>

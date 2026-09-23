@@ -92,7 +92,10 @@ export default function App() {
         <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
         <Route path="/" element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>
           <Route index element={<Navigate to="pos" replace />} />
-          <Route path="dashboard" element={<DashboardPage />} />
+          {/* Lo que enseña son ventas y utilidades, y sus tres consultas piden
+              administrador en el backend: sin esta puerta, la cajera abría el
+              primer renglón del menú y se quedaba con un error y nada más. */}
+          <Route path="dashboard" element={<ProtectedRoute adminOnly><DashboardPage /></ProtectedRoute>} />
           <Route path="pos" element={<POSPage />} />
           <Route path="products" element={<ProtectedRoute adminOnly><ProductsPage /></ProtectedRoute>} />
           <Route path="inventory" element={<ProtectedRoute adminOnly><InventoryPage /></ProtectedRoute>} />
