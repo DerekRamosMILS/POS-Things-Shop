@@ -607,6 +607,27 @@ haber comprobado nada, ni que el archivo se escribiera ni que alguien no hubiera
 cancelado. Las dos llevan marca de orden de bytes para que Excel las abra como
 UTF-8.
 
+### El reembolso reparte sin perder centavos
+
+Lo que se devuelve es lo que el cliente pagó por esas piezas, no lo que dice la
+lista de precios: el ticket pudo llevar una promoción y un impuesto, y ninguno de
+los dos aparece en el renglón. Así que el total cobrado se reparte entre las
+partidas.
+
+Repartir con una regla de tres partida por partida y redondear cada resultado al
+centavo **no suma el total**. Devolver una venta de a una pieza dejaba un centavo en
+la caja —o regalaba uno: con dos piezas de un centavo y 7% de descuento cobraba 9 y
+devolvía 10—. Ahora se reparte por acumulado, entre partidas y entre las piezas de
+cada partida: lo que les toca a las primeras *i* menos lo que les tocaba a las
+primeras *i−1*. La diferencia del redondeo la recoge la siguiente en vez de
+perderse, y el orden va por `id`, que no cambia, para que el reparto sea el mismo
+sin importar en cuántos viajes se devuelva.
+
+Lo cuida una malla de 300 formas de ticket —precios que dividen mal, de uno a once
+piezas, con y sin promoción— que comprueba que devolver todo de a una pieza regrese
+exactamente lo cobrado. Esa malla es la que encontró el bug; las ocho formas que se
+me habían ocurrido a mano solo veían una de las dos direcciones.
+
 ### De dónde sale la utilidad
 
 Del costo que se guardó en la partida al vender (`sale_items.unit_cost`), no del

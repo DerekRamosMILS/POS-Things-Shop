@@ -37,6 +37,44 @@ struct Ri { sale_item_id: i64, product_id: i64, variant_id: Option<i64>, quantit
 /// Lo usa el registro y también la pantalla, que antes de confirmar tiene que
 /// decir cuánto sacar del cajón: el reembolso se reparte con la promoción y el
 /// impuesto del ticket, y no hay forma de adivinarlo a ojo.
+/// Lo que le toca a cada partida del total que se cobró, sin perder un centavo.
+///
+/// Repartir con una regla de tres partida por partida y redondear cada resultado al
+/// centavo **no suma el total**: devolver una venta de a una pieza dejaba un centavo
+/// en la caja, y el ticket reimpreso decía una cosa distinta de lo que se regresó.
+///
+/// Se reparte por acumulado: lo que les toca a las primeras i partidas menos lo que
+/// les tocaba a las primeras i−1. Así la diferencia del redondeo la recoge la
+/// siguiente partida en vez de perderse, y la suma de todas da exactamente el
+/// total. El orden es por `id`, que no cambia, para que el reparto sea siempre el
+/// mismo sin importar cuándo se devuelva cada cosa.
+fn reparto_del_total(
+    db: &rusqlite::Connection,
+    sale_id: i64,
+    venta_total: Cents,
+    suma_netos: Cents,
+) -> Result<HashMap<i64, Cents>, String> {
+    let mut stmt = db
+        .prepare("SELECT id, subtotal FROM sale_items WHERE sale_id = ?1 ORDER BY id")
+        .map_err(|e| e.to_string())?;
+    let partidas: Vec<(i64, f64)> = stmt
+        .query_map(params![sale_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut reparto = HashMap::new();
+    let mut neto_acumulado = Cents::ZERO;
+    let mut dado_acumulado = Cents::ZERO;
+    for (id, neto) in partidas {
+        neto_acumulado = neto_acumulado + Cents::from_pesos(neto);
+        let hasta_aqui = venta_total.prorate(neto_acumulado, suma_netos);
+        reparto.insert(id, hasta_aqui - dado_acumulado);
+        dado_acumulado = hasta_aqui;
+    }
+    Ok(reparto)
+}
+
 fn calcular_reembolso(db: &rusqlite::Connection, data: &CreateReturnDto) -> Result<(Vec<Ri>, Cents), String> {
     let sale_status: String = db.query_row(
         "SELECT status FROM sales WHERE id = ?1",
@@ -63,6 +101,8 @@ fn calcular_reembolso(db: &rusqlite::Connection, data: &CreateReturnDto) -> Resu
 
     let venta_total = Cents::from_pesos(venta_total);
     let suma_netos = Cents::from_pesos(suma_netos);
+
+    let reparto = reparto_del_total(db, data.sale_id, venta_total, suma_netos)?;
 
     let mut ris: Vec<Ri> = Vec::new();
     let mut total_refund = Cents::ZERO;
@@ -93,11 +133,18 @@ fn calcular_reembolso(db: &rusqlite::Connection, data: &CreateReturnDto) -> Resu
         }
         *ya_tomado.entry(it.sale_item_id).or_insert(0) += it.quantity;
 
-        // Parte del renglón que corresponde a las piezas devueltas...
-        let neto_devuelto = Cents::from_pesos(line_net)
-            .prorate(Cents(it.quantity as i64), Cents(sold_qty as i64));
-        // ...llevada a lo que realmente se cobró por el ticket.
-        let refund = venta_total.prorate(neto_devuelto, suma_netos);
+        // Lo que le toca a esta partida del total cobrado, repartido sin pérdida.
+        let de_la_partida = reparto.get(&it.sale_item_id).copied().unwrap_or_else(|| {
+            // No debería pasar: el reparto cubre todas las partidas de la venta.
+            venta_total.prorate(Cents::from_pesos(line_net), suma_netos)
+        });
+        // Y dentro de la partida, otra vez por acumulado: lo que le toca a las
+        // piezas devueltas hasta ahora menos lo que ya se había devuelto. Así ni
+        // las piezas de una misma partida pierden centavos entre viaje y viaje.
+        let ya = returned_qty + ya_tomado.get(&it.sale_item_id).copied().unwrap_or(0) - it.quantity;
+        let hasta_ahora = de_la_partida.prorate(Cents((ya + it.quantity) as i64), Cents(sold_qty as i64));
+        let antes = de_la_partida.prorate(Cents(ya as i64), Cents(sold_qty as i64));
+        let refund = hasta_ahora - antes;
 
         total_refund = total_refund + refund;
         ris.push(Ri { sale_item_id: it.sale_item_id, product_id, variant_id, quantity: it.quantity, refund });
@@ -654,4 +701,212 @@ mod tests {
         assert_eq!(previa, registrada);
     }
 
+    /// Lo que la venta cobró, en centavos.
+    fn cobrado(t: &Tienda, venta: i64) -> i64 {
+        Cents::from_pesos(t.total_venta(venta)).0
+    }
+
+    /// Devuelve la venta entera de a una pieza y suma lo reembolsado.
+    fn devolver_pieza_por_pieza(t: &Tienda, venta: i64) -> i64 {
+        let piezas: Vec<(i64, i32)> = t.db
+            .prepare("SELECT id, quantity FROM sale_items WHERE sale_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map(params![venta], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let mut suma = 0i64;
+        for (partida, cantidad) in piezas {
+            for _ in 0..cantidad {
+                let monto = t.devolver(venta, vec![(partida, 1)], "card").unwrap();
+                suma += Cents::from_pesos(monto).0;
+            }
+        }
+        suma
+    }
+
+    #[test]
+    fn devolver_de_a_una_pieza_regresa_exactamente_lo_cobrado() {
+        // El reembolso se reparte con la promoción y el impuesto del ticket, y ese
+        // reparto redondea al centavo. Si el redondeo se va para un lado, devolver
+        // la venta completa en varios viajes no cuadra con lo que se cobró: o la
+        // tienda regala centavos o se los queda, y en cualquier caso el ticket
+        // reimpreso dice una cosa y la caja otra. Se prueba con muchas formas de
+        // ticket, no con una.
+        /// (qué se está probando, renglones de precio × piezas, promoción)
+        type Caso = (&'static str, Vec<(f64, i32)>, Option<f64>);
+        let casos: Vec<Caso> = vec![
+            ("un precio que no divide", vec![(10.0, 3)], None),
+            ("tres piezas de un tercio", vec![(0.10, 3)], None),
+            ("con promoción del 33%", vec![(10.0, 3)], Some(33.0)),
+            ("con promoción del 7%", vec![(99.99, 7)], Some(7.0)),
+            ("varias partidas desiguales", vec![(33.33, 3), (7.77, 7), (1.01, 11)], None),
+            ("varias partidas con promoción", vec![(33.33, 3), (7.77, 7)], Some(17.0)),
+            ("un centavo por pieza", vec![(0.01, 9)], None),
+            ("mucho y raro", vec![(1234.56, 13)], Some(11.0)),
+        ];
+
+        for (que, lineas, promo) in casos {
+            let t = Tienda::nueva().con_caja();
+            let promocion = promo.map(|valor| {
+                t.db.execute(
+                    "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, is_active, applies_to)
+                     VALUES ('P', 'percentage', ?1, date('now','localtime','-1 day'), date('now','localtime','+1 day'), 1, 'all')",
+                    params![valor],
+                ).unwrap();
+                t.db.last_insert_rowid()
+            });
+
+            let items: Vec<(i64, i32, f64)> = lineas
+                .iter()
+                .enumerate()
+                .map(|(i, (precio, cantidad))| {
+                    let id = t.producto(&format!("P{}", i), *precio, *cantidad);
+                    (id, *cantidad, 0.0)
+                })
+                .collect();
+            let venta = t.vender(items, promocion);
+
+            let total = cobrado(&t, venta);
+            let devuelto = devolver_pieza_por_pieza(&t, venta);
+
+            assert_eq!(
+                devuelto, total,
+                "{}: se cobraron {} centavos y se devolvieron {}",
+                que, total, devuelto
+            );
+        }
+    }
+
+    #[test]
+    fn devolver_todo_de_golpe_da_lo_mismo_que_de_a_una() {
+        // Si los dos caminos no coinciden, el reembolso depende de en cuántos
+        // viajes lo hizo la cajera, que es exactamente lo que no puede pasar.
+        for (precio, piezas) in [(10.0, 3), (0.10, 3), (33.33, 7), (99.99, 11)] {
+            let de_golpe = {
+                let t = Tienda::nueva().con_caja();
+                let p = t.producto("P", precio, piezas);
+                let venta = t.vender(vec![(p, piezas, 0.0)], None);
+                let partida = t.partidas(venta)[0];
+                Cents::from_pesos(t.devolver(venta, vec![(partida, piezas)], "card").unwrap()).0
+            };
+            let una_a_una = {
+                let t = Tienda::nueva().con_caja();
+                let p = t.producto("P", precio, piezas);
+                let venta = t.vender(vec![(p, piezas, 0.0)], None);
+                devolver_pieza_por_pieza(&t, venta)
+            };
+
+            assert_eq!(de_golpe, una_a_una, "con {} x {}", piezas, precio);
+        }
+    }
+
+    #[test]
+    fn nunca_se_devuelve_mas_de_lo_que_entro() {
+        // La red de seguridad del invariante: pase lo que pase con el redondeo, la
+        // suma de los reembolsos de una venta no puede pasarse de lo cobrado.
+        for (precio, piezas, promo) in [(0.01, 7, None), (7.77, 3, Some(50.0)), (19.99, 9, Some(13.0))] {
+            let t = Tienda::nueva().con_caja();
+            let promocion = promo.map(|valor| {
+                t.db.execute(
+                    "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, is_active, applies_to)
+                     VALUES ('P', 'percentage', ?1, date('now','localtime','-1 day'), date('now','localtime','+1 day'), 1, 'all')",
+                    params![valor],
+                ).unwrap();
+                t.db.last_insert_rowid()
+            });
+            let p = t.producto("P", precio, piezas);
+            let venta = t.vender(vec![(p, piezas, 0.0)], promocion);
+
+            let total = cobrado(&t, venta);
+            let devuelto = devolver_pieza_por_pieza(&t, venta);
+
+            assert!(devuelto <= total, "devolvió {} de {} cobrados", devuelto, total);
+        }
+    }
+
+    #[test]
+    fn el_reparto_aguanta_cientos_de_formas_de_ticket() {
+        // El arreglo tiene que valer para cualquier combinación de precios, piezas y
+        // promoción, no para las ocho que se me ocurrieron. Esta malla encontró un
+        // caso que las ocho no veían, y en la dirección contraria: con dos piezas de
+        // un centavo y 7% de descuento, el código viejo cobraba 9 centavos y
+        // devolvía 10.
+        let precios = [0.01, 0.03, 0.07, 0.10, 1.01, 7.77, 19.99, 33.33, 99.99, 1234.56];
+        let cantidades = [1, 2, 3, 5, 7, 11];
+        let promos = [None, Some(7.0), Some(33.0), Some(50.0), Some(99.0)];
+
+        let mut probados = 0;
+        for precio in precios {
+            for piezas in cantidades {
+                for promo in promos {
+                    let t = Tienda::nueva().con_caja();
+                    let promocion = promo.map(|valor| {
+                        t.db.execute(
+                            "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, is_active, applies_to)
+                             VALUES ('P', 'percentage', ?1, date('now','localtime','-1 day'), date('now','localtime','+1 day'), 1, 'all')",
+                            params![valor],
+                        ).unwrap();
+                        t.db.last_insert_rowid()
+                    });
+                    // Dos partidas, para que el reparto entre partidas también entre.
+                    let a = t.producto("A", precio, piezas);
+                    let b = t.producto("B", precio * 3.0 + 0.01, piezas);
+                    let venta = t.vender(vec![(a, piezas, 0.0), (b, piezas, 0.0)], promocion);
+
+                    let total = cobrado(&t, venta);
+                    let devuelto = devolver_pieza_por_pieza(&t, venta);
+
+                    assert_eq!(
+                        devuelto, total,
+                        "precio {} x {} piezas, promo {:?}: cobrado {}, devuelto {}",
+                        precio, piezas, promo, total, devuelto
+                    );
+                    probados += 1;
+                }
+            }
+        }
+        assert_eq!(probados, precios.len() * cantidades.len() * promos.len());
+    }
+
+    #[test]
+    fn el_reparto_entre_partidas_suma_el_total() {
+        // La otra mitad del invariante, mirada de frente: lo que le toca a cada
+        // partida del total cobrado tiene que sumar el total, sin sobrar ni faltar.
+        for lineas in [
+            vec![(0.01, 1), (0.01, 1), (0.01, 1)],
+            vec![(33.33, 1), (33.33, 1), (33.34, 1)],
+            vec![(0.07, 3), (1.01, 7), (99.99, 11)],
+            vec![(10.0, 1)],
+        ] {
+            let t = Tienda::nueva().con_caja();
+            t.db.execute(
+                "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, is_active, applies_to)
+                 VALUES ('P', 'percentage', 13.0, date('now','localtime','-1 day'), date('now','localtime','+1 day'), 1, 'all')",
+                [],
+            ).unwrap();
+            let promo = t.db.last_insert_rowid();
+
+            let items: Vec<(i64, i32, f64)> = lineas
+                .iter()
+                .enumerate()
+                .map(|(i, (precio, cantidad))| (t.producto(&format!("P{}", i), *precio, *cantidad), *cantidad, 0.0))
+                .collect();
+            let venta = t.vender(items, Some(promo));
+
+            let (total, netos): (f64, f64) = t.db.query_row(
+                "SELECT s.total, COALESCE((SELECT SUM(subtotal) FROM sale_items WHERE sale_id = s.id), 0)
+                 FROM sales s WHERE s.id = ?1",
+                params![venta],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            let total = Cents::from_pesos(total);
+
+            let reparto = reparto_del_total(&t.db, venta, total, Cents::from_pesos(netos)).unwrap();
+            let suma: Cents = reparto.values().copied().sum();
+
+            assert_eq!(suma, total, "el reparto de {:?} no suma el total", lineas);
+        }
+    }
 }
