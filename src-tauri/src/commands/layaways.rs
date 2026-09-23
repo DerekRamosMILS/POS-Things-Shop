@@ -45,6 +45,23 @@ fn row_to_layaway(row: &rusqlite::Row) -> rusqlite::Result<Layaway> {
 }
 
 /// Column on `cash_registers` that accumulates layaway deposits per method.
+/// Comprueba la forma de pago antes de tocar el corte.
+///
+/// Aquí es peor que en una venta: `post_layaway_payment` suma la pierna a la
+/// columna que le toque y no hay reparto que compense, así que un método raro
+/// —un vale, una mayúscula de más— sumaba al efectivo esperado sin que hubiera
+/// entrado un peso al cajón. `layaway_payments.payment_method` tampoco tiene
+/// `CHECK` en la base.
+fn revisar_forma_de_pago(method: &str) -> Result<(), String> {
+    if crate::commands::sales::forma_de_pago_valida(method) {
+        return Ok(());
+    }
+    Err(format!(
+        "'{}' no es una forma de pago que el sistema maneje: solo efectivo, tarjeta o transferencia.",
+        method
+    ))
+}
+
 fn layaway_register_field(method: &str) -> &'static str {
     match method {
         "card" => "total_layaway_card",
@@ -62,6 +79,7 @@ fn post_layaway_payment(
     method: &str,
     user_id: i64,
 ) -> Result<(), String> {
+    revisar_forma_de_pago(method)?;
     let register_id = open_register_id(db);
 
     // Un abono en efectivo entra al cajón: sin turno abierto no hay dónde
@@ -1009,5 +1027,79 @@ mod tests {
         assert_eq!(layaway_register_field("card"), "total_layaway_card");
         assert_eq!(layaway_register_field("transfer"), "total_layaway_transfer");
         assert_eq!(layaway_register_field("otro"), "total_layaway_cash");
+    }
+
+    #[test]
+    fn un_abono_con_forma_de_pago_desconocida_no_infla_el_cajon() {
+        // Peor que en una venta: aquí la pierna se suma a su columna sin reparto que
+        // compense, así que un método raro subía el efectivo esperado del turno sin
+        // que hubiera entrado un peso al cajón.
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 500.0)", []).unwrap();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (1, 'P', 'P', 50.0, 100.0, 50)", [],
+        ).unwrap();
+        let ap = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![CreateLayawayItemDto { product_id: 1, quantity: 5, unit_price: 0.0, variant_id: None }],
+            initial_payment: 0.0, payment_method: "cash".to_string(), notes: None, due_date: None,
+        }).unwrap();
+
+        let antes: f64 = db
+            .query_row("SELECT total_layaway_cash FROM cash_registers WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+
+        for raro in ["vale", "Cash", "efectivo", ""] {
+            let e = abonar_apartado(&db, 1, ap.id, 100.0, raro).unwrap_err();
+            assert!(e.contains("forma de pago"), "{:?} dijo: {}", raro, e);
+        }
+
+        let despues: f64 = db
+            .query_row("SELECT total_layaway_cash FROM cash_registers WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(antes, despues, "el efectivo esperado no puede haberse movido");
+        let saldo: f64 = db
+            .query_row("SELECT paid FROM layaways WHERE id = ?1", params![ap.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(saldo, 0.0, "ni el saldo del apartado");
+    }
+
+    #[test]
+    fn las_tres_formas_de_pago_siguen_sirviendo_para_abonar() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+        db.execute("INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0.0)", []).unwrap();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (1, 'P', 'P', 50.0, 100.0, 50)", [],
+        ).unwrap();
+        let ap = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![CreateLayawayItemDto { product_id: 1, quantity: 5, unit_price: 0.0, variant_id: None }],
+            initial_payment: 0.0, payment_method: "cash".to_string(), notes: None, due_date: None,
+        }).unwrap();
+
+        for (metodo, monto) in [("cash", 100.0), ("card", 150.0), ("transfer", 50.0)] {
+            abonar_apartado(&db, 1, ap.id, monto, metodo).unwrap();
+        }
+
+        let (efectivo, tarjeta, transferencia): (f64, f64, f64) = db
+            .query_row(
+                "SELECT total_layaway_cash, total_layaway_card, total_layaway_transfer
+                 FROM cash_registers WHERE id = 1",
+                [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((efectivo, tarjeta, transferencia), (100.0, 150.0, 50.0));
     }
 }

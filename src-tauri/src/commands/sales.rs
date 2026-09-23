@@ -32,6 +32,22 @@ fn config_number(db: &rusqlite::Connection, key: &str, default: f64) -> f64 {
 }
 
 /// Cash register column that accumulates a given payment method.
+/// Las formas de pago que el sistema sabe manejar.
+///
+/// Existe porque dos funciones clasificaban lo desconocido al revés:
+/// `split_tender` trata todo lo que no sea "cash" como dinero que **no** entra al
+/// cajón, y `register_field` manda lo desconocido a la columna de **efectivo**. Una
+/// pierna con un método raro —un vale, una mayúscula de más, una forma de pago
+/// nueva— subía el efectivo esperado sin que hubiera entrado un peso, y el corte
+/// reportaba un faltante de ese tamaño. `sales.payment_method` sí tenía su `CHECK`;
+/// las piernas del desglose, no.
+pub(crate) const FORMAS_DE_PAGO: [&str; 3] = ["cash", "card", "transfer"];
+
+/// Si el sistema sabe qué hacer con esa forma de pago.
+pub(crate) fn forma_de_pago_valida(method: &str) -> bool {
+    FORMAS_DE_PAGO.contains(&method)
+}
+
 fn register_field(method: &str) -> &'static str {
     match method {
         "card" => "total_card_sales",
@@ -51,6 +67,12 @@ fn split_tender(
     let mut non_cash = Cents::ZERO;
     let mut cash = Cents::ZERO;
     for p in payments {
+        if !forma_de_pago_valida(&p.method) {
+            return Err(format!(
+                "'{}' no es una forma de pago que el sistema maneje: solo efectivo, tarjeta o transferencia.",
+                p.method
+            ));
+        }
         let amount = Cents::from_pesos(p.amount);
         // Un importe negativo es un error; uno en cero simplemente no aporta, y
         // rechazarlo impediría cobrar una venta que suma cero (un obsequio o una
@@ -1816,5 +1838,67 @@ mod integracion {
         assert_eq!(cantidad, -3);
         assert_eq!(previo, 10);
         assert_eq!(nuevo, 7);
+    }
+
+    #[test]
+    fn una_forma_de_pago_desconocida_no_puede_inflar_el_cajon() {
+        // `split_tender` trata todo lo que no sea "cash" como dinero que NO entra al
+        // cajón, y `register_field` manda todo lo desconocido a la columna de
+        // efectivo: las dos clasifican lo desconocido al revés. Una pierna con un
+        // método raro —un vale, una mayúscula de más, una forma de pago nueva— subía
+        // el efectivo esperado sin que hubiera entrado un peso, y el corte reportaba
+        // un faltante de ese tamaño. La cajera cuenta billetes buscando dinero que
+        // nunca estuvo.
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 100.0, 100.0, 10);
+
+        for raro in ["vale", "Cash", "efectivo", "tarjeta", ""] {
+            let mut data = venta(vec![(p, 1)]);
+            data.payment_method = "mixed".to_string();
+            data.payments = vec![
+                PaymentSplitDto { method: raro.into(), amount: 60.0 },
+                PaymentSplitDto { method: "cash".into(), amount: 40.0 },
+            ];
+
+            let e = t.cobrar(data).unwrap_err();
+            assert!(
+                e.contains("forma de pago"),
+                "{:?} tenía que rechazarse y dijo: {}", raro, e
+            );
+        }
+
+        // Y el cajón sigue como estaba: ninguna venta pasó.
+        let caja = t.caja();
+        assert_eq!(expected_cash(&caja), 0.0);
+    }
+
+    #[test]
+    fn las_tres_formas_de_pago_de_siempre_siguen_pasando() {
+        for metodo in ["cash", "card", "transfer"] {
+            let t = Tienda::nueva().con_caja(0.0);
+            let p = t.producto("CAM", 100.0, 100.0, 10);
+            let mut data = venta(vec![(p, 1)]);
+            data.payment_method = metodo.to_string();
+            data.payments = vec![PaymentSplitDto { method: metodo.into(), amount: 100.0 }];
+
+            let venta = t.cobrar(data).unwrap();
+            assert_eq!(venta.total, 100.0, "{} tenía que pasar", metodo);
+        }
+    }
+
+    #[test]
+    fn el_reparto_y_la_columna_del_corte_clasifican_igual() {
+        // La raíz del bug: `split_tender` decide si una pierna entra al cajón y
+        // `register_field` decide en qué columna cae. Para cada forma de pago
+        // aceptada, las dos tienen que estar de acuerdo.
+        for metodo in FORMAS_DE_PAGO {
+            let es_efectivo_para_el_reparto = metodo == "cash";
+            let cae_en_efectivo = register_field(metodo) == "total_cash_sales";
+            assert_eq!(
+                es_efectivo_para_el_reparto, cae_en_efectivo,
+                "{}: el reparto dice efectivo={} y la columna dice efectivo={}",
+                metodo, es_efectivo_para_el_reparto, cae_en_efectivo
+            );
+        }
     }
 }

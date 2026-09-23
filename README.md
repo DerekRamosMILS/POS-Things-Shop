@@ -487,6 +487,7 @@ vez de sobre el caso que se le ocurrió a alguien:
 | La existencia de una prenda es la suma de sus movimientos | Un camino que cambie el stock sin dejar renglón, o que anote un monto distinto del que movió |
 | La existencia de una talla es la suma de sus movimientos, y el total del producto la suma de sus tallas | Quitar una talla y que su mercancía se esfume; contar una talla y mover otra |
 | El efectivo esperado del turno es igual a lo que dicen las tablas de ventas, abonos, devoluciones y gastos | Un movimiento que entre al cajón sin sumarse a la columna del corte, o al revés |
+| Una pierna del desglose que el reparto trate como "no entra al cajón" no puede caer en la columna de efectivo | Una forma de pago que el sistema no conozca |
 
 Los dos del inventario se cruzan contra ocho caminos —venta, devolución,
 cancelación, compra, ajuste, reserva y cancelación de apartado, conteo del celular
@@ -494,6 +495,18 @@ y edición de tallas—. El del cajón, contra una jornada de dieciséis movimie
 precios que no dividen bien. Las tres están falsificadas: quitar el renglón que
 cierra el reparto en tallas, el movimiento de una compra, la columna de un abono o
 la de un gasto hace fallar la prueba que corresponde.
+
+### Las formas de pago se revisan en la puerta
+
+Solo efectivo, tarjeta y transferencia. `sales.payment_method` siempre tuvo su
+`CHECK` en la base; las piernas del desglose —`sale_payments.method` y
+`layaway_payments.payment_method`— no, y dos funciones clasificaban lo desconocido
+**al revés**: el reparto del cobro trata todo lo que no sea `cash` como dinero que
+no entra al cajón, y la columna del corte manda lo desconocido a la de efectivo. Una
+pierna con un método raro —un vale, una mayúscula de más, una forma de pago nueva
+que alguien agregue al frontend sin tocar el backend— subía el efectivo esperado sin
+que hubiera entrado un peso, y el corte reportaba un faltante de ese tamaño. En los
+abonos de apartado era peor: ahí no hay reparto que compense.
 
 ### Revisiones de consistencia
 
