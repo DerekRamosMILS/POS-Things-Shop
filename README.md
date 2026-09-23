@@ -88,6 +88,20 @@ dos protecciones.
 Cada push a `main` también compila y prueba en Windows (`ci.yml`), así que una
 regresión en el código específico de esa plataforma se detecta enseguida.
 
+### Lo que cuidan los flujos
+
+Publicar exige que las pruebas pasen, que el `.sig` exista, y termina pidiendo el
+manifiesto por donde lo pide la app para bajar lo que anuncia: un release "exitoso" con
+una URL que no resuelve deja a la tienda sin actualizarse y sin decir nada.
+
+La prueba `flujosDeCi` vigila tres cosas de los propios flujos: que nada silencie un
+fallo (`continue-on-error`, `|| true`), que esas comprobaciones sigan ahí, y que ningún
+`if:` de paso mire una variable que ese paso define para sí mismo. Lo último es un bug
+que había: el `if:` se evalúa **antes** de armar el `env:` del paso, así que el paso del
+certificado de firma de Windows existía completo y no corría nunca. Quien configurara el
+secreto seguiría viendo "editor desconocido" en SmartScreen sin ninguna pista de por
+qué.
+
 ### Secretos del repositorio
 
 | Secreto | Para qué | Sin él |

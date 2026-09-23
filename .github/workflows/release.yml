@@ -24,6 +24,13 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
+    # A nivel de trabajo a propósito. El `if:` de un paso **no ve el `env:` de ese
+    # mismo paso** —se evalúa antes de armarlo—, así que `if: env.WINDOWS_CERT_BASE64`
+    # con el secreto declarado solo en ese paso era siempre falso y el paso del
+    # certificado no corría nunca. Quien configurara el secreto seguiría viendo
+    # "editor desconocido" en SmartScreen sin ninguna pista de por qué.
+    env:
+      WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,8 +112,6 @@ jobs:
       # actualizador: sirve para que SmartScreen no muestre "editor desconocido".
       - name: Preparar certificado de firma
         if: env.WINDOWS_CERT_BASE64 != ''
-        env:
-          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
         shell: pwsh
         run: |
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx",
