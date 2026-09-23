@@ -329,7 +329,13 @@ ahora* y para el día que la app se quede abierta de corrido. Por lo mismo el
 catálogo se publica **solo cuando cambia** y no en cada vuelta.
 
 Los pendientes se leen en páginas de 200, hasta 5 páginas por vuelta; lo que no
-alcance entra en la siguiente. El listado de KV es *eventualmente consistente* y
+alcance entra en la siguiente. Ese camino tiene prueba con 205 capturas: que el
+cursor lleve a la siguiente página, que la última diga que ya terminó, que entre las
+dos estén todas sin repetir, y que un cursor de una tienda no abra la carpeta de
+otra. Un teléfono que capturó días sin conexión sincroniza de golpe, y si el cursor
+no viajara bien la tienda se quedaría con las primeras 200 sin un error que lo diga.
+El tope de 200 por tanda de confirmación también está probado por los dos lados, para
+que el relevo no acepte menos de lo que el punto de venta manda. El listado de KV es *eventualmente consistente* y
 puede enseñar algo que ya se borró, lo cual no estorba porque la tienda reconoce
 por `captura_id` lo que ya tiene.
 

@@ -289,3 +289,121 @@ describe('el catálogo para contar', () => {
         expect((await llamar('/api/catalogo', { method: 'PUT', body: JSON.stringify({ productos: [] }) })).status).toBe(401);
     });
 });
+
+describe('cuando hay más de una página de pendientes', () => {
+    /**
+     * Un teléfono que capturó días sin conexión sincroniza de golpe. El listado va
+     * de 200 en 200 y el punto de venta sigue el cursor hasta agotarlo; si el
+     * cursor no viaja bien, la tienda se queda con las primeras 200 y las demás no
+     * aparecen nunca, sin un error que lo diga. Nunca se había probado con más de
+     * una página.
+     */
+    it('el cursor lleva a la siguiente y al final se acaba', async () => {
+        const s = secreto();
+        const cuantas = 205;
+        for (let i = 0; i < cuantas; i++) {
+            await subir(s, `c-${String(i).padStart(4, '0')}`);
+        }
+
+        const primera = await (await llamar('/api/pendientes', { secreto: s })).json() as
+            { pendientes: { captura_id: string }[]; completo: boolean; cursor: string | null };
+
+        expect(primera.pendientes).toHaveLength(200);
+        expect(primera.completo, 'con 205 no puede decir que ya terminó').toBe(false);
+        expect(primera.cursor, 'tiene que dar por dónde seguir').toBeTruthy();
+
+        const segunda = await (await llamar(
+            `/api/pendientes?cursor=${encodeURIComponent(primera.cursor!)}`, { secreto: s },
+        )).json() as { pendientes: { captura_id: string }[]; completo: boolean; cursor: string | null };
+
+        expect(segunda.pendientes).toHaveLength(cuantas - 200);
+        expect(segunda.completo, 'la última página tiene que decir que ya está').toBe(true);
+        expect(segunda.cursor).toBeNull();
+
+        // Y entre las dos páginas están todas, sin repetir ni faltar ninguna.
+        const vistas = new Set([
+            ...primera.pendientes.map(p => p.captura_id),
+            ...segunda.pendientes.map(p => p.captura_id),
+        ]);
+        expect(vistas.size).toBe(cuantas);
+    });
+
+    it('un cursor de otra tienda no abre su carpeta', async () => {
+        // El cursor es un dato opaco que viaja por la URL. Si sirviera para leer la
+        // carpeta de otro secreto, todo el aislamiento se cae por ahí.
+        const a = secreto();
+        const b = secreto();
+        for (let i = 0; i < 205; i++) await subir(a, `a-${String(i).padStart(4, '0')}`);
+        await subir(b, 'solo-de-b');
+
+        const deA = await (await llamar('/api/pendientes', { secreto: a })).json() as { cursor: string | null };
+        expect(deA.cursor).toBeTruthy();
+
+        const conCursorAjeno = await (await llamar(
+            `/api/pendientes?cursor=${encodeURIComponent(deA.cursor!)}`, { secreto: b },
+        )).json() as { pendientes: { captura_id: string }[] };
+
+        for (const p of conCursorAjeno.pendientes) {
+            expect(p.captura_id.startsWith('a-'), `se colaron cosas de la otra tienda: ${p.captura_id}`).toBe(false);
+        }
+    });
+});
+
+describe('los límites que quedaban sin probar', () => {
+    it('un catálogo demasiado grande se rechaza por la cabecera', async () => {
+        // Igual que una captura: se mira la cabecera para no tragarse los megas y
+        // después decir que no. Este camino no estaba cubierto.
+        const s = secreto();
+        const res = await llamar('/api/catalogo', {
+            method: 'PUT', secreto: s,
+            headers: { 'content-length': String(50 * 1024 * 1024) },
+            body: JSON.stringify({ productos: [] }),
+        });
+        expect(res.status).toBe(413);
+    });
+
+    it('pedir el borrado de una lista que no es lista se rechaza', async () => {
+        const s = secreto();
+        for (const ids of [undefined, null, 'c-1', 42, {}]) {
+            const res = await llamar('/api/recibido', {
+                method: 'POST', secreto: s, body: JSON.stringify({ ids }),
+            });
+            expect(res.status, `con ids=${JSON.stringify(ids)}`).toBe(400);
+        }
+    });
+
+    it('un identificador con barra no borra fuera de su carpeta', async () => {
+        const a = secreto();
+        const b = secreto();
+        await subir(a, 'de-a');
+        await subir(b, 'de-b');
+
+        // El de B intenta borrar el de A escapándose de su carpeta.
+        const huellaFalsa = '../t/cualquiera/de-a';
+        const res = await llamar('/api/recibido', {
+            method: 'POST', secreto: b, body: JSON.stringify({ ids: [huellaFalsa] }),
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json() as { borradas: number }).borradas, 'no puede contar como borrado').toBe(0);
+
+        // Y lo de A sigue ahí.
+        expect((await pendientes(a)).pendientes.map(p => p.captura_id)).toContain('de-a');
+    });
+
+    it('el punto de venta puede confirmar justo doscientas, no más', async () => {
+        // El tope del relevo y el tamaño de tanda del punto de venta tienen que
+        // coincidir: si el relevo aceptara menos de lo que la tienda manda, las
+        // confirmaciones fallarían y todo se recogería una y otra vez.
+        const s = secreto();
+        const doscientas = Array.from({ length: 200 }, (_, i) => `c-${i}`);
+        const justas = await llamar('/api/recibido', {
+            method: 'POST', secreto: s, body: JSON.stringify({ ids: doscientas }),
+        });
+        expect(justas.status, 'doscientas es lo que manda la tienda por tanda').toBe(200);
+
+        const una_mas = await llamar('/api/recibido', {
+            method: 'POST', secreto: s, body: JSON.stringify({ ids: [...doscientas, 'c-200'] }),
+        });
+        expect(una_mas.status).toBe(400);
+    });
+});
