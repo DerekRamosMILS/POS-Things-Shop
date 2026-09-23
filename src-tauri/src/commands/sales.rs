@@ -67,6 +67,27 @@ fn register_field(method: &str) -> &'static str {
     }
 }
 
+/// La columna donde una pierna **ya escrita** cargó su importe.
+///
+/// Deshacer una venta tiene que espejar la historia, no las reglas de hoy. Las
+/// piernas del desglose no se validaban hasta hace poco, así que la base de una
+/// tienda puede traer un método que ahora se rechazaría; y esa pierna, cuando se
+/// cobró, cayó en la columna de efectivo, porque eso era lo que hacía el comodín.
+/// Devolverla ahí es lo correcto: deja el corte como estaba antes de la venta.
+///
+/// Se separa de `register_field` a propósito. Escribir algo nuevo con un método
+/// desconocido es un error del programa y revienta; deshacer algo viejo no puede
+/// reventar, o esa venta no se puede cancelar nunca.
+fn columna_historica(method: &str) -> &'static str {
+    match method {
+        "cash" => "total_cash_sales",
+        "card" => "total_card_sales",
+        "transfer" => "total_transfer_sales",
+        // Lo que el comodín de antes hacía con lo desconocido.
+        _ => "total_cash_sales",
+    }
+}
+
 /// Turn the tender into the amount actually applied to the sale per method.
 ///
 /// Only cash can be over-tendered (the surplus becomes change), so the non-cash
@@ -711,7 +732,7 @@ pub fn cancelar_venta(db: &rusqlite::Connection, user_id: i64, sale_id: i64) -> 
                     db.execute(
                         &format!(
                             "UPDATE cash_registers SET {} = {} - ?1 WHERE id = ?2",
-                            register_field(&method), register_field(&method)
+                            columna_historica(&method), columna_historica(&method)
                         ),
                         params![amount, cr_id],
                     ).map_err(|e| e.to_string())?;
@@ -1928,5 +1949,38 @@ mod integracion {
                 metodo, es_efectivo_para_el_reparto, cae_en_efectivo
             );
         }
+    }
+
+    #[test]
+    fn cancelar_una_venta_con_una_pierna_vieja_y_rara_no_revienta_la_caja() {
+        // Las piernas del desglose no se validaban hasta esta semana, así que la base
+        // de una tienda puede traer un método que hoy no se aceptaría. Cancelar esa
+        // venta lee el método **de la base** para deshacer su columna: con el
+        // `unreachable!` que se puso en la escritura, eso reventaba el punto de venta
+        // y la venta no se podía cancelar nunca. Deshacer tiene que espejar la
+        // historia, no las reglas de hoy.
+        let t = Tienda::nueva().con_caja(1000.0);
+        let p = t.producto("CAM", 100.0, 50.0, 10);
+        let venta = t.cobrar(venta(vec![(p, 1)])).unwrap();
+
+        // Se ensucia la pierna como si la hubiera escrito una versión anterior.
+        t.db.execute(
+            "UPDATE sale_payments SET method = 'vale' WHERE sale_id = ?1",
+            params![venta.id],
+        ).unwrap();
+
+        let aviso = cancelar_venta(&t.db, 1, venta.id)
+            .expect("cancelar una venta vieja no puede reventar");
+
+        assert!(!aviso.is_empty());
+        let estado: String = t.db
+            .query_row("SELECT status FROM sales WHERE id = ?1", params![venta.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(estado, "cancelled");
+
+        // Y la columna que se había cargado queda deshecha: el efectivo esperado
+        // vuelve a ser el fondo.
+        let caja = t.caja();
+        assert_eq!(expected_cash(&caja), 1000.0, "el cajón tiene que volver a su fondo");
     }
 }

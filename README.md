@@ -525,6 +525,14 @@ Los mapeos a columna del corte ya no llevan comodín: están enumeradas las tres
 una cuarta revienta la prueba en vez de caer callada en la de efectivo. Quien agregue
 una forma de pago tiene que decir dónde cae.
 
+**Escribir y deshacer son distintos.** Cancelar una venta lee el método de la pierna
+**de la base** para devolver su importe a la columna donde cayó, y esas filas se
+escribieron cuando no había validación: con el mismo mapeo estricto, cancelar una
+venta vieja con una pierna rara reventaba el punto de venta y esa venta no se podía
+cancelar nunca. Deshacer espeja la historia —lo desconocido volvió a la columna de
+efectivo, que es donde el comodín lo había puesto—, y escribir algo nuevo con un
+método desconocido sigue siendo un error del programa.
+
 Y una nota que vale más que el arreglo: la prueba que existía afirmaba
 `register_field("desconocido") == "total_cash_sales"`. Tenía el bug escrito como
 comportamiento correcto, así que ninguna corrida en verde iba a delatarlo. **Una
