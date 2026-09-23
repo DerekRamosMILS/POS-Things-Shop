@@ -508,6 +508,15 @@ que alguien agregue al frontend sin tocar el backend— subía el efectivo esper
 que hubiera entrado un peso, y el corte reportaba un faltante de ese tamaño. En los
 abonos de apartado era peor: ahí no hay reparto que compense.
 
+Los mapeos a columna del corte ya no llevan comodín: están enumeradas las tres, y
+una cuarta revienta la prueba en vez de caer callada en la de efectivo. Quien agregue
+una forma de pago tiene que decir dónde cae.
+
+Y una nota que vale más que el arreglo: la prueba que existía afirmaba
+`register_field("desconocido") == "total_cash_sales"`. Tenía el bug escrito como
+comportamiento correcto, así que ninguna corrida en verde iba a delatarlo. **Una
+prueba también puede proteger un bug.**
+
 ### Revisiones de consistencia
 
 Los arreglos impiden que se produzcan nuevas inconsistencias, pero **ninguna
@@ -522,6 +531,8 @@ que debería dar cero:
 - Apartados con más abonado que su total
 - Turnos cerrados sin lo que se contó
 - Ventas sin ninguna partida
+- Pagos con una forma que el sistema no conoce (el dinero está cobrado y el reporte
+  diario no tiene columna donde enseñarlo)
 
 Solo cuenta; no corrige. Tocar historia real es una decisión de quien es dueño de
 esos datos, no del programa.

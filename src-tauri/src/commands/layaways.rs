@@ -62,11 +62,18 @@ fn revisar_forma_de_pago(method: &str) -> Result<(), String> {
     ))
 }
 
+/// La columna del turno donde cae cada abono, enumeradas todas y sin comodín.
+///
+/// El comodín mandaba lo desconocido a la columna de efectivo, y aquí eso subía el
+/// efectivo esperado sin que hubiera entrado un peso al cajón. `revisar_forma_de_pago`
+/// ya no deja pasar otra cosa; esto obliga además a decidir la columna de cualquier
+/// forma de pago que se agregue en el futuro.
 fn layaway_register_field(method: &str) -> &'static str {
     match method {
+        "cash" => "total_layaway_cash",
         "card" => "total_layaway_card",
         "transfer" => "total_layaway_transfer",
-        _ => "total_layaway_cash",
+        otro => unreachable!("forma de pago sin columna en el corte: {}", otro),
     }
 }
 
@@ -1023,10 +1030,17 @@ mod tests {
 
     #[test]
     fn cada_metodo_suma_en_su_propia_columna() {
+        // Afirmaba que "otro" cayera en la columna del efectivo: el bug escrito como
+        // comportamiento correcto.
         assert_eq!(layaway_register_field("cash"), "total_layaway_cash");
         assert_eq!(layaway_register_field("card"), "total_layaway_card");
         assert_eq!(layaway_register_field("transfer"), "total_layaway_transfer");
-        assert_eq!(layaway_register_field("otro"), "total_layaway_cash");
+    }
+
+    #[test]
+    #[should_panic(expected = "forma de pago sin columna")]
+    fn un_abono_con_forma_sin_columna_es_un_error_del_programa() {
+        layaway_register_field("vale");
     }
 
     #[test]
@@ -1101,5 +1115,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!((efectivo, tarjeta, transferencia), (100.0, 150.0, 50.0));
+    }
+
+    #[test]
+    fn cada_forma_de_pago_tiene_su_columna_y_ninguna_se_confunde() {
+        // El bug fue un comodín que mandaba lo desconocido a la columna de efectivo.
+        // Ahora están enumeradas: esta prueba comprueba que cada una cae en su propia
+        // columna y que el efectivo es solo el efectivo.
+        use std::collections::HashSet;
+        let mut vistas = HashSet::new();
+        for metodo in crate::commands::sales::FORMAS_DE_PAGO {
+            let columna = layaway_register_field(metodo);
+            assert!(vistas.insert(columna), "{} comparte columna con otra forma", metodo);
+            let es_efectivo = columna == "total_layaway_cash";
+            assert_eq!(es_efectivo, metodo == "cash", "{} cayó en {}", metodo, columna);
+        }
+        assert_eq!(vistas.len(), 3);
     }
 }

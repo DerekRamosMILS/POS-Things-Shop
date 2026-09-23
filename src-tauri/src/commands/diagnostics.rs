@@ -135,6 +135,21 @@ fn revisiones(db: &Connection) -> Vec<(&'static str, i64)> {
             cuenta("SELECT COUNT(*) FROM cash_registers WHERE status = 'closed' AND closing_amount IS NULL"),
         ),
         (
+            // Las piernas del desglose no tenían `CHECK` en la base hasta que se
+            // empezó a revisarlas en la puerta. Una con un método que el sistema no
+            // conoce no tiene columna en el reporte diario: el dinero está cobrado y
+            // el reporte de ese día no lo enseña, sin decir nada.
+            "Pagos con una forma que el sistema no conoce",
+            cuenta(
+                "SELECT (SELECT COUNT(*) FROM sale_payments
+                          WHERE method NOT IN ('cash','card','transfer'))
+                      + (SELECT COUNT(*) FROM layaway_payments
+                          WHERE payment_method NOT IN ('cash','card','transfer'))
+                      + (SELECT COUNT(*) FROM returns
+                          WHERE refund_method NOT IN ('cash','card','transfer'))",
+            ),
+        ),
+        (
             "Ventas sin ninguna partida",
             cuenta(
                 "SELECT COUNT(*) FROM sales s
@@ -465,5 +480,38 @@ mod tests {
 
         let stock: i32 = conn.query_row("SELECT stock FROM products WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(stock, 99, "el reporte no corrige, solo cuenta");
+    }
+
+    #[test]
+    fn el_reporte_delata_un_pago_con_forma_desconocida() {
+        // El dinero está cobrado y el reporte diario no lo enseña: no tiene columna
+        // donde ponerlo. Ahora se revisa en la puerta, pero los renglones que ya
+        // estuvieran en la base de la tienda siguen ahí.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sales (id, folio, user_id, subtotal, discount_total, tax, total,
+                                payment_method, amount_paid, change_amount)
+             VALUES (1, 'V-1', 1, 100, 0, 0, 100, 'cash', 100, 0)", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (1, 'P', 'P', 50, 100, 1)", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku, quantity, unit_price, discount, subtotal)
+             VALUES (1, 1, 'P', 'P', 1, 100, 0, 100)", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sale_payments (sale_id, method, amount) VALUES (1, 'vale', 100)", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Pagos con una forma que el sistema no conoce"), "{}", report);
+        assert!(!report.contains("Todo cuadra"));
     }
 }

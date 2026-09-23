@@ -48,11 +48,22 @@ pub(crate) fn forma_de_pago_valida(method: &str) -> bool {
     FORMAS_DE_PAGO.contains(&method)
 }
 
+/// La columna del turno donde cae cada forma de pago.
+///
+/// Enumeradas todas, sin comodín. El comodín mandaba lo desconocido a la columna
+/// de **efectivo**, justo al contrario de lo que hace el reparto del cobro, que
+/// trata lo que no es `cash` como dinero que no entra al cajón. Esa discrepancia
+/// inflaba el efectivo esperado del corte. `split_tender` ya rechaza lo que no
+/// conoce; esto lo deja imposible también aquí, y obliga a decidir la columna de
+/// cualquier forma de pago que se agregue.
 fn register_field(method: &str) -> &'static str {
     match method {
+        "cash" => "total_cash_sales",
         "card" => "total_card_sales",
         "transfer" => "total_transfer_sales",
-        _ => "total_cash_sales",
+        // Inalcanzable: `split_tender` no deja pasar otra cosa. Si alguien agrega
+        // una forma de pago, tiene que venir aquí a decir dónde cae.
+        otro => unreachable!("forma de pago sin columna en el corte: {}", otro),
     }
 }
 
@@ -1025,10 +1036,27 @@ mod tests {
 
     #[test]
     fn register_field_maps_every_method() {
+        // Esta prueba afirmaba `register_field("desconocido") == "total_cash_sales"`,
+        // es decir, tenía el bug escrito como comportamiento correcto: dinero que el
+        // reparto del cobro trata como "no entró al cajón" cayendo en la columna del
+        // efectivo esperado. Una prueba también puede proteger un bug.
         assert_eq!(register_field("cash"), "total_cash_sales");
         assert_eq!(register_field("card"), "total_card_sales");
         assert_eq!(register_field("transfer"), "total_transfer_sales");
-        assert_eq!(register_field("desconocido"), "total_cash_sales");
+
+        // Y cada forma de pago aceptada tiene su propia columna, sin compartir.
+        use std::collections::HashSet;
+        let columnas: HashSet<&str> = FORMAS_DE_PAGO.iter().map(|m| register_field(m)).collect();
+        assert_eq!(columnas.len(), FORMAS_DE_PAGO.len());
+    }
+
+    #[test]
+    #[should_panic(expected = "forma de pago sin columna")]
+    fn una_forma_de_pago_sin_columna_es_un_error_del_programa_no_un_silencio() {
+        // Que reviente aquí es a propósito: `split_tender` ya no deja pasar otra cosa,
+        // así que llegar hasta acá significa que alguien agregó una forma de pago y no
+        // dijo dónde cae. Mejor que se note al probar que en el corte de la tienda.
+        register_field("vale");
     }
 
     fn db_with_promo(
