@@ -652,6 +652,21 @@ La lectura se captura aunque el cursor esté dentro de un campo —en el mostrad
 casi siempre lo está— y el campo se restaura para que el código no quede pegado
 en el buscador.
 
+### El candado de la base se suelta antes de imprimir
+
+Hablar con el spooler puede tardar lo que quiera —impresora apagada, sin papel, o de
+red que no contesta— y mientras el candado de la base esté tomado no corre ningún
+otro comando: no se puede cobrar ni buscar. Con gente formada, eso es la tienda
+parada, y a distancia se reporta como "a veces se traba" sin forma de llegar a la
+causa.
+
+Los cuatro caminos de impresión arman el ticket con la base abierta, la cierran, y
+solo entonces imprimen. La regla estaba escrita y se cumplía, pero nada la ataba: la
+prueba `nadie_habla_con_la_impresora_con_el_candado_tomado` lee el propio archivo y
+falla si un camino nuevo la olvida. Lo que hay que comprobar es la forma del código
+—una prueba de comportamiento no distingue "imprimió con el candado suelto" de
+"imprimió con el candado tomado"—.
+
 ### Impresora de tickets y cajón de dinero
 
 El cajón de dinero **se conecta a la impresora**, no a la computadora: lleva un

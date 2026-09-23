@@ -603,4 +603,62 @@ mod tests {
             assert_ne!(method_label(m), "Otro");
         }
     }
+
+    /// La regla del módulo, comprobada en vez de confiada.
+    ///
+    /// «El candado de la base se suelta antes de hablar con la impresora» está escrito
+    /// arriba y los cuatro caminos la cumplen, pero nada lo garantizaba: un quinto
+    /// camino que la olvide congela la caja mientras el spooler espera a una impresora
+    /// apagada o sin papel. Desde 2000 km eso se reporta como «a veces se traba», y no
+    /// hay forma de llegar a la causa.
+    ///
+    /// Se lee el propio archivo porque lo que hay que comprobar es la forma del código,
+    /// no su resultado: una prueba de comportamiento no puede distinguir «imprimió con
+    /// el candado suelto» de «imprimió con el candado tomado».
+    #[test]
+    fn nadie_habla_con_la_impresora_con_el_candado_tomado() {
+        let codigo = include_str!("mod.rs");
+        // Solo el código de producción: las pruebas llaman a `print_raw` a propósito.
+        let produccion = &codigo[..codigo.find("#[cfg(test)]").unwrap_or(codigo.len())];
+
+        let mut culpables: Vec<String> = Vec::new();
+        for trozo in produccion.split("\npub fn ").skip(1) {
+            let nombre = trozo
+                .split(['(', '<'])
+                .next()
+                .unwrap_or("?")
+                .trim()
+                .to_string();
+            let Some(imprime) = trozo.find("spooler::print_raw") else { continue };
+            let Some(toma) = trozo.find("state.conn()") else { continue };
+            if toma > imprime {
+                continue; // Toma la base después de imprimir: no hay riesgo.
+            }
+            let entre = &trozo[toma..imprime];
+            // O se suelta a mano, o el bloque donde vive la conexión se cerró.
+            let suelta = entre.contains("drop(") || entre.contains("};");
+            if !suelta {
+                culpables.push(nombre);
+            }
+        }
+
+        assert!(
+            culpables.is_empty(),
+            "estas funciones hablan con la impresora sin soltar el candado de la base: {:?}",
+            culpables
+        );
+    }
+
+    #[test]
+    fn la_prueba_de_arriba_de_verdad_mira_los_caminos_de_impresion() {
+        // Si el patrón se rompe, la lista queda vacía y la guarda pasa sin revisar nada.
+        let codigo = include_str!("mod.rs");
+        let produccion = &codigo[..codigo.find("#[cfg(test)]").unwrap_or(codigo.len())];
+        let caminos = produccion
+            .split("\npub fn ")
+            .skip(1)
+            .filter(|t| t.contains("spooler::print_raw"))
+            .count();
+        assert!(caminos >= 4, "se esperaban al menos cuatro caminos de impresión, se vieron {}", caminos);
+    }
 }
