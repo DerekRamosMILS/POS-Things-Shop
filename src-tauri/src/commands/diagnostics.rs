@@ -21,15 +21,29 @@ use crate::session::{require_admin, SessionState};
 const LOG_TAIL_LINES: usize = 400;
 
 /// Tablas cuyo conteo ayuda a dimensionar el problema.
+///
+/// Se enumeran a mano para que nadie cuente una tabla sin pensarlo, y la prueba
+/// `el_reporte_cuenta_todas_las_tablas_del_negocio` falla si el esquema crece y
+/// esta lista no: se había quedado sin `conteos` ni `capturas_rechazadas`, que
+/// son la captura desde el celular, justo lo que no se puede ver desde lejos.
 const TABLES: &[&str] = &[
-    "products", "product_variants", "categories", "suppliers", "customers",
-    "sales", "sale_items", "sale_payments", "layaways", "layaway_payments",
-    "returns", "cash_registers", "expenses", "promotions", "users",
-    "inventory_movements", "app_logs", "sessions",
+    "products", "product_variants", "product_images", "product_images_archivo",
+    "categories", "suppliers", "customers",
+    "sales", "sale_items", "sale_payments", "returns", "return_items",
+    "layaways", "layaway_items", "layaway_payments",
+    "cash_registers", "expenses", "expenses_archivo", "promotions",
+    "price_history", "inventory_movements",
+    "conteos", "capturas_rechazadas",
+    "users", "sessions", "login_attempts",
+    "notifications", "app_logs", "system_config",
 ];
 
 /// Ajustes que describen el equipo. Se listan explícitamente en lugar de volcar
 /// toda la tabla, para no incluir nada que no se haya pensado.
+/// Nunca una clave privada: `es_privada` marca el secreto del relevo, con el que
+/// cualquiera subiría productos y conteos desde cualquier parte del mundo, y este
+/// reporte se manda por WhatsApp. La prueba
+/// `el_reporte_nunca_lleva_el_secreto_del_relevo` lo comprueba clave por clave.
 const REPORTED_CONFIG: &[&str] = &[
     "store_name", "currency_symbol", "tax_rate", "low_stock_threshold",
     "auto_backup", "max_backups", "session_hours", "log_retention_days",
@@ -37,6 +51,9 @@ const REPORTED_CONFIG: &[&str] = &[
     "drawer_kick_command", "drawer_open_on_cash",
     "scanner_enabled", "scanner_suffix", "scanner_prefix",
     "scanner_max_gap_ms", "scanner_min_length",
+    // Lo que hace falta para diagnosticar a distancia: a qué buzón apunta la
+    // tienda, qué caja es, y cuándo salió del equipo la última copia.
+    "relevo_url", "terminal_id", "ultima_copia_externa", "version_instalada",
 ];
 
 fn scalar(db: &Connection, sql: &str) -> String {
@@ -239,5 +256,76 @@ mod tests {
         assert_eq!(human_size(0), "0.0 B");
         assert_eq!(human_size(2048), "2.0 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn el_reporte_cuenta_todas_las_tablas_del_negocio() {
+        // La lista se enumera a mano y se quedó atrás: `conteos` y
+        // `capturas_rechazadas` —la captura desde el celular, que es justo lo
+        // que falla en remoto— no aparecían, así que el reporte no servía para
+        // diagnosticar lo único que no se puede ver desde lejos.
+        let conn = db();
+        let del_esquema: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table'
+                   AND name NOT LIKE 'sqlite_%' AND name != '_migrations'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap();
+
+        let faltantes: Vec<&String> = del_esquema
+            .iter()
+            .filter(|t| !TABLES.contains(&t.as_str()))
+            .collect();
+
+        assert!(
+            faltantes.is_empty(),
+            "el reporte no cuenta estas tablas: {:?}",
+            faltantes
+        );
+    }
+
+    #[test]
+    fn el_reporte_dice_como_esta_la_captura_por_celular() {
+        let conn = db();
+        let report = build_report(&conn);
+        assert!(report.contains("conteos"), "falta el conteo de conteos");
+        assert!(report.contains("capturas_rechazadas"), "faltan las rechazadas");
+        assert!(report.contains("relevo_url"), "falta a qué relevo apunta la tienda");
+    }
+
+    #[test]
+    fn el_reporte_nunca_lleva_el_secreto_del_relevo() {
+        // Con ese secreto cualquiera sube productos y conteos que cambian el
+        // inventario desde cualquier parte del mundo, y el reporte se manda por
+        // WhatsApp.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO system_config (key, value) VALUES ('relevo_secreto', ?1)",
+            rusqlite::params!["s3cr3t0-larguisimo-de-treinta-y-dos-bytes"],
+        )
+        .unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(!report.contains("s3cr3t0"), "el reporte llevaba el secreto del relevo");
+        for key in REPORTED_CONFIG {
+            assert!(
+                !crate::commands::config::es_privada(key),
+                "{} es privada y no puede ir en el reporte",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn el_reporte_dice_cuando_fue_la_ultima_copia_fuera_del_equipo() {
+        // Los respaldos de todos los días viven en el mismo disco: la copia que
+        // protege de que la computadora se muera es la que sale del equipo.
+        let report = build_report(&db());
+        assert!(report.contains("ultima_copia_externa"));
     }
 }

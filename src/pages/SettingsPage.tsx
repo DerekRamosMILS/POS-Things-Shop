@@ -8,6 +8,7 @@ import CaptureSettings from '../components/CaptureSettings';
 import CategorySettings from '../components/CategorySettings';
 import TamanoSettings from '../components/TamanoSettings';
 import HardwareSettings from '../components/HardwareSettings';
+import { hoyLocal } from '../utils';
 import type { SystemConfig } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
@@ -176,7 +177,10 @@ export default function SettingsPage() {
     /// que el encargado de la tienda puede mandar sin tener que explicar nada.
     const handleDiagnostics = async () => {
         try {
-            const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+            // La hora local de la tienda: un nombre con la hora de UTC no cuadra
+            // con lo que el encargado ve en su reloj al mandarlo.
+            const ahora = new Date();
+            const stamp = `${hoyLocal()}-${String(ahora.getHours()).padStart(2, '0')}-${String(ahora.getMinutes()).padStart(2, '0')}`;
             const target = await save({
                 title: 'Guardar reporte de diagnóstico',
                 defaultPath: `diagnostico-things-shop-${stamp}.txt`,

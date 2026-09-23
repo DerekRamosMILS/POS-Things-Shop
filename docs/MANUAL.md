@@ -127,8 +127,9 @@ El sistema no timbra facturas: prepara los datos.
 
 1. **Ajustes → Reporte de diagnóstico** genera un archivo con la versión, el
    estado de la base, la configuración y la bitácora.
-2. Envía ese archivo. Contiene lo necesario para diagnosticar y no incluye
-   contraseñas.
+2. Envía ese archivo. Contiene lo necesario para diagnosticar —incluido el
+   estado de la captura desde el celular y cuándo salió del equipo la última
+   copia— y no incluye contraseñas ni el código de emparejamiento del teléfono.
 
 ### Actualizaciones
 

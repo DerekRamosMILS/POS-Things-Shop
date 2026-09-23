@@ -396,8 +396,15 @@ export default function POSPage() {
                 }
             }
             const product = await api.getProductByBarcode(code);
-            if (product) { handleAddItem(product); setSearchQuery(''); setSearchResults([]); }
-            else showToast('Producto no encontrado', 'error');
+            if (!product) { showToast('Producto no encontrado', 'error'); return; }
+            // La prenda existe pero está retirada. Antes la búsqueda ni la
+            // devolvía y el mostrador leía "no encontrado": se acaba capturando
+            // otra vez la misma prenda con otro código.
+            if (!product.is_active) {
+                showToast(`${product.name} está dado de baja`, 'error');
+                return;
+            }
+            handleAddItem(product); setSearchQuery(''); setSearchResults([]);
         } catch (err) { showToast(String(err), 'error'); }
     };
 

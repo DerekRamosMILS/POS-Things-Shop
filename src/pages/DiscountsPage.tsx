@@ -4,6 +4,7 @@ import * as api from '../api';
 import type { Promotion, Category, Product } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
+import { fechaLocal, hoyLocal } from '../utils';
 
 // ─── Inline SVGs ─────────────────────────────────────────────────────────────
 const IcoPlus    = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>;
@@ -48,8 +49,10 @@ export default function DiscountsPage() {
 
     const openCreate = () => {
         setEditing(null);
-        const today = new Date().toISOString().split('T')[0];
-        const nextMonth = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+        // En local y no en UTC: una promoción creada después de las seis de la
+        // tarde arrancaba mañana, no aparecía en el punto de venta y nada lo decía.
+        const today = hoyLocal();
+        const nextMonth = fechaLocal(30);
         setForm({ name: '', description: '', discount_type: 'percentage', discount_value: '', start_date: today, end_date: nextMonth, applies_to: 'all', target_id: '' });
         setShowForm(true);
     };

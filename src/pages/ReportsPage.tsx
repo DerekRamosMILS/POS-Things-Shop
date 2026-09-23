@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
-import { formatCurrency } from '../utils';
+import { fechaLocal, formatCurrency, hoyLocal } from '../utils';
 import * as api from '../api';
 import type { DailySalesReport, TopProduct, CashierReport } from '../types';
 import { useToast } from '../contexts/ToastContext';
@@ -22,7 +22,9 @@ export default function ReportsPage() {
     /// fiscal, en el formato que un PAC o el contador puede procesar.
     const exportarFacturas = async () => {
         try {
-            const desde = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+            // En local: con la fecha de UTC el rango empezaba un día después y la
+            // exportación se dejaba fuera, sin avisar, un día de ventas por facturar.
+            const desde = fechaLocal(-days);
             const target = await save({
                 title: 'Exportar ventas por facturar',
                 defaultPath: `por-facturar-${desde}.csv`,
@@ -44,7 +46,7 @@ export default function ReportsPage() {
             const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = `reporte_ventas_${days}d_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+            a.href = url; a.download = `reporte_ventas_${days}d_${hoyLocal()}.csv`; a.click();
             URL.revokeObjectURL(url);
             showToast('Reporte exportado exitosamente');
         } catch { showToast('Error al exportar reporte', 'error'); }

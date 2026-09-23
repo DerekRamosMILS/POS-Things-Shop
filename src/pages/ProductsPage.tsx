@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { formatCurrency, formatDateTime } from '../utils';
+import { formatCurrency, formatDateTime, hoyLocal } from '../utils';
 import { code128SVG } from '../utils/barcode';
 import * as api from '../api';
 import { aplicarFotoPrincipal } from '../utils/fotoPrincipal';
@@ -354,7 +354,7 @@ export default function ProductsPage() {
 
     const openReminderForm = (product: Product) => {
         setReminderProduct(product);
-        setReminderDate(new Date().toISOString().split('T')[0]);
+        setReminderDate(hoyLocal());
         setShowReminder(true); setError('');
     };
 

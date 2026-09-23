@@ -124,11 +124,22 @@ pub fn get_product_by_barcode(
 ) -> Result<Option<Product>, String> {
     require_auth(&sessions, &token)?;
     let db = state.conn();
+    buscar_por_codigo(&db, &barcode)
+}
 
-    let sql = format!("{} WHERE p.barcode = ?1 AND p.is_active = 1", SEL);
-    let result = db.query_row(&sql, params![barcode], row_to_product);
-
-    match result {
+/// Busca por código de barras, **incluyendo lo dado de baja**.
+///
+/// Antes filtraba por `is_active`, así que escanear una prenda retirada decía
+/// "Producto no encontrado": la cajera entiende que el código está mal o que la
+/// prenda nunca se dio de alta, y la captura otra vez. El camino de las tallas ya
+/// devolvía la prenda y dejaba que la pantalla dijera "está dada de baja"; este
+/// hace lo mismo para que los dos contesten igual.
+pub(crate) fn buscar_por_codigo(
+    db: &rusqlite::Connection,
+    barcode: &str,
+) -> Result<Option<Product>, String> {
+    let sql = format!("{} WHERE p.barcode = ?1", SEL);
+    match db.query_row(&sql, params![barcode], row_to_product) {
         Ok(product) => Ok(Some(product)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
@@ -491,5 +502,42 @@ mod tests {
             let sku = alta(&conn);
             assert!(vistos.insert(sku.clone()), "el código {} salió dos veces", sku);
         }
+    }
+
+    #[test]
+    fn escanear_una_prenda_dada_de_baja_la_encuentra_y_la_marca() {
+        // Decía "Producto no encontrado": la cajera entiende que el código está
+        // mal o que nunca se dio de alta, y la vuelve a capturar. Duplicados.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO products (sku, barcode, name, purchase_price, sale_price, stock, is_active)
+             VALUES ('TS-1', '7501234567890', 'Vestido retirado', 10, 20, 3, 0)",
+            [],
+        ).unwrap();
+
+        let encontrado = buscar_por_codigo(&conn, "7501234567890").unwrap()
+            .expect("tiene que encontrarla para poder decir que está dada de baja");
+
+        assert_eq!(encontrado.name, "Vestido retirado");
+        assert!(!encontrado.is_active, "y tiene que venir marcada");
+    }
+
+    #[test]
+    fn un_codigo_que_no_existe_sigue_sin_existir() {
+        let conn = db();
+        assert!(buscar_por_codigo(&conn, "0000000000000").unwrap().is_none());
+    }
+
+    #[test]
+    fn escanear_una_prenda_activa_la_encuentra_igual() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO products (sku, barcode, name, purchase_price, sale_price, stock)
+             VALUES ('TS-2', '7500000000001', 'Blusa', 10, 20, 3)",
+            [],
+        ).unwrap();
+
+        let p = buscar_por_codigo(&conn, "7500000000001").unwrap().unwrap();
+        assert!(p.is_active);
     }
 }

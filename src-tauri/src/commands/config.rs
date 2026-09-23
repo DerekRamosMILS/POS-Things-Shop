@@ -11,7 +11,7 @@ use crate::session::{require_admin, require_auth, SessionState};
 /// incluidas. El secreto del relevo deja subir productos y conteos que cambian
 /// el inventario desde cualquier parte del mundo; por esta puerta se lo llevaba
 /// cualquiera, y el candado de administrador de `relevo_estado` no servía de nada.
-fn es_privada(key: &str) -> bool {
+pub(crate) fn es_privada(key: &str) -> bool {
     key.trim().starts_with("relevo_secreto")
 }
 

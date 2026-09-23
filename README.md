@@ -502,6 +502,16 @@ partidas se busca en el historial de costos (`price_history` con `tipo = 'costo'
 el primer cambio posterior a la venta —su `old_price` es lo que costaba ese día— y
 solo si no hay ninguno se usa el costo actual, que entonces sí es el mismo.
 
+### Todas las fechas se comparan en local
+
+El backend compara siempre contra `date('now','localtime')` y el punto de venta
+contra `toLocaleDateString('en-CA')`. Sacar "hoy" de `toISOString()` da la fecha
+de **UTC**, que a partir de las seis de la tarde en México ya es la de mañana: una
+promoción creada de tarde arrancaba al día siguiente y ni aparecía en el mostrador,
+y la exportación de ventas por facturar se dejaba fuera un día entero. Para eso
+están `hoyLocal()` y `fechaLocal(dias)` en `src/utils`, y una prueba que falla si
+`DiscountsPage` vuelve a usar `toISOString`.
+
 ## Seguridad
 
 - Contraseñas con Argon2 y salt por usuario

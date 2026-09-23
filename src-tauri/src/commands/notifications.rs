@@ -19,55 +19,70 @@ pub(crate) fn rearmar_alertas(db: &rusqlite::Connection) {
     .ok();
 }
 
+/// Cuántas alertas de stock bajo se llevan a la campana.
+///
+/// La consulta no tenía tope: una tienda con miles de prendas por debajo del
+/// mínimo —una temporada que se acabó, un mínimo mal puesto— armaba miles de
+/// avisos en cada apertura de la campana. Ninguno se puede leer y la lista tarda;
+/// con las más urgentes primero, el resto no aporta nada que no diga el conteo.
+pub(crate) const TOPE_ALERTAS: i64 = 100;
+
+/// Lo que está por debajo de su mínimo, lo más urgente primero y con tope.
+///
+/// Vive aparte del comando para poder probar el tope y el orden sin sesión.
+pub(crate) fn alertas_de_stock(
+    db: &rusqlite::Connection,
+) -> Result<Vec<(i64, i32, i32, String)>, String> {
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT id, stock, min_stock, name
+             FROM products
+             WHERE stock <= min_stock AND is_active = 1 AND low_stock_ignored = 0
+             ORDER BY stock - min_stock ASC, name ASC
+             LIMIT {}",
+            TOPE_ALERTAS
+        ))
+        .map_err(|e: rusqlite::Error| e.to_string())?;
+
+    let filas = stmt
+        .query_map([], |row: &rusqlite::Row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|e: rusqlite::Error| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e: rusqlite::Error| e.to_string())?;
+    Ok(filas)
+}
+
 #[tauri::command]
 pub fn get_notifications(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<Vec<Notification>, String> {
     require_auth(&sessions, &token)?;
     let conn = state.conn();
     rearmar_alertas(&conn);
 
-    // Low stock notifications
-    // We dynamically insert/report low stock products that aren't ignored
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, sku, name, stock, min_stock 
-             FROM products 
-             WHERE stock <= min_stock AND is_active = 1 AND low_stock_ignored = 0",
-        )
-        .map_err(|e: rusqlite::Error| e.to_string())?;
-
-    let low_stock_iter = stmt
-        .query_map([], |row: &rusqlite::Row| {
-            let id: i64 = row.get(0)?;
-            let name: String = row.get(2)?;
-            let stock: i32 = row.get(3)?;
-            let min_stock: i32 = row.get(4)?;
-
-            Ok(Notification {
-                id: -id, // Virtual ID for low stock (negative product ID)
-                product_id: Some(id),
-                message: format!(
-                    "{} está bajo en stock (Actual: {}, Mínimo: {})",
-                    name, stock, min_stock
-                ),
-                target_date: None,
-                is_read: false,
-                notification_type: "low_stock".to_string(),
-                created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            })
+    let ahora = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut notifications: Vec<Notification> = alertas_de_stock(&conn)?
+        .into_iter()
+        .map(|(id, stock, min_stock, name)| Notification {
+            id: -id, // Virtual ID for low stock (negative product ID)
+            product_id: Some(id),
+            message: format!(
+                "{} está bajo en stock (Actual: {}, Mínimo: {})",
+                name, stock, min_stock
+            ),
+            target_date: None,
+            is_read: false,
+            notification_type: "low_stock".to_string(),
+            created_at: ahora.clone(),
         })
-        .map_err(|e: rusqlite::Error| e.to_string())?;
-
-    let mut notifications = Vec::new();
-    for alert in low_stock_iter {
-        notifications.push(alert.map_err(|e: rusqlite::Error| e.to_string())?);
-    }
+        .collect();
 
     // Explicit reminders
     let mut stmt2 = conn
         .prepare(
-            "SELECT id, product_id, message, target_date, is_read, notification_type, created_at 
-             FROM notifications 
-             WHERE is_read = 0 
+            "SELECT id, product_id, message, target_date, is_read, notification_type, created_at
+             FROM notifications
+             WHERE is_read = 0
              ORDER BY target_date ASC, created_at DESC",
         )
         .map_err(|e: rusqlite::Error| e.to_string())?;
@@ -220,5 +235,34 @@ mod tests {
         rearmar_alertas(&db);
 
         assert!(ignorada(&db), "quien la descartó no quiere verla otra vez mientras siga igual");
+    }
+
+    #[test]
+    fn las_alertas_de_stock_bajo_tienen_tope_y_salen_las_mas_urgentes() {
+        // Sin tope, una temporada que se acabó armaba miles de avisos en cada
+        // apertura de la campana: ninguno se puede leer y la lista tarda.
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        let mut sql = String::from(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock, min_stock) VALUES ",
+        );
+        let cuantas = TOPE_ALERTAS + 20;
+        for n in 0..cuantas {
+            if n > 0 { sql.push(','); }
+            // Los primeros están más lejos del mínimo que los últimos.
+            sql.push_str(&format!("('S{n}','P{n}',1,2,{},10)", n % 10));
+        }
+        db.execute_batch(&sql).unwrap();
+
+        let avisos = alertas_de_stock(&db).unwrap();
+
+        assert_eq!(avisos.len() as i64, TOPE_ALERTAS);
+        // El primero es el que está más abajo de su mínimo.
+        let faltantes: Vec<i32> = avisos.iter().map(|a| a.1 - a.2).collect();
+        assert!(
+            faltantes.windows(2).all(|p| p[0] <= p[1]),
+            "las más urgentes tienen que ir primero: {:?}",
+            &faltantes[..5.min(faltantes.len())]
+        );
     }
 }

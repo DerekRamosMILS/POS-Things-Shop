@@ -14,8 +14,32 @@ export function formatCurrency(amount: number): string {
     return `${CURRENCY_SYMBOL}${n}`;
 }
 
+/**
+ * La fecha de hoy en el calendario de la tienda, como `YYYY-MM-DD`.
+ *
+ * `toISOString()` da la fecha en UTC, que a partir de las seis de la tarde en
+ * México ya es la de mañana. Todo lo que compara fechas —el backend con
+ * `date('now','localtime')` y el punto de venta con la vigencia de las
+ * promociones— usa la local, así que sacar "hoy" de UTC producía desfases de un
+ * día que no avisaban de nada.
+ */
+export function hoyLocal(): string {
+    return new Date().toLocaleDateString('en-CA');
+}
+
+/** La fecha local corrida `dias` días (negativo hacia atrás), como `YYYY-MM-DD`. */
+export function fechaLocal(dias: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() + dias);
+    return d.toLocaleDateString('en-CA');
+}
+
 export function formatDate(date: string): string {
-    return new Date(date).toLocaleDateString('es-MX', {
+    // Una fecha sin hora la interpreta el navegador como medianoche **UTC**, que
+    // en México es el día anterior por la tarde: se mostraba un día antes. Con
+    // hora explícita se interpreta en local, que es lo que guarda la base.
+    const local = /^\d{4}-\d{2}-\d{2}$/.test(date.trim()) ? `${date.trim()}T00:00:00` : date;
+    return new Date(local).toLocaleDateString('es-MX', {
         day: '2-digit',
         month: '2-digit',
         year: 'numeric',
