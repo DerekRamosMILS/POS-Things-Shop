@@ -15,30 +15,59 @@ use crate::session::{require_admin, SessionState};
 pub fn seed_demo_data(state: State<DbState>, sessions: State<SessionState>, token: String) -> Result<String, String> {
     let user_id = require_admin(&sessions, &token)?;
     let db = state.conn();
+    cargar_demo(&db, user_id)
+}
+
+/// Qué impide cargar datos de prueba, o `None` si la instalación está limpia.
+///
+/// Mirar solo las ventas no alcanzaba. Una tienda pasa días capturando su
+/// catálogo antes de abrir: sin una sola venta, la guarda dejaba pasar el clic y
+/// le metía diez prendas, dos proveedores y cuatro clientes inventados a su
+/// catálogo de verdad. Y desde la migración `026_nada_se_borra` **eso no se
+/// puede borrar**: quedan para siempre, y hay que darlas de baja una por una.
+pub(crate) fn por_que_no_se_puede_sembrar(db: &rusqlite::Connection) -> Option<String> {
+    let cuenta = |sql: &str| -> i64 { db.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
 
     let seeded: String = db
         .query_row("SELECT value FROM system_config WHERE key = 'demo_seeded'", [], |r| r.get(0))
         .unwrap_or_default();
     if seeded == "1" {
-        return Err("Los datos de prueba ya fueron cargados anteriormente".to_string());
+        return Some("Los datos de prueba ya fueron cargados anteriormente".to_string());
     }
 
-    // Los datos de prueba incluyen ventas fechadas en días pasados, y esas
-    // ventas entran a los reportes y a las utilidades como cualquier otra. En
-    // una tienda que ya vendió es contaminación permanente: no hay forma de
-    // borrarlas desde la aplicación. Un clic curioso no puede costar eso.
-    let ventas_reales: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM sales WHERE folio NOT LIKE 'DEMO-%'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    if ventas_reales > 0 {
-        return Err(format!(
+    // Las ventas de ejemplo van fechadas en días pasados y entran a los reportes
+    // y a las utilidades como cualquier otra.
+    let ventas = cuenta("SELECT COUNT(*) FROM sales WHERE folio NOT LIKE 'DEMO-%'");
+    if ventas > 0 {
+        return Some(format!(
             "Esta tienda ya tiene {} venta(s) registradas. Los datos de prueba incluyen ventas de ejemplo que se mezclarían con tus reportes, así que solo se pueden cargar en una instalación nueva.",
-            ventas_reales
+            ventas
         ));
+    }
+
+    // Y lo demás tampoco se puede deshacer.
+    let propios: [(&str, &str, &str); 3] = [
+        ("producto(s)", "products", "SELECT COUNT(*) FROM products WHERE sku NOT LIKE 'DEMO-%'"),
+        ("cliente(s)", "customers", "SELECT COUNT(*) FROM customers"),
+        ("proveedor(es)", "suppliers", "SELECT COUNT(*) FROM suppliers"),
+    ];
+    for (que, _, sql) in propios {
+        let n = cuenta(sql);
+        if n > 0 {
+            return Some(format!(
+                "Esta tienda ya tiene {} {} dados de alta. Los datos de prueba agregan productos, clientes y proveedores inventados que después **no se pueden borrar**, así que solo se cargan en una instalación nueva.",
+                n, que
+            ));
+        }
+    }
+
+    None
+}
+
+/// Núcleo de la carga de datos de prueba, con la conexión explícita.
+pub(crate) fn cargar_demo(db: &rusqlite::Connection, user_id: i64) -> Result<String, String> {
+    if let Some(motivo) = por_que_no_se_puede_sembrar(db) {
+        return Err(motivo);
     }
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
@@ -171,12 +200,111 @@ pub fn seed_demo_data(state: State<DbState>, sessions: State<SessionState>, toke
 
     match result {
         Ok(()) => {
-            crate::db::connection::confirmar(&db)?;
+            crate::db::connection::confirmar(db)?;
             Ok("Datos de prueba cargados: 10 productos, 4 clientes, 2 proveedores y 6 ventas".to_string())
         }
         Err(e) => {
             db.execute_batch("ROLLBACK;").ok();
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tienda() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        db.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        // Las categorías del arranque ya vienen sembradas por la 002.
+        db
+    }
+
+    fn cuantos(db: &rusqlite::Connection, tabla: &str) -> i64 {
+        db.query_row(&format!("SELECT COUNT(*) FROM {}", tabla), [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn en_una_instalacion_nueva_si_se_cargan() {
+        let db = tienda();
+        let msg = cargar_demo(&db, 1).unwrap();
+
+        assert!(msg.contains("10 productos"), "{}", msg);
+        assert_eq!(cuantos(&db, "products"), 10);
+        assert_eq!(cuantos(&db, "sales"), 6);
+    }
+
+    #[test]
+    fn no_se_cargan_dos_veces() {
+        let db = tienda();
+        cargar_demo(&db, 1).unwrap();
+
+        let e = cargar_demo(&db, 1).unwrap_err();
+        assert!(e.contains("ya fueron cargados"), "{}", e);
+        assert_eq!(cuantos(&db, "products"), 10, "no se duplican");
+    }
+
+    #[test]
+    fn una_tienda_con_su_catalogo_no_recibe_prendas_inventadas() {
+        // El caso que se colaba: días capturando el catálogo antes de abrir, sin
+        // una sola venta. La guarda solo miraba las ventas, así que un clic
+        // curioso le metía diez prendas inventadas al catálogo de verdad — y
+        // desde la 026 esas prendas ya no se pueden borrar.
+        let db = tienda();
+        db.execute(
+            "INSERT INTO products (sku, name, purchase_price, sale_price, stock)
+             VALUES ('TS-000001', 'Vestido de la tienda', 100, 250, 3)",
+            [],
+        ).unwrap();
+
+        let e = cargar_demo(&db, 1).unwrap_err();
+
+        assert!(e.contains("producto(s)"), "mensaje inesperado: {}", e);
+        assert!(e.contains("no se pueden borrar"), "hay que decir por qué importa: {}", e);
+        assert_eq!(cuantos(&db, "products"), 1, "no se agregó nada");
+        assert_eq!(cuantos(&db, "suppliers"), 0);
+    }
+
+    #[test]
+    fn una_tienda_con_clientes_tampoco() {
+        let db = tienda();
+        db.execute("INSERT INTO customers (name) VALUES ('Ana')", []).unwrap();
+
+        let e = cargar_demo(&db, 1).unwrap_err();
+
+        assert!(e.contains("cliente(s)"), "{}", e);
+        assert_eq!(cuantos(&db, "products"), 0);
+    }
+
+    #[test]
+    fn una_tienda_con_proveedores_tampoco() {
+        let db = tienda();
+        db.execute("INSERT INTO suppliers (name) VALUES ('Textiles')", []).unwrap();
+
+        let e = cargar_demo(&db, 1).unwrap_err();
+
+        assert!(e.contains("proveedor(es)"), "{}", e);
+        assert_eq!(cuantos(&db, "products"), 0);
+    }
+
+    #[test]
+    fn una_tienda_que_ya_vendio_tampoco() {
+        let db = tienda();
+        db.execute(
+            "INSERT INTO sales (folio, user_id, subtotal, discount_total, tax, total,
+                                payment_method, amount_paid, change_amount)
+             VALUES ('V-20260101-001', 1, 100, 0, 0, 100, 'cash', 100, 0)",
+            [],
+        ).unwrap();
+
+        let e = cargar_demo(&db, 1).unwrap_err();
+
+        assert!(e.contains("venta(s)"), "{}", e);
     }
 }

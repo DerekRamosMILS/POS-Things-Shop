@@ -386,6 +386,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_log_path':
             return '(no disponible en modo web)' as unknown as T;
 
+        case 'registrar_error_de_interfaz':
         case 'registrar_evento_actualizacion':
             return undefined as unknown as T;
 
@@ -617,6 +618,9 @@ export const setConfigs = (cambios: [string, string][]) => invoke<void>('set_con
 export const setConfig = (key: string, value: string) => invoke<void>('set_config', { key, value });
 export const registrarEventoActualizacion = (mensaje: string) =>
     invoke<void>('registrar_evento_actualizacion', { mensaje });
+/** Deja constancia de que la pantalla se cayó al dibujarse. */
+export const registrarErrorDeInterfaz = (mensaje: string) =>
+    invoke<void>('registrar_error_de_interfaz', { mensaje });
 
 // Notifications
 export const getNotifications = () => invoke<Notification[]>('get_notifications');

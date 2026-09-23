@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import * as api from '../api';
 
 interface Props { children: ReactNode }
 interface State { error: Error | null }
@@ -15,9 +16,16 @@ export default class ErrorBoundary extends Component<Props, State> {
     }
 
     componentDidCatch(error: Error, info: ErrorInfo) {
-        // Kept as console output: it is the only channel the webview has, and
-        // Tauri forwards it to the app log in a dev build.
         console.error('Error no controlado en la interfaz:', error, info.componentStack);
+        // Y a la bitácora de la tienda. `console.error` solo se ve con las
+        // herramientas del navegador abiertas: en la compilación de producción no
+        // va a ninguna parte, así que la caja se recuperaba y nadie —ni la
+        // bitácora ni el reporte de diagnóstico— se enteraba nunca de que se
+        // había caído. A 2000 km eso convierte "a veces se pone raro" en algo
+        // imposible de perseguir.
+        const donde = (info.componentStack ?? '').trim().split('\n')[0]?.trim() ?? '';
+        api.registrarErrorDeInterfaz(`${error.message}${donde ? ` — en ${donde}` : ''}`)
+            .catch(() => { /* si esto falla, no hay más que hacer */ });
     }
 
     render() {

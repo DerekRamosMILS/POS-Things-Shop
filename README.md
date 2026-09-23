@@ -428,6 +428,15 @@ entretanto.
 La prueba `toda_tabla_tiene_decidido_si_se_puede_borrar` falla si alguien agrega
 una tabla sin decidir en cuál de estos grupos va.
 
+### Cuando la pantalla se cae
+
+El `ErrorBoundary` evita que la cajera se quede mirando una ventana en blanco y
+le ofrece volver al inicio. Además lo anota en `app_logs` con módulo `interfaz`,
+así que sale en el reporte de diagnóstico: `console.error` solo se ve con las
+herramientas del navegador abiertas y en la compilación de producción no va a
+ninguna parte, así que la caja se recuperaba y nadie se enteraba nunca. A 2000 km
+eso convierte "a veces se pone raro" en algo imposible de perseguir.
+
 ### Revisiones de consistencia
 
 Los arreglos impiden que se produzcan nuevas inconsistencias, pero **ninguna
@@ -445,6 +454,14 @@ que debería dar cero:
 
 Solo cuenta; no corrige. Tocar historia real es una decisión de quien es dueño de
 esos datos, no del programa.
+
+### Los datos de prueba
+
+**Ajustes → Cargar datos de prueba** solo funciona en una instalación nueva: ni
+una venta, ni un producto, ni un cliente, ni un proveedor propios. Mirar solo las
+ventas no alcanzaba —una tienda pasa días capturando su catálogo antes de abrir—,
+y desde `026_nada_se_borra` diez prendas inventadas metidas al catálogo de verdad
+**ya no se pueden borrar**: solo dar de baja, una por una.
 
 ## Primer inicio
 

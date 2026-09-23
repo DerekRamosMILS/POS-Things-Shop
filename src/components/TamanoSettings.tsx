@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
     ESCALA_MAXIMA, ESCALA_MINIMA, ESCALA_POR_DEFECTO,
-    aplicarEscala, escalaGuardada, guardarEscala,
+    aplicarEscala, creaGuardadoDiferido, escalaGuardada, guardarEscala,
 } from '../utils/escala';
 
 /**
@@ -13,10 +13,15 @@ import {
  */
 export default function TamanoSettings() {
     const [escala, setEscala] = useState(escalaGuardada);
+    // Soltar el ratón pasándose del borde del deslizador es lo normal, y ese
+    // `mouseup` no le llega al control: colgado solo de `onMouseUp`, el tamaño se
+    // veía aplicado y no se guardaba nunca.
+    const guardado = useMemo(() => creaGuardadoDiferido(guardarEscala), []);
 
     const previsualizar = (valor: number) => {
         setEscala(valor);
         aplicarEscala(valor);
+        guardado.programar(valor);
     };
 
     return (
@@ -39,9 +44,9 @@ export default function TamanoSettings() {
                     step={5}
                     value={escala}
                     onChange={e => previsualizar(Number(e.target.value))}
-                    onMouseUp={() => guardarEscala(escala)}
-                    onTouchEnd={() => guardarEscala(escala)}
-                    onKeyUp={() => guardarEscala(escala)}
+                    onMouseUp={() => guardado.ahora(escala)}
+                    onTouchEnd={() => guardado.ahora(escala)}
+                    onKeyUp={() => guardado.ahora(escala)}
                     style={{ flex: 1, accentColor: 'var(--primary)', cursor: 'pointer' }}
                     aria-label="Tamaño de letras e iconos"
                 />
@@ -56,7 +61,7 @@ export default function TamanoSettings() {
 
             {escala !== ESCALA_POR_DEFECTO && (
                 <button
-                    onClick={() => { previsualizar(ESCALA_POR_DEFECTO); guardarEscala(ESCALA_POR_DEFECTO); }}
+                    onClick={() => { previsualizar(ESCALA_POR_DEFECTO); guardado.ahora(ESCALA_POR_DEFECTO); }}
                     className="btn btn-ghost btn-sm"
                     style={{ marginTop: 14 }}
                 >

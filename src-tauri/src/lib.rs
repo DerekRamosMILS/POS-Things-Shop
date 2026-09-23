@@ -235,6 +235,7 @@ pub fn run() {
             config::set_config,
             config::set_configs,
             config::registrar_evento_actualizacion,
+            config::registrar_error_de_interfaz,
             // Notifications
             notifications::get_notifications,
             notifications::mark_notification_read,

@@ -53,3 +53,32 @@ export function guardarEscala(porcentaje: number) {
         // Que no se pueda recordar no debe impedir usarla ahora.
     }
 }
+
+/**
+ * Guarda cuando el usuario deja de mover el control, no cuando suelta el ratón.
+ *
+ * Colgar el guardado de `onMouseUp` deja fuera el gesto más común con un
+ * deslizador: arrastrar pasándose del borde y soltar ahí. Ese `mouseup` le llega
+ * al documento y no al control, así que el tamaño se veía aplicado y no se
+ * guardaba nunca; al siguiente arranque volvía al de antes y parecía que el
+ * ajuste no servía.
+ *
+ * `ahora` sigue existiendo para cuando sí se suelta encima: guardar en el momento
+ * se siente mejor que esperar, y cancela el diferido para no escribir dos veces.
+ */
+export function creaGuardadoDiferido(guardar: (valor: number) => void, esperaMs = 400) {
+    let pendiente: ReturnType<typeof setTimeout> | null = null;
+    const cancelar = () => {
+        if (pendiente) { clearTimeout(pendiente); pendiente = null; }
+    };
+    return {
+        programar(valor: number) {
+            cancelar();
+            pendiente = setTimeout(() => { pendiente = null; guardar(valor); }, esperaMs);
+        },
+        ahora(valor: number) {
+            cancelar();
+            guardar(valor);
+        },
+    };
+}

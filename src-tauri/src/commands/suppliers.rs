@@ -44,11 +44,12 @@ pub fn get_suppliers(state: State<DbState>, sessions: State<SessionState>, token
 #[tauri::command]
 pub fn create_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateSupplierDto) -> Result<Supplier, String> {
     require_admin(&sessions, &token)?;
+    let nombre = crate::commands::nombre_requerido(&data.name, "el proveedor")?;
     let db = state.conn();
 
     db.execute(
         "INSERT INTO suppliers (name, contact_name, phone, email, address, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![data.name, data.contact_name, data.phone, data.email, data.address, data.notes],
+        params![nombre, data.contact_name, data.phone, data.email, data.address, data.notes],
     ).map_err(|e| e.to_string())?;
 
     let id = db.last_insert_rowid();
@@ -75,11 +76,12 @@ pub fn create_supplier(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn update_supplier(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateSupplierDto) -> Result<(), String> {
     require_admin(&sessions, &token)?;
+    let nombre = crate::commands::nombre_requerido(&data.name, "el proveedor")?;
     let db = state.conn();
 
     db.execute(
         "UPDATE suppliers SET name=?1, contact_name=?2, phone=?3, email=?4, address=?5, notes=?6, is_active=?7, updated_at=datetime('now','localtime') WHERE id=?8",
-        params![data.name, data.contact_name, data.phone, data.email, data.address, data.notes, data.is_active as i32, data.id],
+        params![nombre, data.contact_name, data.phone, data.email, data.address, data.notes, data.is_active as i32, data.id],
     ).map_err(|e| e.to_string())?;
 
     Ok(())

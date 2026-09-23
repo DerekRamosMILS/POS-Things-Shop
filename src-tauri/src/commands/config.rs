@@ -142,6 +142,36 @@ pub fn set_configs(state: State<DbState>, sessions: State<SessionState>, token: 
     guardar_ajustes(&db, &cambios)
 }
 
+/// Anota que la pantalla se cayó al dibujarse.
+///
+/// El `ErrorBoundary` evita que la cajera se quede mirando una ventana en blanco,
+/// pero lo único que hacía con el error era un `console.error`: en una compilación
+/// de producción eso no va a ninguna parte. La caja se recuperaba y nadie —ni la
+/// bitácora, ni el reporte de diagnóstico— se enteraba nunca de que había pasado.
+/// A 2000 km eso convierte "a veces se pone raro" en algo imposible de perseguir.
+///
+/// No pide sesión a propósito: un error al dibujar la pantalla de inicio es
+/// justamente uno de los que hay que poder ver, y ahí todavía no hay token.
+#[tauri::command]
+pub fn registrar_error_de_interfaz(state: State<DbState>, mensaje: String) -> Result<(), String> {
+    let db = state.conn();
+    // Se recorta: un `componentStack` entero llena la bitácora y lo que sirve
+    // para ubicarlo está al principio.
+    let mensaje: String = mensaje.chars().take(800).collect();
+    anotar_error_de_interfaz(&db, &mensaje);
+    Ok(())
+}
+
+/// Núcleo del registro, con la conexión explícita.
+pub(crate) fn anotar_error_de_interfaz(db: &rusqlite::Connection, mensaje: &str) {
+    db.execute(
+        "INSERT INTO app_logs (level, module, message) VALUES ('error', 'interfaz', ?1)",
+        params![mensaje],
+    )
+    .ok();
+    log::error!("Error al dibujar la pantalla: {}", mensaje);
+}
+
 /// Deja un renglón en la bitácora sobre lo que hizo el actualizador.
 ///
 /// Sin esto, una actualización que no llega es indistinguible de una que llegó y
@@ -396,5 +426,38 @@ mod tests {
         registrar_version_instalada(&conn);
 
         assert!(bitacora(&conn)[0].contains("Primer arranque"));
+    }
+
+    #[test]
+    fn un_error_de_pantalla_queda_en_la_bitacora() {
+        // Antes solo iba a `console.error`, que en producción no va a ninguna
+        // parte: la caja se recuperaba y nadie se enteraba nunca.
+        let conn = db();
+        anotar_error_de_interfaz(&conn, "Cannot read properties of undefined (reading 'map')");
+
+        let (nivel, modulo, mensaje): (String, String, String) = conn
+            .query_row(
+                "SELECT level, module, message FROM app_logs ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(nivel, "error");
+        assert_eq!(modulo, "interfaz");
+        assert!(mensaje.contains("undefined"), "{}", mensaje);
+    }
+
+    #[test]
+    fn un_error_larguisimo_no_inunda_la_bitacora() {
+        let conn = db();
+        let largo = "x".repeat(5000);
+        let recortado: String = largo.chars().take(800).collect();
+        anotar_error_de_interfaz(&conn, &recortado);
+
+        let mensaje: String = conn
+            .query_row("SELECT message FROM app_logs ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mensaje.chars().count(), 800);
     }
 }

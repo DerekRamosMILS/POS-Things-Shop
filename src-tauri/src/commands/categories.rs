@@ -44,11 +44,12 @@ pub fn get_categories(state: State<DbState>, sessions: State<SessionState>, toke
 #[tauri::command]
 pub fn create_category(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateCategoryDto) -> Result<Category, String> {
     require_admin(&sessions, &token)?;
+    let nombre = crate::commands::nombre_requerido(&data.name, "la categoría")?;
     let db = state.conn();
 
     db.execute(
         "INSERT INTO categories (name, description) VALUES (?1, ?2)",
-        params![data.name, data.description],
+        params![nombre, data.description],
     ).map_err(|e| {
         if e.to_string().contains("UNIQUE") {
             "Ya existe una categoría con ese nombre".to_string()
@@ -78,12 +79,21 @@ pub fn create_category(state: State<DbState>, sessions: State<SessionState>, tok
 #[tauri::command]
 pub fn update_category(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateCategoryDto) -> Result<(), String> {
     require_admin(&sessions, &token)?;
+    let nombre = crate::commands::nombre_requerido(&data.name, "la categoría")?;
     let db = state.conn();
 
     db.execute(
         "UPDATE categories SET name=?1, description=?2, is_active=?3, updated_at=datetime('now','localtime') WHERE id=?4",
-        params![data.name, data.description, data.is_active as i32, data.id],
-    ).map_err(|e| e.to_string())?;
+        params![nombre, data.description, data.is_active as i32, data.id],
+    ).map_err(|e| {
+        // El nombre es único. Al crear ya se explicaba; al renombrar salía el
+        // error crudo de SQLite, que en el mostrador no dice nada.
+        if e.to_string().contains("UNIQUE") {
+            "Ya existe una categoría con ese nombre".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
 
     Ok(())
 }
