@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-    ESCALA_MAXIMA, ESCALA_MINIMA, ESCALA_POR_DEFECTO, creaGuardadoDiferido, normalizarEscala,
+    ESCALA_MAXIMA, ESCALA_MINIMA, ESCALA_POR_DEFECTO, aplicarEscala, creaGuardadoDiferido,
+    escalaGuardada, guardarEscala, normalizarEscala,
 } from '../utils/escala';
 
 describe('escala de la interfaz', () => {
@@ -71,5 +72,63 @@ describe('cuándo se recuerda el tamaño elegido', () => {
 
         expect(cuerpo, 'la vista previa tiene que programar el guardado').toMatch(/\.programar\(/);
         expect(pantalla, 'y soltar encima lo guarda en el momento').toMatch(/\.ahora\(/);
+    });
+});
+
+describe('el tamaño se recuerda de verdad', () => {
+    beforeEach(() => {
+        try { localStorage.clear(); } catch { /* el almacén puede no estar */ }
+        (document.documentElement.style as unknown as Record<string, string>).zoom = '';
+    });
+
+    /// La ronda que arregló el guardado probó que la función *se llame*, no que
+    /// *funcione*: nadie comprobaba que lo guardado se lea de vuelta. Un cambio en
+    /// la clave o en el formato dejaría el ajuste sin efecto y la prueba en verde.
+    it('lo guardado se lee de vuelta al siguiente arranque', () => {
+        guardarEscala(130);
+        expect(escalaGuardada()).toBe(130);
+    });
+
+    it('sin nada guardado arranca en el tamaño normal', () => {
+        expect(escalaGuardada()).toBe(ESCALA_POR_DEFECTO);
+    });
+
+    it('un valor imposible guardado a mano no deja la caja inservible', () => {
+        // Es lo único que puede pasar aquí y dejar la pantalla sin poder usarse.
+        for (const basura of ['0', '9999', 'abc', '']) {
+            localStorage.setItem('things-shop-escala', basura);
+            const leida = escalaGuardada();
+            expect(leida).toBeGreaterThanOrEqual(ESCALA_MINIMA);
+            expect(leida).toBeLessThanOrEqual(ESCALA_MAXIMA);
+        }
+    });
+
+    it('guardar también aplica, para que se vea sin recargar', () => {
+        guardarEscala(120);
+        const zoom = (document.documentElement.style as unknown as Record<string, string>).zoom;
+        expect(zoom).toBe('1.2');
+    });
+
+    it('el tamaño normal no deja un zoom puesto', () => {
+        // Con `zoom: 1` explícito algunos motores redibujan distinto; volver al
+        // tamaño normal tiene que limpiar la propiedad, no ponerla en uno.
+        aplicarEscala(140);
+        aplicarEscala(ESCALA_POR_DEFECTO);
+        const zoom = (document.documentElement.style as unknown as Record<string, string>).zoom;
+        expect(zoom).toBe('');
+    });
+
+    it('si el equipo no deja guardar, la escala igual se aplica', () => {
+        // Una ventana privada o los datos de sitio bloqueados. Que no se pueda
+        // recordar es un inconveniente; que no se pueda usar, no.
+        const original = localStorage.setItem;
+        localStorage.setItem = () => { throw new Error('bloqueado'); };
+        try {
+            expect(() => guardarEscala(150)).not.toThrow();
+            const zoom = (document.documentElement.style as unknown as Record<string, string>).zoom;
+            expect(zoom).toBe('1.5');
+        } finally {
+            localStorage.setItem = original;
+        }
     });
 });

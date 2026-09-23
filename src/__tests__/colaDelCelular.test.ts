@@ -98,13 +98,23 @@ const reposar = (ms = 40) => new Promise(r => setTimeout(r, ms));
  * Con un plazo fijo la prueba pasa en una máquina descansada y falla en una
  * ocupada, que es la peor clase de prueba: la que se ignora por costumbre.
  */
-async function esperarA(condicion: () => boolean, queEsperaba: string, limiteMs = 3000) {
-    const hasta = Date.now() + limiteMs;
-    while (Date.now() < hasta) {
+/**
+ * Espera a que algo ocurra, o falla diciendo cuánto esperó.
+ *
+ * Tres segundos era muy justo: esta prueba arranca la página de captura entera,
+ * escribe en la cola y sincroniza, y corre junto a otros veintiocho archivos en
+ * paralelo. Fallaba una vez de cada tantas sin que nada estuviera roto, y una
+ * prueba intermitente erosiona lo único que sostiene a las demás: que estar en
+ * verde signifique algo. El mensaje dice el tiempo para que un cuelgue de verdad
+ * no se confunda con una máquina cargada.
+ */
+async function esperarA(condicion: () => boolean, queEsperaba: string, limiteMs = 15000) {
+    const desde = Date.now();
+    while (Date.now() - desde < limiteMs) {
         if (condicion()) return;
         await reposar(10);
     }
-    throw new Error(`Nunca ocurrió: ${queEsperaba}`);
+    throw new Error(`Nunca ocurrió, tras ${Date.now() - desde} ms: ${queEsperaba}`);
 }
 
 function escribir(doc: Document, id: string, valor: string) {

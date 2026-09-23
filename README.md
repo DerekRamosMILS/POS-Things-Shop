@@ -41,6 +41,13 @@ cd src-tauri && cargo clippy      # linter de Rust
 cd relevo && pnpm test            # pruebas del buzón (corren en el runtime de Workers)
 ```
 
+Las pruebas del frontend corren con un `localStorage` puesto a mano
+(`src/__tests__/entorno.ts`). El entorno de jsdom no trae uno, y sin eso el
+almacén que usan el carrito, la sesión y las órdenes en espera caía a su respaldo
+en memoria: **las pruebas de persistencia pasaban en verde sin ejercitar el
+almacenamiento**, y lo que lo usa directo —el tamaño de letra— no tenía forma de
+probarse.
+
 `pnpm build` se niega a construir si las versiones de Tauri en Rust y en npm se
 separaron en mayor o menor. No es celo: `tauri build` sí lo valida, falla al final
 de todo y solo en el runner de Windows, donde ya es tarde.
