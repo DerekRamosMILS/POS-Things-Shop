@@ -391,6 +391,17 @@ alcanza, porque cuando no puede lo avisa en un renglón en vez de en un error.
 Cada copia se abre y se le corre `PRAGMA quick_check` antes de darla por buena:
 un respaldo dañado tiene que doler el día que se hace, no el día que hace falta.
 
+Cuesta más que copiar el archivo: medido sobre una base de 297 MB —dos mil fotos,
+el tamaño que este mismo README da como referencia— son 1.3 segundos contra 0.4.
+Pasa una vez al día, al cerrar el turno, con la caja cerrada y nadie formado, y a
+cambio la copia es consistente y viene ya revisada.
+
+El respaldo al cerrar tiene pruebas propias: que el ajuste se respete, que por
+omisión respalde —quien no sabe del ajuste es quien más necesita el respaldo—, que
+el archivo aparezca de verdad, y que un fallo del respaldo no impida cerrar la
+caja. Esa rutina existe porque la tienda creía tener respaldos automáticos y no
+tenía ninguno: el ajuste estaba en la pantalla y no lo leía nadie.
+
 ### Nada del negocio se borra
 
 No depende de que cada pantalla lo haga bien: lo garantiza la base de datos, con
