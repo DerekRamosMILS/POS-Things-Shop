@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { useCartStore } from './useCartStore';
+import { useHoldsStore } from './useHoldsStore';
 import { useSessionStore } from './useSessionStore';
 import * as api from '../api';
 
@@ -97,6 +98,17 @@ export function motivoDeEspera(): string | null {
     // Un carrito con algo dentro es una venta a medias, siempre y en todo caso.
     if (useCartStore.getState().items.length > 0) {
         return 'Hay un ticket a medias';
+    }
+
+    // Y apartar una orden con F8 **vacía el carrito**: los renglones se mueven a
+    // los espacios de espera. Mirando solo el carrito, una orden apartada parecía
+    // una caja en calma y la aplicación se reiniciaba con la orden de un cliente
+    // parada enfrente. Es una venta a medias guardada en otro cajón.
+    const enEspera = useHoldsStore.getState().holds.filter(h => h !== null).length;
+    if (enEspera > 0) {
+        return enEspera === 1
+            ? 'Hay una orden en espera'
+            : `Hay ${enEspera} órdenes en espera`;
     }
 
     // Recién arrancada nadie está a media operación, aunque haya sesión y turno.

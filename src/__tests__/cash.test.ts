@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { cashBreakdown, evaluateMixedTender, expectedCash, montoContado, round2, sumMoney } from '../utils/cash';
 import type { CashRegister } from '../types';
@@ -123,5 +124,53 @@ describe('el efectivo contado al cerrar', () => {
     it('acepta separador de miles y redondea al centavo', () => {
         expect(montoContado('1,250.5')).toBe(1250.5);
         expect(montoContado('99.999')).toBe(100);
+    });
+});
+
+describe('la fórmula del efectivo esperado', () => {
+    it('usa exactamente los mismos renglones que el backend', () => {
+        // Está duplicada a propósito —la pantalla tiene que mostrar el esperado
+        // antes de que el backend conteste— y esa duplicación es el riesgo: si una
+        // de las dos deriva, el cajero cuenta contra un número y el corte queda
+        // con otro, en un corte que ya no se puede reabrir. Las pruebas espejo no
+        // atan nada: si alguien agrega una columna al turno y solo toca un lado,
+        // las dos suites siguen verdes. Esto lee el Rust.
+        const rust = readFileSync('src-tauri/src/commands/cash_register.rs', 'utf-8');
+        const cuerpo = rust.slice(rust.indexOf('pub fn expected_cash'));
+        const hasta = cuerpo.indexOf('\n}');
+        const formula = cuerpo.slice(0, hasta > 0 ? hasta : undefined);
+
+        // Los campos del turno que entran en la cuenta, con su signo.
+        const delBackend = [...formula.matchAll(/([+-])\s*p\(r\.([a-z_]+)\)/g)]
+            .map(m => `${m[1]}${m[2]}`);
+        // El primero va sin signo en el Rust: `p(r.opening_amount) + ...`.
+        const primero = formula.match(/=\s*p\(r\.([a-z_]+)\)/);
+        expect(primero, 'no se encontró el primer término de expected_cash').not.toBeNull();
+        const esperadoEnRust = new Set([`+${primero![1]}`, ...delBackend]);
+
+        const columnas: Record<string, keyof CashRegister> = {
+            'Fondo de apertura': 'opening_amount',
+            'Ventas en efectivo': 'total_cash_sales',
+            'Abonos de apartados': 'total_layaway_cash',
+            'Devoluciones en efectivo': 'total_refunds_cash',
+            'Gastos': 'total_expenses',
+        };
+        // Valores distintos por columna: así el signo se deduce del renglón y no
+        // de que dos ceros se parezcan.
+        const turno = caja({
+            opening_amount: 11, total_cash_sales: 22, total_layaway_cash: 33,
+            total_refunds_cash: 44, total_expenses: 55,
+        });
+        const dePantalla = new Set(
+            cashBreakdown(turno).map(l => {
+                const campo = columnas[l.label];
+                if (!campo) throw new Error(`renglón sin columna conocida: ${l.label}`);
+                // El signo sale de cómo lo arma `cashBreakdown`, no de los datos.
+                const positivo = l.amount === (turno[campo] as number);
+                return `${positivo ? '+' : '-'}${campo}`;
+            }),
+        );
+
+        expect([...dePantalla].sort()).toEqual([...esperadoEnRust].sort());
     });
 });

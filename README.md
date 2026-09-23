@@ -185,6 +185,15 @@ que lo que se escribiera antes podría no guardarse.
 Ese renglón sale en **Ajustes → Reporte de diagnóstico**, el archivo que el
 encargado de la tienda puede mandar sin entender nada de lo que contiene.
 
+### Nunca a media venta
+
+`motivoDeEspera()` decide, y mira tres cosas: el ticket en curso, las **órdenes en
+espera** y el turno abierto. Las órdenes en espera cuentan porque apartar una con
+F8 vacía el carrito —los renglones se mueven a otro cajón—, así que mirando solo
+el carrito una orden apartada parecía una caja en calma. El motivo se puede leer
+en Ajustes: una actualización que espera sin decir por qué es indistinguible de
+una que no llegó, y eso a distancia no se depura.
+
 ### Dos cosas de las que depende
 
 - **El repositorio tiene que seguir público.** Es lo que permite que el
@@ -482,6 +491,21 @@ que uno con acentos en unas y basura en otras.
 El combo estándar de retail es una **impresora térmica de 58 u 80 mm con puerto
 DK** más un **cajón con conector RJ11/RJ12**. Cualquier marca compatible con
 ESC/POS sirve; es lo más barato y lo mejor soportado.
+
+## El ticket que sobrevive a cerrar la aplicación
+
+El carrito y las órdenes en espera se guardan en el equipo, para que un corte de
+luz no obligue a rearmar la venta con la fila esperando. Llevan dentro una copia
+del producto —nombre, precio y existencia de cuando se agregó—, y el cobro toma
+el precio de **la base**: el que manda la pantalla se ignora a propósito para que
+nadie pueda cobrarse de menos (`el_precio_sale_de_la_base_aunque_el_cliente_mienta`).
+El costo era que un ticket guardado de ayer enseñaba un total y cobraba otro.
+
+Al abrir el punto de venta y al recuperar una orden en espera, los renglones se
+ponen al día contra el catálogo: se toma el precio de ahora, sale lo que se dio de
+baja o se quedó sin existencia, se recorta la cantidad a lo que queda, y se dice
+en pantalla qué cambió. Un renglón con talla no se recorta por el total del
+producto, porque ahí la existencia vive en la talla.
 
 ## Conciliación del efectivo
 

@@ -14,6 +14,7 @@ vi.mock('../api', () => ({ registrarEventoActualizacion: vi.fn(async () => {}) }
 
 import { esMomentoSeguro, motivoDeEspera, useActualizacionStore } from '../stores/useActualizacionStore';
 import { useCartStore } from '../stores/useCartStore';
+import { useHoldsStore } from '../stores/useHoldsStore';
 import { useSessionStore } from '../stores/useSessionStore';
 import type { Product, User } from '../types';
 
@@ -34,6 +35,7 @@ describe('el momento de instalar', () => {
     beforeEach(() => {
         vi.useFakeTimers({ shouldAdvanceTime: true });
         useCartStore.getState().clear();
+        useHoldsStore.getState().setHolds([null, null, null]);
         useSessionStore.setState({ user: null, token: null, cashRegisterId: null });
     });
 
@@ -87,6 +89,43 @@ describe('el momento de instalar', () => {
 
         expect(motivoDeEspera()).toContain('ticket a medias');
         expect(esMomentoSeguro()).toBe(false);
+    });
+
+    it('nunca con una orden en espera', () => {
+        // Apartar una orden con F8 **vacía el carrito**: los renglones se mueven a
+        // los espacios de espera. Con el carrito vacío y la caja cerrada, la
+        // política decía que era buen momento y la aplicación se reiniciaba con la
+        // orden de un cliente parada enfrente. Una orden en espera es una venta a
+        // medias igual que el carrito, solo que guardada en otro cajón.
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: null });
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+        useHoldsStore.getState().setHolds([
+            { items: [{ product: producto(), variant: null, quantity: 1, discount: 0 }],
+              customerName: 'Ana', orderNotes: '', serviceType: 'direct', orderNo: 1, promo: null },
+            null, null,
+        ]);
+
+        expect(motivoDeEspera()).toContain('espera');
+        expect(esMomentoSeguro()).toBe(false);
+    });
+
+    it('una orden en espera manda incluso recién arrancada', () => {
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: null });
+        useHoldsStore.getState().setHolds([
+            { items: [{ product: producto(), variant: null, quantity: 2, discount: 0 }],
+              customerName: '', orderNotes: '', serviceType: 'layaway', orderNo: 3, promo: null },
+            null, null,
+        ]);
+
+        expect(esMomentoSeguro()).toBe(false);
+    });
+
+    it('espacios de espera vacíos no frenan nada', () => {
+        useSessionStore.setState({ user: cajera(), token: 't', cashRegisterId: null });
+        vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+        useHoldsStore.getState().setHolds([null, null, null]);
+
+        expect(esMomentoSeguro()).toBe(true);
     });
 
     it('el motivo se puede leer, para poder decirlo en Ajustes', () => {

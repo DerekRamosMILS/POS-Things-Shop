@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useCartStore, cartLineId, lineIdOf, stockOf } from '../stores/useCartStore';
 import { useSessionStore } from '../stores/useSessionStore';
+import { avisoDeCarrito, refrescarCarrito } from '../utils/carrito';
 import { useHoldsStore, type ServiceType } from '../stores/useHoldsStore';
 import { formatCurrency } from '../utils';
 import { configFromSettings, createScannerHandler } from '../utils/scanner';
@@ -254,6 +255,19 @@ export default function POSPage() {
                 cfg.forEach(c => { map[c.key] = c.value; });
                 setConfig(map);
                 scannerConfig.current = configFromSettings(map);
+
+                // El ticket guardado lleva una copia del producto de cuando se
+                // agregó. El cobro toma el precio de la base —y hace bien—, así
+                // que un ticket que sobrevivió a un cambio de precio enseñaba un
+                // total y cobraba otro. Se pone al día y se dice qué cambió.
+                const guardado = liveRef.current.items;
+                if (guardado.length > 0) {
+                    const { items: alDia, cambios } = refrescarCarrito(guardado, prods);
+                    if (cambios.length > 0) {
+                        restoreItems(alDia);
+                        showToast(avisoDeCarrito(cambios) ?? '', 'warn');
+                    }
+                }
             } catch (err) { showToast(String(err), 'error'); }
             finally { setLoadingProducts(false); }
         })();
@@ -514,10 +528,15 @@ export default function POSPage() {
             newHolds[emptyIdx] = { items: items.map(i => ({ ...i })), customerName, orderNotes, serviceType, orderNo: orderSeq, promo: activePromo };
         }
         newHolds[slotIdx] = null; setHolds(newHolds);
-        restoreItems(slot.items); setCustomerName(slot.customerName); setOrderNotes(slot.orderNotes);
+        // Una orden en espera también guarda la copia del producto de cuando se
+        // apartó, y puede pasar horas ahí: mismo caso que el ticket guardado.
+        const { items: alDia, cambios } = refrescarCarrito(slot.items, allProducts);
+        restoreItems(alDia); setCustomerName(slot.customerName); setOrderNotes(slot.orderNotes);
         setServiceType(slot.serviceType); setOrderSeq(slot.orderNo);
         setActivePromo(slot.promo); setPromoInput(slot.promo?.name || '');
-        showToast(`Orden #${slot.orderNo} restaurada`, 'success');
+        const aviso = avisoDeCarrito(cambios);
+        if (aviso) showToast(aviso, 'warn');
+        else showToast(`Orden #${slot.orderNo} restaurada`, 'success');
     };
 
     const handleCompleteSale = async () => {
