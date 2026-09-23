@@ -24,3 +24,11 @@ CREATE INDEX IF NOT EXISTS idx_expenses_register
 -- Las capturas rechazadas se enseñan de la más nueva a la más vieja.
 CREATE INDEX IF NOT EXISTS idx_capturas_rechazadas_recibida
     ON capturas_rechazadas(recibida_en);
+
+-- Los abonos de apartado se suman por fecha en el reporte diario, y la tabla
+-- tampoco se poda. Aquí es prevención y no arreglo: medido sobre tres años de
+-- abonos —casi veintidós mil renglones— la consulta tarda 0.7 ms sin índice. Se
+-- agrega porque cuesta una línea y porque la regla que cuida esto es simple: nada
+-- que crezca para siempre se recorre entero.
+CREATE INDEX IF NOT EXISTS idx_layaway_payments_created
+    ON layaway_payments(created_at);

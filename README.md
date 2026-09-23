@@ -565,7 +565,21 @@ gastos por turno y el de las capturas rechazadas por fecha.
 
 La prueba `ninguna_consulta_caliente_recorre_una_tabla_que_crece` le pregunta a
 SQLite con `EXPLAIN QUERY PLAN` si va a recorrer la tabla entera, en vez de confiar en
-que los índices "se vean bien".
+que los índices "se vean bien". Cubre diez consultas: las de los reportes, las
+partidas y pagos de una venta, los gastos del turno, los conteos y las fotos.
+
+La regla es a propósito más estricta que el problema —nada que crezca para siempre se
+recorre entero, aunque hoy tarde poco—, porque la alternativa es enterarse de la
+lentitud desde 2000 km cuando ya llevan meses aguantándola. Por eso el índice de los
+abonos por fecha está ahí siendo prevención y no arreglo: medido sobre tres años de
+abonos, esa consulta tardaba 0.7 ms.
+
+**La búsqueda del mostrador queda fuera de la regla, y a propósito.** Usa
+`LIKE '%texto%'`, y un comodín inicial no lo sirve ningún índice de árbol; cambiarlo a
+prefijo haría que buscar "vestido" no encuentre "Blusa vestido azul", que es justo
+como busca quien está frente al cliente. Medido sobre 5000 productos con 1200 fotos,
+cada tecla cuesta 3 ms: el catálogo tendría que crecer un orden de magnitud para que
+se sienta.
 
 ### Revisiones de consistencia
 

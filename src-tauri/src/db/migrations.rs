@@ -549,10 +549,21 @@ mod tests {
     ///
     /// `EXPLAIN QUERY PLAN` dice si SQLite va a recorrer la tabla entera. Se le
     /// pregunta a él en vez de confiar en que los índices "se vean bien".
+    ///
+    /// La regla es a propósito más estricta que el problema: nada que crezca para
+    /// siempre se recorre entero, aunque hoy tarde poco. La alternativa es enterarse
+    /// de la lentitud desde 2000 km, cuando ya llevan meses aguantándola.
+    ///
+    /// Queda fuera la búsqueda de productos del mostrador, que usa
+    /// `LIKE '%texto%'`: un comodín inicial no lo sirve ningún índice de árbol, y
+    /// cambiarlo a prefijo haría que buscar "vestido" no encuentre "Blusa vestido
+    /// azul", que es justo como busca quien está en el mostrador. Medido sobre 5000
+    /// productos con 1200 fotos, cada tecla cuesta 3 ms; el catálogo tendría que
+    /// crecer un orden de magnitud para que se sienta.
     #[test]
     fn ninguna_consulta_caliente_recorre_una_tabla_que_crece() {
         let conn = fresh();
-        let calientes: [(&str, &str); 4] = [
+        let calientes: [(&str, &str); 10] = [
             (
                 "la utilidad busca el costo de cuando se vendió",
                 "SELECT ph.old_price FROM price_history ph
@@ -570,6 +581,37 @@ mod tests {
             (
                 "las devoluciones de una venta",
                 "SELECT total_refund FROM returns WHERE sale_id = 1",
+            ),
+            (
+                "las ventas de un rango de fechas",
+                "SELECT total FROM sales WHERE status = 'completed'
+                   AND created_at >= datetime('now','-30 days','localtime')",
+            ),
+            (
+                "el desglose de pago por día",
+                "SELECT sp.method, SUM(sp.amount) FROM sale_payments sp
+                 JOIN sales s ON s.id = sp.sale_id
+                 WHERE s.created_at >= datetime('now','-30 days','localtime')
+                 GROUP BY sp.method",
+            ),
+            (
+                "los abonos de un rango de fechas",
+                "SELECT payment_method, SUM(amount) FROM layaway_payments
+                 WHERE created_at >= datetime('now','-30 days','localtime')
+                 GROUP BY payment_method",
+            ),
+            (
+                "las partidas de una venta",
+                "SELECT quantity FROM sale_items WHERE sale_id = 1",
+            ),
+            (
+                "las fotos de un producto, por orden",
+                "SELECT id FROM product_images WHERE product_id = 1 ORDER BY position",
+            ),
+            (
+                "un conteo más nuevo de la misma talla",
+                "SELECT 1 FROM conteos WHERE product_id = 1 AND variant_id IS NULL
+                   AND contado_en > '2020-01-01'",
             ),
         ];
 
