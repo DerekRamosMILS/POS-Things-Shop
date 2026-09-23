@@ -514,4 +514,128 @@ mod tests {
         assert!(report.contains("Pagos con una forma que el sistema no conoce"), "{}", report);
         assert!(!report.contains("Todo cuadra"));
     }
+
+    /// Siembra un estado torcido y comprueba que el reporte lo diga.
+    ///
+    /// De las siete revisiones, tres tenían prueba. Una revisión mal escrita es peor
+    /// que no tenerla: el reporte dice "Todo cuadra" sobre una base torcida, y ese
+    /// reporte es lo único que se ve de esa computadora desde 2000 km.
+    fn con_usuario(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')", [],
+        ).unwrap();
+    }
+
+    fn una_venta(conn: &Connection, id: i64) {
+        conn.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (?1, 'P' || ?1, 'P', 50, 100, 10)",
+            rusqlite::params![id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sales (id, folio, user_id, subtotal, discount_total, tax, total,
+                                payment_method, amount_paid, change_amount)
+             VALUES (?1, 'V-' || ?1, 1, 100, 0, 0, 100, 'cash', 100, 0)",
+            rusqlite::params![id],
+        ).unwrap();
+    }
+
+    #[test]
+    fn el_reporte_delata_mas_devuelto_que_vendido() {
+        let conn = db();
+        con_usuario(&conn);
+        una_venta(&conn, 1);
+        conn.execute(
+            "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku,
+                                     quantity, returned_quantity, unit_price, discount, subtotal)
+             VALUES (1, 1, 'P', 'P', 2, 3, 100, 0, 200)", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("más piezas devueltas que vendidas"), "{}", report);
+        assert!(!report.contains("Todo cuadra"));
+    }
+
+    #[test]
+    fn el_reporte_delata_un_apartado_sobrepagado() {
+        let conn = db();
+        con_usuario(&conn);
+        conn.execute(
+            "INSERT INTO layaways (id, folio, user_id, total, paid, status)
+             VALUES (1, 'A-1', 1, 500, 600, 'active')", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("más abonado que su total"), "{}", report);
+    }
+
+    #[test]
+    fn un_centavo_de_redondeo_no_cuenta_como_sobrepago() {
+        // El apartado se cierra sumando abonos redondeados al centavo: un pelo por
+        // encima del total es normal y no puede salir como si algo estuviera mal, o
+        // el reporte cría desconfianza y nadie lo lee.
+        let conn = db();
+        con_usuario(&conn);
+        conn.execute(
+            "INSERT INTO layaways (id, folio, user_id, total, paid, status)
+             VALUES (1, 'A-1', 1, 500.0, 500.001, 'completed')", [],
+        ).unwrap();
+        // Entregado deja su venta, que es el estado sano y lo que pide la otra
+        // revisión: sin ella se dispara esa y no se estaría probando esta.
+        una_venta(&conn, 1);
+        conn.execute("UPDATE sales SET layaway_id = 1 WHERE id = 1", []).unwrap();
+        conn.execute(
+            "INSERT INTO sale_items (sale_id, product_id, product_name, product_sku,
+                                     quantity, unit_price, discount, subtotal)
+             VALUES (1, 1, 'P', 'P', 1, 100, 0, 100)", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Todo cuadra"), "{}", report);
+    }
+
+    #[test]
+    fn el_reporte_delata_un_turno_cerrado_sin_lo_contado() {
+        let conn = db();
+        con_usuario(&conn);
+        conn.execute(
+            "INSERT INTO cash_registers (id, user_id, opening_amount, status, closed_at)
+             VALUES (1, 1, 500, 'closed', datetime('now','localtime'))", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Turnos cerrados sin lo que se contó"), "{}", report);
+    }
+
+    #[test]
+    fn el_reporte_delata_una_venta_sin_partidas() {
+        let conn = db();
+        con_usuario(&conn);
+        una_venta(&conn, 1);
+        // Sin insertar ninguna partida.
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Ventas sin ninguna partida"), "{}", report);
+    }
+
+    #[test]
+    fn un_turno_abierto_sin_contar_es_normal_y_no_se_delata() {
+        // Lo que se contó se anota al cerrar: un turno abierto sin ese dato es el
+        // caso corriente de cualquier tienda a media jornada.
+        let conn = db();
+        con_usuario(&conn);
+        conn.execute(
+            "INSERT INTO cash_registers (id, user_id, opening_amount) VALUES (1, 1, 500)", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Todo cuadra"), "{}", report);
+    }
 }

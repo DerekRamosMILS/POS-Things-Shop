@@ -615,6 +615,13 @@ que debería dar cero:
 Solo cuenta; no corrige. Tocar historia real es una decisión de quien es dueño de
 esos datos, no del programa.
 
+Las siete tienen prueba: se siembra el estado torcido y se comprueba que el reporte lo
+diga, y también que el estado **sano** no lo dispare —un turno abierto sin lo contado
+es lo corriente a media jornada, y un centavo de redondeo en un apartado entregado no
+es un sobrepago—. Una revisión mal escrita sería peor que no tenerla: el reporte diría
+"Todo cuadra" sobre una base torcida, y es lo único que se ve de esa computadora desde
+2000 km.
+
 ### Los datos de prueba
 
 **Ajustes → Cargar datos de prueba** solo funciona en una instalación nueva: ni
