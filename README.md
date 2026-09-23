@@ -305,7 +305,19 @@ el error si no se pudo. Es lo primero que hay que leer cuando algo no aparece.
 | Qué pasa | Lo capturado: nombre, precio, tallas, colores, piezas y fotos. Y el catálogo para poder contar: nombres, códigos y tallas, **sin existencias** |
 | Qué no pasa nunca | Ventas, clientes, caja, inventario. El punto de venta solo baja; no expone nada |
 | Cuánto se queda | Lo normal es segundos: se recoge, se confirma y se borra. Lo que nadie recoja caduca solo a los 30 días (el catálogo, a los 60) |
-| Cuánto cabe | 8 MB por captura, 5 MB el catálogo, 5 000 prendas |
+| Cuánto cabe | 8 MB por captura, 5 MB el catálogo, 5 000 prendas, 8 fotos y 60 combinaciones de talla y color por prenda |
+
+Los topes se revisan **en el teléfono**, mientras la prenda está en pantalla y se
+puede quitar una foto o una talla. Enterarse al llegar sería tarde: la captura ya está
+en la cola, el trabajo ya se hizo frente al perchero, y rechazarla solo deja el aviso.
+Por eso el teléfono no deja agregar una talla que pase de 60 combinaciones ni una foto
+de más, y mide el peso antes de guardar.
+
+Esos números están escritos a mano en dos lenguajes, así que la prueba
+`topesDelCelular` los cruza: las combinaciones y las fotos tienen que ser el mismo
+número que en Rust, y el peso que el teléfono se permite tiene que caber con margen en
+lo que el relevo acepta. Si el de la caja bajara y el del teléfono no, alguien llenaría
+ochenta casillas para que se las rechacen al llegar.
 
 El catálogo lleva las primeras 5 000 prendas activas por orden de nombre. Una
 prenda que no está en él no se puede contar desde el celular, y desde el teléfono
