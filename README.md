@@ -687,6 +687,20 @@ El combo estándar de retail es una **impresora térmica de 58 u 80 mm con puert
 DK** más un **cajón con conector RJ11/RJ12**. Cualquier marca compatible con
 ESC/POS sirve; es lo más barato y lo mejor soportado.
 
+## La rejilla del mostrador dibuja un tramo
+
+Doscientas prendas, y dice cuántas quedaron fuera. No está paginada, así que antes
+dibujaba el catálogo entero: con dos mil prendas con foto son dos mil nodos y unos
+44 MB de miniaturas retenidas en memoria mientras la pantalla esté abierta. Y ese peso
+no lo suelta el tope de la caché de miniaturas, porque **no desaloja lo que está
+montado** —con todo a la vista, su límite de 400 queda anulado—, que es justo lo que
+comprueba `rejillaPos`.
+
+Nadie encuentra una prenda entre dos mil bajando con el dedo: se busca por nombre o se
+filtra por categoría, y las dos cosas ya estaban ahí. Lo que no puede pasar es que el
+resto desaparezca sin decirlo, que es el error que se corrigió antes en la lista de
+ventas.
+
 ## El ticket que sobrevive a cerrar la aplicación
 
 El carrito y las órdenes en espera se guardan en el equipo, para que un corte de

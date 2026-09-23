@@ -116,3 +116,18 @@ export const EXPENSE_CATEGORIES = [
  * lo dice en vez de dejar creer que eso es todo lo que hay.
  */
 export const TOPE_LISTA_VENTAS = 1000;
+
+/**
+ * Cuántas prendas dibuja de golpe la rejilla del punto de venta.
+ *
+ * La rejilla no está paginada, así que dibujaba **todo** el catálogo: con dos mil
+ * prendas con foto son dos mil nodos y unos 44 MB de miniaturas retenidas en
+ * memoria, porque la caché de miniaturas no desaloja lo que está montado y su tope
+ * de 400 queda anulado. En la computadora del mostrador eso se siente al abrir la
+ * pantalla y no se suelta mientras esté abierta.
+ *
+ * Nadie encuentra una prenda entre dos mil bajando con el dedo: se busca por nombre
+ * o se filtra por categoría, y las dos cosas ya están ahí. Se dibuja el primer tramo
+ * y se dice que hay más, igual que en la lista de ventas.
+ */
+export const TOPE_REJILLA_POS = 200;

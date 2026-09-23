@@ -4,7 +4,7 @@ import { useCartStore, cartLineId, lineIdOf, stockOf } from '../stores/useCartSt
 import { useSessionStore } from '../stores/useSessionStore';
 import { avisoDeCarrito, refrescarCarrito } from '../utils/carrito';
 import { useHoldsStore, type ServiceType } from '../stores/useHoldsStore';
-import { formatCurrency } from '../utils';
+import { formatCurrency, TOPE_REJILLA_POS } from '../utils';
 import { configFromSettings, createScannerHandler } from '../utils/scanner';
 import { useProductImage } from '../hooks/useProductImages';
 import { evaluateMixedTender, round2 } from '../utils/cash';
@@ -758,7 +758,7 @@ export default function POSPage() {
                         </div>
                     ) : (
                         <div className="pos-product-grid">
-                            {visibleProducts.map(product => {
+                            {visibleProducts.slice(0, TOPE_REJILLA_POS).map(product => {
                                 const cartItem = items.find(i => i.product.id === product.id);
                                 const inCart = !!cartItem;
                                 const atMax = cartItem ? cartItem.quantity >= product.stock : false;
@@ -787,6 +787,15 @@ export default function POSPage() {
                                     </button>
                                 );
                             })}
+                            {visibleProducts.length > TOPE_REJILLA_POS && (
+                                <div style={{
+                                    gridColumn: '1 / -1', padding: '14px 16px', textAlign: 'center',
+                                    fontSize: 12, color: T.t3, lineHeight: 1.5,
+                                }}>
+                                    Se muestran {TOPE_REJILLA_POS} de {visibleProducts.length} prendas.
+                                    Busca por nombre o elige una categoría para ver el resto.
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
