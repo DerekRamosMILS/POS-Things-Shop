@@ -465,8 +465,19 @@ relevo. Editarlas a mano hace mentir a lo que se apoya en ellas.
 Era una lista negra de claves escondidas, y a una lista negra siempre le falta
 algo: cada clave nueva que Rust escriba aparece sola en la pantalla. Ahora es al
 revés, y la prueba `ajustesVisibles` cuida las dos puntas: que ningún rastro
-interno se ofrezca, y que ningún ajuste sembrado al arrancar se quede sin etiqueta
-y desaparezca.
+interno se ofrezca, y que ningún ajuste sembrado se quede sin etiqueta y desaparezca.
+
+Esa prueba nació mirando solo la migración de arranque, y por ese hueco se cayeron
+de la pantalla los datos fiscales del propio negocio —`rfc_emisor`,
+`regimen_emisor`, `cp_emisor`, que siembra la 015—: la tienda se quedó sin forma de
+capturar su RFC. Ahora recorre **todas** las migraciones, y lo que se siembra y aun
+así no se edita a mano va en una lista con su motivo, con una segunda prueba que
+falla si alguna entrada deja de corresponder a algo.
+
+Esos tres ajustes existen y se pueden capturar, pero **nada los lee todavía**: la
+exportación de ventas por facturar lleva los datos fiscales del cliente, no los del
+emisor. Queda como está —quién necesita el RFC del emisor en el CSV lo decide quien
+factura— y aquí anotado para que no parezca un olvido.
 
 ### Cuando la pantalla se cae
 

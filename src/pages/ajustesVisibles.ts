@@ -36,6 +36,12 @@ export const ETIQUETAS_DE_AJUSTES: Record<string, string> = {
     max_backups: 'Máximo de Respaldos a Conservar',
     session_hours: 'Duración de la Sesión (horas)',
     log_retention_days: 'Días de Bitácora a Conservar',
+    // Los datos fiscales del propio negocio, que la 015 siembra vacíos. Estaban en
+    // la reja general y la lista blanca los dejó fuera sin etiqueta: la tienda se
+    // quedó sin forma de capturar su propio RFC.
+    rfc_emisor: 'RFC del Negocio',
+    regimen_emisor: 'Régimen Fiscal del Negocio (clave del SAT)',
+    cp_emisor: 'Código Postal Fiscal del Negocio',
 };
 
 /** Si la clave se dibuja en la reja general de Ajustes. */
