@@ -41,6 +41,13 @@ cd src-tauri && cargo clippy      # linter de Rust
 cd relevo && pnpm test            # tipos + pruebas del buzón (en el runtime de Workers)
 ```
 
+La prueba `documentacion` cruza los números que este archivo y el manual afirman
+contra las constantes del código: cuántas prendas dibuja la rejilla, cuántos
+caracteres pide una contraseña, cuánto dura una sesión, a cuántos megas rota la
+bitácora. Esos números viven en prosa, y cuando el del código cambia el del texto se
+queda: entonces la documentación no está incompleta, está mintiendo, y eso es peor que
+no tenerla porque se le cree.
+
 Las pruebas del relevo comprueban los tipos primero. `vitest` los quita con esbuild
 **sin mirarlos**, así que un error de tipos en el worker pasaba el CI y se publicaba a
 Cloudflare —el único componente en producción que no se puede inspeccionar desde
