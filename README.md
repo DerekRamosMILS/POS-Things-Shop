@@ -327,6 +327,20 @@ producto sin nombre— sale del buzón para no tapar lo demás, pero **no se pie
 se guarda completo, fotos incluidas, en la tabla `capturas_rechazadas`, y se
 enseña en esa misma pantalla con el motivo.
 
+### Lo que el relevo le quita a la caja
+
+Aplicar una captura toma el candado de la base, así que mientras eso pasa cobrar
+espera. Medido con `cuanto_tarda_una_captura_con_fotos` (una medición, no una
+aserción: `cargo test --lib -- --ignored --nocapture`), un producto con seis fotos
+—1.3 MB de cuerpo— tiene el candado unos 73 ms en una Mac; en la del mostrador serán
+unos cientos, unas cuantas veces al día.
+
+Parecía que valdría sacar el parseo del JSON fuera del candado, porque pesa megas y no
+necesita la base para nada. **La medición dijo que no:** el parseo es el 6% del
+tiempo, y el 94% es decodificar el base64 de las fotos y escribir sus bytes, que sí
+necesita la conexión. Sacar el parseo compraría 4 ms de 73. La medición queda en el
+código para que la próxima sospecha empiece por el número y no por la intuición.
+
 ### De dónde salen los 3 minutos
 
 Del cupo gratuito de KV, no del gusto: 1 000 escrituras y 1 000 listados al día.

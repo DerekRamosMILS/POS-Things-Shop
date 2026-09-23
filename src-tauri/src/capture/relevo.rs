@@ -1339,3 +1339,87 @@ fn tests_db() -> Connection {
     .unwrap();
     conn
 }
+
+/// Mediciones, no aserciones: `cargo test --lib -- --ignored --nocapture`.
+#[cfg(test)]
+mod medicion {
+    use super::*;
+
+    /// Cuánto tiempo el relevo deja sin base a la caja al dar de alta una captura.
+    ///
+    /// El relevo da su vuelta cada tres minutos sin avisar, y aplica lo que trae con
+    /// el candado de la base tomado: mientras eso pasa, cobrar espera. La pregunta era
+    /// si valía la pena sacar el parseo del JSON —que pesa megas y no necesita la base
+    /// para nada— fuera del candado.
+    ///
+    /// **La respuesta medida fue que no.** El parseo es el 6% del tiempo; el 94% es
+    /// decodificar el base64 de las fotos y escribir sus bytes, que necesita la
+    /// conexión. Sacar el parseo compraría 4 ms de 73. Sobre esta máquina, un producto
+    /// con seis fotos toma el candado unos 73 ms —en la del mostrador serán unos
+    /// cientos— y eso es casi todo trabajo inevitable.
+    ///
+    /// Queda como instrumento: si alguien vuelve a sospechar de esto, aquí está el
+    /// número en vez de la intuición.
+    #[test]
+    #[ignore = "medición, no aserción: correr con --ignored --nocapture"]
+    fn cuanto_tarda_una_captura_con_fotos() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run_migrations(&conn).unwrap();
+        let foto = {
+            // Una foto de catálogo ronda los 150 KB; la miniatura, 16 KB.
+            let bytes: Vec<u8> = std::iter::once(0xFFu8)
+                .chain(std::iter::once(0xD8))
+                .chain(std::iter::once(0xFF))
+                .chain((0..150 * 1024).map(|i| (i % 251) as u8))
+                .collect();
+            crate::photos::como_data_url(&bytes)
+        };
+        let mini = {
+            let bytes: Vec<u8> = std::iter::once(0xFFu8)
+                .chain(std::iter::once(0xD8))
+                .chain(std::iter::once(0xFF))
+                .chain((0..16 * 1024).map(|i| (i % 251) as u8))
+                .collect();
+            crate::photos::como_data_url(&bytes)
+        };
+
+        for cuantas in [1usize, 3, 6] {
+            let fotos: Vec<serde_json::Value> = (0..cuantas)
+                .map(|_| serde_json::json!({ "photo": foto, "thumbnail": mini }))
+                .collect();
+            let cuerpo = serde_json::to_string(&serde_json::json!({
+                "tipo": "producto",
+                "datos": {
+                    "captura_id": format!("m-{}", cuantas),
+                    "nombre": "Vestido floral",
+                    "precio": 499.0,
+                    "existencia": 3,
+                    "fotos": fotos,
+                }
+            })).unwrap();
+
+            // Cuánto de lo que se hace con el candado tomado es solo entender el
+            // JSON, que no necesita la base para nada.
+            let t0 = std::time::Instant::now();
+            let _: Captura = serde_json::from_str(&cuerpo).unwrap();
+            let ms_parseo = t0.elapsed().as_secs_f64() * 1000.0;
+
+            let arranque = std::time::Instant::now();
+            let r = aplicar_captura(&conn, &cuerpo);
+            let ms = arranque.elapsed().as_secs_f64() * 1000.0;
+            let motivo = match &r {
+                Resultado::Aplicada(_) => None,
+                Resultado::Rechazada { motivo, .. } => Some(motivo.clone()),
+            };
+            assert!(motivo.is_none(), "no se aplicó: {}", motivo.unwrap_or_default());
+            println!(
+                "  {} foto(s): cuerpo de {:.1} MB, candado {:.0} ms, de los cuales {:.0} ms ({:.0}%) son solo el parseo",
+                cuantas,
+                cuerpo.len() as f64 / 1024.0 / 1024.0,
+                ms,
+                ms_parseo,
+                ms_parseo / ms * 100.0
+            );
+        }
+    }
+}
