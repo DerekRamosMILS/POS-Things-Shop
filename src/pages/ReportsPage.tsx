@@ -38,18 +38,25 @@ export default function ReportsPage() {
         } catch (err) { showToast(String(err), 'error'); }
     };
 
-    const exportCSV = () => {
+    /// Igual que la exportación de ventas por facturar: se pregunta dónde y se
+    /// confirma lo que de verdad se escribió.
+    ///
+    /// Antes bajaba un blob del navegador: nadie elegía dónde, nadie sabía dónde
+    /// quedaba, y el aviso decía "exportado exitosamente" sin haber comprobado
+    /// nada —ni que el archivo se escribiera, ni que alguien no hubiera cancelado—.
+    const exportCSV = async () => {
         try {
-            const header = ['Fecha', 'Ventas', 'Transacciones', 'Ganancia Bruta', 'Gastos'];
-            const rows = dailyReport.map(d => [d.date, d.total_sales.toFixed(2), d.sale_count.toString(), d.gross_profit.toFixed(2), d.total_expenses.toFixed(2)]);
-            const csv = [header, ...rows].map(r => r.join(',')).join('\n');
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = `reporte_ventas_${days}d_${hoyLocal()}.csv`; a.click();
-            URL.revokeObjectURL(url);
-            showToast('Reporte exportado exitosamente');
-        } catch { showToast('Error al exportar reporte', 'error'); }
+            const target = await save({
+                title: 'Exportar reporte de ventas',
+                defaultPath: `reporte_ventas_${days}d_${hoyLocal()}.csv`,
+                filters: [{ name: 'CSV', extensions: ['csv'] }],
+            });
+            if (!target) return;
+            const dias = await api.exportarReporteDiario(target, days);
+            showToast(dias === 0
+                ? 'No hay movimiento en el periodo; el archivo salió vacío'
+                : `Reporte exportado: ${dias} día(s)`);
+        } catch (err) { showToast(String(err), 'error'); }
     };
 
     const loadData = async () => {

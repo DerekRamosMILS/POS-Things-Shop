@@ -296,6 +296,45 @@ pub fn get_daily_sales_report(state: State<DbState>, sessions: State<SessionStat
     reporte_diario(&db, days.unwrap_or(30))
 }
 
+/// Arma el CSV del reporte diario, con la misma cocina que el fiscal.
+///
+/// Se hace aquí y no en la pantalla porque la pantalla lo bajaba como un blob del
+/// navegador: nadie elegía dónde, nadie sabía dónde quedó, y el aviso decía
+/// "exportado exitosamente" sin haber comprobado nada. La otra exportación de esa
+/// misma pantalla ya pedía la ruta y confirmaba; ahora las dos hacen lo mismo.
+///
+/// Lleva marca de orden de bytes por lo mismo que la fiscal: sin ella Excel abre
+/// el archivo en la codificación del sistema.
+pub(crate) fn csv_reporte_diario(db: &rusqlite::Connection, days: i32) -> Result<String, String> {
+    let mut out = String::from("\u{FEFF}");
+    out.push_str("fecha,ventas,transacciones,efectivo,tarjeta,transferencia,gastos,utilidad\n");
+    for d in reporte_diario(db, days)? {
+        out.push_str(&format!(
+            "{},{:.2},{},{:.2},{:.2},{:.2},{:.2},{:.2}\n",
+            d.date, d.total_sales, d.sale_count, d.total_cash, d.total_card,
+            d.total_transfer, d.total_expenses, d.gross_profit
+        ));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn exportar_reporte_diario(
+    state: State<DbState>,
+    sessions: State<SessionState>,
+    token: String,
+    path: String,
+    days: i32,
+) -> Result<usize, String> {
+    require_admin(&sessions, &token)?;
+    let db = state.conn();
+    let csv = csv_reporte_diario(&db, days)?;
+    let dias = csv.lines().count().saturating_sub(1);
+    std::fs::write(&path, csv).map_err(|e| format!("No se pudo guardar el archivo: {}", e))?;
+    log::info!("Exportado el reporte de {} días a {}", days, path);
+    Ok(dias)
+}
+
 pub(crate) fn mas_vendidos(db: &rusqlite::Connection, days: i32, limit: i32) -> Result<Vec<TopProduct>, String> {
     // Solo las piezas que se quedaron vendidas.
     filas(
@@ -713,5 +752,27 @@ mod tests {
         ).unwrap();
         assert_eq!(cerrado.difference, Some(0.0), "el corte no debe inventar una diferencia");
         assert_eq!(cerrado.expected_amount, Some(contado));
+    }
+
+    #[test]
+    fn el_csv_del_reporte_lleva_los_dias_con_sus_numeros() {
+        let db = tienda();
+        cobrar(&db, 2, vec![("cash", 200.0)]);
+
+        let csv = csv_reporte_diario(&db, 30).unwrap();
+
+        assert!(csv.starts_with('\u{FEFF}'), "sin la marca, Excel lo abre mal");
+        assert!(csv.contains("fecha,ventas,transacciones"), "{}", csv);
+        let renglon = csv.lines().nth(1).expect("tiene que traer el día de hoy");
+        // 200 vendidos, 1 transacción, 200 en efectivo, 100 de utilidad.
+        assert!(renglon.contains("200.00,1,200.00"), "renglón inesperado: {}", renglon);
+        assert!(renglon.ends_with("100.00"), "la utilidad va al final: {}", renglon);
+    }
+
+    #[test]
+    fn el_csv_de_una_tienda_sin_ventas_trae_solo_el_encabezado() {
+        let db = tienda();
+        let csv = csv_reporte_diario(&db, 30).unwrap();
+        assert_eq!(csv.lines().count(), 1, "{}", csv);
     }
 }

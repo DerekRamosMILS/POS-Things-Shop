@@ -573,6 +573,16 @@ fondo de apertura
 Cada uno de esos movimientos se registra contra el turno abierto en el momento en
 que ocurre, y el desglose se muestra al cerrar la caja.
 
+### Exportar a CSV
+
+Las dos exportaciones de Reportes —el reporte de ventas y las ventas por
+facturar— piden dónde guardar, arman el archivo en Rust y confirman cuántos
+renglones escribieron. La del reporte bajaba un blob del navegador: nadie elegía
+dónde, nadie sabía dónde quedaba, y el aviso decía "exportado exitosamente" sin
+haber comprobado nada, ni que el archivo se escribiera ni que alguien no hubiera
+cancelado. Las dos llevan marca de orden de bytes para que Excel las abra como
+UTF-8.
+
 ### De dónde sale la utilidad
 
 Del costo que se guardó en la partida al vender (`sale_items.unit_cost`), no del

@@ -378,6 +378,7 @@ const webInvoke = async <T>(command: string, args?: InvokeArgs): Promise<T> => {
         case 'get_catalogos_fiscales':
             return { regimenes: [], usos_cfdi: [] } as unknown as T;
 
+        case 'exportar_reporte_diario':
         case 'exportar_pendientes_factura':
         case 'marcar_facturada':
         case 'generate_diagnostic_report':
@@ -576,6 +577,8 @@ export const generateDiagnosticReport = (path: string) =>
 export const getCatalogosFiscales = () => invoke<CatalogoFiscal>('get_catalogos_fiscales');
 export const exportarPendientesFactura = (path: string, desde?: string, hasta?: string) =>
     invoke<number>('exportar_pendientes_factura', { path, desde, hasta });
+export const exportarReporteDiario = (path: string, days: number) =>
+    invoke<number>('exportar_reporte_diario', { path, days });
 export const marcarFacturada = (saleId: number, uuid: string) =>
     invoke<void>('marcar_facturada', { saleId, uuid });
 

@@ -226,6 +226,7 @@ pub fn run() {
             // Datos fiscales
             fiscal::get_catalogos_fiscales,
             fiscal::exportar_pendientes_factura,
+            reports::exportar_reporte_diario,
             fiscal::marcar_facturada,
             backup::get_backup_list,
             backup::restore_backup,
