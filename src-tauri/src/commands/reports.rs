@@ -636,4 +636,82 @@ mod tests {
         ordenadas.sort_by(|a, b| b.cmp(a));
         assert_eq!(fechas, ordenadas);
     }
+
+    /// El renglón de efectivo del día, para cruzarlo con el cajón.
+    fn efectivo_del_dia(db: &rusqlite::Connection) -> f64 {
+        hoy(db).total_cash
+    }
+
+    #[test]
+    fn el_cajon_el_reporte_y_el_corte_dicen_lo_mismo_en_un_dia_movido() {
+        // Las tres cuentas se calculan por caminos distintos: el cajón acumula
+        // columnas en el turno a medida que pasa cada movimiento, el reporte suma
+        // los renglones de pago por fecha, y el corte parte del fondo. Que
+        // coincidan no lo garantiza nada más que esto: es donde un descuadre
+        // aparece antes de que lo encuentre alguien contando billetes.
+        use crate::commands::cash_register::expected_cash;
+        use crate::models::cash_register::CashRegister;
+
+        let db = tienda();
+
+        // Una venta en efectivo, una mixta, un apartado con anticipo, una
+        // devolución en efectivo y un gasto. El día completo de un mostrador.
+        cobrar(&db, 2, vec![("cash", 200.0)]);
+        cobrar(&db, 3, vec![("card", 200.0), ("cash", 100.0)]);
+
+        let apartado = registrar_apartado(&db, 1, CreateLayawayDto {
+            customer_id: None,
+            items: vec![CreateLayawayItemDto { product_id: 1, quantity: 1, unit_price: 0.0, variant_id: None }],
+            initial_payment: 40.0,
+            payment_method: "cash".to_string(),
+            notes: None,
+            due_date: None,
+        }).unwrap();
+        abonar_apartado(&db, 1, apartado.id, 60.0, "cash").unwrap();
+
+        let venta = cobrar(&db, 1, vec![("cash", 100.0)]);
+        devolver(&db, venta, 1, "cash");
+
+        crate::commands::expenses::registrar_gasto(&db, 1, None, crate::models::expense::CreateExpenseDto {
+            category: "Operativos".to_string(),
+            description: "Bolsas".to_string(),
+            amount: 35.0,
+        }).unwrap();
+
+        // Lo que el turno cree que hay en el cajón.
+        let turno: CashRegister = db.query_row(
+            "SELECT opening_amount, total_cash_sales, total_layaway_cash, total_refunds_cash, total_expenses
+             FROM cash_registers WHERE status = 'open'",
+            [],
+            |r| Ok(CashRegister {
+                id: 1, user_id: 1, user_name: None,
+                opening_amount: r.get(0)?, closing_amount: None, expected_amount: None, difference: None,
+                total_sales: 0.0, total_cash_sales: r.get(1)?, total_card_sales: 0.0, total_transfer_sales: 0.0,
+                total_layaway_cash: r.get(2)?, total_layaway_card: 0.0, total_layaway_transfer: 0.0,
+                total_refunds_cash: r.get(3)?, total_expenses: r.get(4)?, sale_count: 0,
+                status: "open".to_string(), opened_at: String::new(), closed_at: None,
+            }),
+        ).unwrap();
+
+        // 200 de la primera + 100 de la mixta + 100 del apartado (40 + 60)
+        // + 100 de la tercera − 100 devueltos = 400 de flujo de efectivo del día.
+        // La tercera venta y su devolución se cancelan entre sí, y así debe ser:
+        // el dinero entró y volvió a salir el mismo día.
+        assert_eq!(efectivo_del_dia(&db), 400.0, "el reporte del día");
+
+        // El cajón espera lo mismo, menos el gasto, que es dinero que salió.
+        assert_eq!(
+            expected_cash(&turno),
+            efectivo_del_dia(&db) - turno.total_expenses,
+            "el cajón y el reporte tienen que cuadrar salvo por los gastos"
+        );
+
+        // Y el corte, contando justo eso, no reporta diferencia.
+        let contado = expected_cash(&turno);
+        let cerrado = crate::commands::cash_register::cerrar_caja(
+            &db, 1, crate::models::cash_register::CloseRegisterDto { closing_amount: contado },
+        ).unwrap();
+        assert_eq!(cerrado.difference, Some(0.0), "el corte no debe inventar una diferencia");
+        assert_eq!(cerrado.expected_amount, Some(contado));
+    }
 }

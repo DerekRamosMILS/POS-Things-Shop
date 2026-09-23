@@ -85,6 +85,65 @@ fn tail(path: &std::path::Path, lines: usize) -> String {
     }
 }
 
+/// Cuentas que **deberían dar cero** en una base sana.
+///
+/// Los arreglos impiden que estas inconsistencias se produzcan de aquí en
+/// adelante, pero ninguna migración rellena lo que ya estaba mal: una tienda que
+/// vino operando con las versiones anteriores puede arrastrar historia torcida y
+/// desde 2000 km no hay forma de enterarse. Aquí se pregunta, con nombre y
+/// número, y si todas dan cero el reporte lo dice en una línea.
+///
+/// Solo se cuenta; no se arregla nada. Tocar historia real es una decisión de
+/// quien es dueño de esos datos.
+fn revisiones(db: &Connection) -> Vec<(&'static str, i64)> {
+    let cuenta = |sql: &str| -> i64 {
+        db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(-1)
+    };
+
+    vec![
+        (
+            // Antes de la 021 entregar un apartado no dejaba venta: esa mercancía
+            // salió de la tienda sin aparecer en el reporte ni en las utilidades.
+            "Apartados entregados sin su venta",
+            cuenta(
+                "SELECT COUNT(*) FROM layaways l
+                 WHERE l.status = 'completed'
+                   AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.layaway_id = l.id)",
+            ),
+        ),
+        (
+            // El total de un producto con tallas es la suma de sus tallas. Un
+            // conteo del celular sin talla lo pisaba, y nada lo delataba.
+            "Productos con tallas cuyo total no cuadra",
+            cuenta(
+                "SELECT COUNT(*) FROM products p
+                 WHERE p.has_variants = 1
+                   AND p.stock != COALESCE((SELECT SUM(v.stock) FROM product_variants v
+                                            WHERE v.product_id = p.id AND v.is_active = 1), 0)",
+            ),
+        ),
+        (
+            "Partidas con más piezas devueltas que vendidas",
+            cuenta("SELECT COUNT(*) FROM sale_items WHERE returned_quantity > quantity"),
+        ),
+        (
+            "Apartados con más abonado que su total",
+            cuenta("SELECT COUNT(*) FROM layaways WHERE paid > total + 0.005"),
+        ),
+        (
+            "Turnos cerrados sin lo que se contó",
+            cuenta("SELECT COUNT(*) FROM cash_registers WHERE status = 'closed' AND closing_amount IS NULL"),
+        ),
+        (
+            "Ventas sin ninguna partida",
+            cuenta(
+                "SELECT COUNT(*) FROM sales s
+                 WHERE NOT EXISTS (SELECT 1 FROM sale_items si WHERE si.sale_id = s.id)",
+            ),
+        ),
+    ]
+}
+
 /// Arma el texto del reporte.
 pub fn build_report(db: &Connection) -> String {
     let mut out = String::new();
@@ -159,6 +218,20 @@ pub fn build_report(db: &Connection) -> String {
             )
             .unwrap_or_else(|_| "(sin definir)".to_string());
         let _ = writeln!(out, "{:<22} {}", key, value);
+    }
+    let _ = writeln!(out);
+
+    // ── Revisiones ──
+    let _ = writeln!(out, "── REVISIONES DE CONSISTENCIA ──");
+    let hallazgos = revisiones(db);
+    let torcido: Vec<&(&str, i64)> = hallazgos.iter().filter(|(_, n)| *n != 0).collect();
+    if torcido.is_empty() {
+        let _ = writeln!(out, "Todo cuadra ({} revisiones).", hallazgos.len());
+    } else {
+        for (que, cuantos) in torcido {
+            let _ = writeln!(out, "{:<44} {}", que, cuantos);
+        }
+        let _ = writeln!(out, "(Son datos de antes de los arreglos; no se corrigen solos.)");
     }
     let _ = writeln!(out);
 
@@ -327,5 +400,70 @@ mod tests {
         // protege de que la computadora se muera es la que sale del equipo.
         let report = build_report(&db());
         assert!(report.contains("ultima_copia_externa"));
+    }
+
+    #[test]
+    fn una_base_sana_dice_que_todo_cuadra() {
+        let report = build_report(&db());
+        assert!(report.contains("REVISIONES DE CONSISTENCIA"));
+        assert!(report.contains("Todo cuadra"), "{}", report);
+    }
+
+    #[test]
+    fn el_reporte_delata_un_apartado_entregado_sin_su_venta() {
+        // Antes de la 021, entregar un apartado no dejaba venta: esa mercancía
+        // salió de la tienda sin aparecer en el reporte ni en las utilidades, y
+        // ninguna migración lo rellena.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO layaways (id, folio, user_id, total, paid, status)
+             VALUES (1, 'A-1', 1, 500, 500, 'completed')",
+            [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Apartados entregados sin su venta"), "{}", report);
+        assert!(!report.contains("Todo cuadra"));
+    }
+
+    #[test]
+    fn el_reporte_delata_un_total_que_no_es_la_suma_de_sus_tallas() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, has_variants)
+             VALUES (1, 'V', 'Vestido', 1, 2, 99, 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO product_variants (product_id, size, stock) VALUES (1, 'M', 3), (1, 'G', 4)",
+            [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Productos con tallas cuyo total no cuadra"), "{}", report);
+    }
+
+    #[test]
+    fn las_revisiones_no_tocan_nada() {
+        // Solo cuentan: corregir historia real es decisión de quien es su dueño.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock, has_variants)
+             VALUES (1, 'V', 'Vestido', 1, 2, 99, 1)",
+            [],
+        ).unwrap();
+        conn.execute("INSERT INTO product_variants (product_id, size, stock) VALUES (1, 'M', 3)", []).unwrap();
+
+        build_report(&conn);
+
+        let stock: i32 = conn.query_row("SELECT stock FROM products WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(stock, 99, "el reporte no corrige, solo cuenta");
     }
 }

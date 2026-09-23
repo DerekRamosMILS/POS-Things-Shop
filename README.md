@@ -428,6 +428,24 @@ entretanto.
 La prueba `toda_tabla_tiene_decidido_si_se_puede_borrar` falla si alguien agrega
 una tabla sin decidir en cuál de estos grupos va.
 
+### Revisiones de consistencia
+
+Los arreglos impiden que se produzcan nuevas inconsistencias, pero **ninguna
+migración rellena lo que ya estaba mal**: una tienda que vino operando con
+versiones anteriores puede arrastrar historia torcida, y desde 2000 km no hay
+forma de enterarse. El reporte de diagnóstico trae una sección que pregunta lo
+que debería dar cero:
+
+- Apartados entregados sin su venta (antes de la 021, entregar no dejaba venta)
+- Productos con tallas cuyo total no es la suma de sus tallas
+- Partidas con más piezas devueltas que vendidas
+- Apartados con más abonado que su total
+- Turnos cerrados sin lo que se contó
+- Ventas sin ninguna partida
+
+Solo cuenta; no corrige. Tocar historia real es una decisión de quien es dueño de
+esos datos, no del programa.
+
 ## Primer inicio
 
 Se crea un usuario `admin` con la contraseña `admin1234`. La app **no deja pasar
