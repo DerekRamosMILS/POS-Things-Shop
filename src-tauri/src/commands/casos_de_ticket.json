@@ -1,0 +1,9 @@
+[
+  { "nombre": "precio con tres decimales", "lineas": [{ "precio": 10.005, "cantidad": 10, "descuento": 0 }], "promo": null, "tasa": 0 },
+  { "nombre": "promo por ciento e impuesto", "lineas": [{ "precio": 99.99, "cantidad": 3, "descuento": 10 }], "promo": { "tipo": "percentage", "valor": 15 }, "tasa": 16 },
+  { "nombre": "monto fijo con centavos sueltos", "lineas": [{ "precio": 249, "cantidad": 1, "descuento": 0 }, { "precio": 0.335, "cantidad": 7, "descuento": 0 }], "promo": { "tipo": "fixed", "valor": 50 }, "tasa": 16 },
+  { "nombre": "por ciento con decimales", "lineas": [{ "precio": 33.33, "cantidad": 3, "descuento": 0 }], "promo": { "tipo": "percentage", "valor": 33.333 }, "tasa": 16 },
+  { "nombre": "descuento de línea con tres decimales", "lineas": [{ "precio": 19.99, "cantidad": 2, "descuento": 0 }, { "precio": 5.555, "cantidad": 3, "descuento": 1.005 }], "promo": { "tipo": "percentage", "valor": 12.5 }, "tasa": 8 },
+  { "nombre": "descuento mayor que la línea", "lineas": [{ "precio": 10, "cantidad": 1, "descuento": 15 }], "promo": null, "tasa": 16 },
+  { "nombre": "promo fija mayor que la base", "lineas": [{ "precio": 50, "cantidad": 1, "descuento": 0 }], "promo": { "tipo": "fixed", "valor": 80 }, "tasa": 16 }
+]

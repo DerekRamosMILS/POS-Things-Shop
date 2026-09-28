@@ -16,6 +16,13 @@ import { T } from '../theme';
 
 
 import type { CartItem, CartVariant, Category, Customer, PaymentSplit, Product, ProductVariant, Promotion } from '../types';
+import { cuentasDelTicket, brutoDeLinea, aCentavos } from '../utils/ticket';
+
+/** Lo que se muestra por línea, redondeado como lo cobra el backend. */
+const netoDeLinea = (item: { product: { sale_price: number }; quantity: number; discount: number }) => {
+    const bruto = brutoDeLinea(item.product.sale_price, item.quantity);
+    return (bruto - Math.min(Math.max(aCentavos(item.discount), 0), bruto)) / 100;
+};
 
 const variantLabel = (v: CartVariant | null): string =>
     v ? ([v.size, v.color].filter(x => x && x.trim()).join(' / ') || 'Único') : '';
@@ -128,7 +135,7 @@ function buildReceiptHTML(sale: CompletedSale, store: StoreInfo): string {
     const rows = sale.items.map(item =>
         `<tr><td>${esc(item.product.name)}${item.variant ? ` <small>(${esc(variantLabel(item.variant))})</small>` : ''}</td><td style="text-align:center">${item.quantity}</td>
          <td style="text-align:right">${formatCurrency(item.product.sale_price)}</td>
-         <td style="text-align:right">${formatCurrency(item.product.sale_price * item.quantity - item.discount)}</td></tr>`
+         <td style="text-align:right">${formatCurrency(netoDeLinea(item))}</td></tr>`
     ).join('');
     const now = new Date().toLocaleString('es-MX');
     const storeName = store.name || 'ThingsShop';
@@ -159,7 +166,7 @@ ${sale.change > 0 ? `<tr><td>Cambio</td><td style="text-align:right">${formatCur
 export default function POSPage() {
     const {
         items, addItem, removeItem, updateQuantity, clear, restoreItems,
-        applyDiscount, getSubtotal, getDiscountTotal, getItemCount,
+        applyDiscount, getItemCount,
     } = useCartStore();
     const { user, cashRegisterId } = useSessionStore();
 
@@ -445,25 +452,6 @@ export default function POSPage() {
         return valid.filter(p => p.name.toLowerCase().includes(q)).slice(0, 6);
     }, [promos, promoInput]);
 
-    const promoDiscount = useMemo(() => {
-        if (!activePromo || !isPromoValidToday(activePromo)) return 0;
-        // Only the items the promo applies to contribute to its base.
-        let base = 0;
-        for (const it of items) {
-            const lineNet = it.product.sale_price * it.quantity - it.discount;
-            if (activePromo.applies_to === 'all') base += lineNet;
-            // Sin destino no alcanza a nada, igual que en el cobro: null === null
-            // hacía que una promoción por categoría cayera sobre lo que no tenía.
-            else if (activePromo.target_id == null) continue;
-            else if (activePromo.applies_to === 'category' && it.product.category_id === activePromo.target_id) base += lineNet;
-            else if (activePromo.applies_to === 'product' && it.product.id === activePromo.target_id) base += lineNet;
-        }
-        base = Math.max(0, base);
-        if (base <= 0) return 0;
-        if (activePromo.discount_type === 'percentage') return Math.round(base * (activePromo.discount_value / 100) * 100) / 100;
-        return Math.min(activePromo.discount_value, base);
-    }, [activePromo, items]);
-
     const handleApplyPromo = (promo: Promotion) => {
         setActivePromo(promo); setPromoInput(promo.name); setPromoDropdown(false);
         const label = promo.discount_type === 'percentage' ? `${promo.discount_value}% off` : `${formatCurrency(promo.discount_value)} off`;
@@ -471,12 +459,30 @@ export default function POSPage() {
     };
     const handleRemovePromo = () => { setActivePromo(null); setPromoInput(''); showToast('Promoción removida', 'warn'); };
 
-    const subtotal = getSubtotal();
-    const lineDiscountTotal = getDiscountTotal();
-    const taxableBase = Math.max(0, subtotal - lineDiscountTotal - promoDiscount);
+    // Las mismas cuentas que hace el backend, centavo por centavo: el cobro
+    // manda este total y el backend se niega si el suyo es otro.
     const taxRate = parseFloat(config.tax_rate || '0') || 0;
-    const tax = Math.round(taxableBase * taxRate / 100 * 100) / 100;
-    const total = Math.round((taxableBase + tax) * 100) / 100;
+    const cuentas = useMemo(() => {
+        const promo = activePromo && isPromoValidToday(activePromo) ? activePromo : null;
+        // Sin destino no alcanza a nada, igual que en el cobro: null === null
+        // hacía que una promoción por categoría cayera sobre lo que no tenía.
+        const alcanza = (it: typeof items[number]) => !promo ? false
+            : promo.applies_to === 'all' ? true
+            : promo.target_id == null ? false
+            : promo.applies_to === 'category' ? it.product.category_id === promo.target_id
+            : promo.applies_to === 'product' ? it.product.id === promo.target_id
+            : false;
+        return cuentasDelTicket(
+            items.map(it => ({ precio: it.product.sale_price, cantidad: it.quantity, descuento: it.discount, enPromo: alcanza(it) })),
+            promo ? { tipo: promo.discount_type === 'percentage' ? 'percentage' : 'fixed', valor: promo.discount_value } : null,
+            taxRate,
+        );
+    }, [items, activePromo, taxRate]);
+    const subtotal = cuentas.subtotal;
+    const lineDiscountTotal = cuentas.descuentoDeLineas;
+    const promoDiscount = cuentas.descuentoDePromo;
+    const tax = cuentas.impuesto;
+    const total = cuentas.total;
     const cashGiven = parseFloat(amountPaid) || 0;
     // El reparto del cobro mixto se calcula igual que en el backend; vive en
     // utils/cash para que ambas versiones estén sujetas a las mismas pruebas.
@@ -897,7 +903,7 @@ export default function POSPage() {
                                 </div>
                             </div>
                         ) : items.map((item, index) => {
-                            const lineTotal = item.product.sale_price * item.quantity - item.discount;
+                            const lineTotal = netoDeLinea(item);
                             const lineId = cartLineId(item);
                             const maxStock = stockOf(item);
                             const selected = index === Math.min(selectedLine, items.length - 1);
@@ -936,7 +942,7 @@ export default function POSPage() {
                                                 ref={el => { discountRefs.current[lineId] = el; }}
                                                 type="number" min="0" step="0.01"
                                                 value={item.discount || ''}
-                                                onChange={e => applyDiscount(lineId, Math.max(0, Math.min(parseFloat(e.target.value) || 0, item.product.sale_price * item.quantity)))}
+                                                onChange={e => applyDiscount(lineId, Math.max(0, Math.min(parseFloat(e.target.value) || 0, brutoDeLinea(item.product.sale_price, item.quantity) / 100)))}
                                                 placeholder="Desc."
                                                 style={{ width: '100%', padding: '5px 8px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.10)', color: T.t2, fontSize: 12, fontFamily: 'inherit', outline: 'none' }}
                                             />

@@ -1631,6 +1631,52 @@ mod integracion {
     }
 
     #[test]
+    fn los_casos_de_ticket_dan_lo_mismo_aqui_que_en_la_pantalla() {
+        // La pantalla repite estas cuentas (`src/utils/ticket.ts`) para mandar el
+        // total que vio el cajero, y el cobro se niega si difiere. Los mismos
+        // casos y los mismos totales se prueban de los dos lados.
+        let casos: Vec<serde_json::Value> = serde_json::from_str(include_str!("casos_de_ticket.json")).unwrap();
+        let esperados: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(include_str!("totales_de_ticket.json")).unwrap();
+        let mut obtenidos = Vec::new();
+        for caso in &casos {
+            let t = Tienda::nueva().con_caja(0.0);
+            let tasa = caso["tasa"].as_f64().unwrap();
+            t.db.execute("UPDATE system_config SET value = ?1 WHERE key = 'tax_rate'", params![tasa.to_string()]).unwrap();
+            let mut items = Vec::new();
+            for (i, l) in caso["lineas"].as_array().unwrap().iter().enumerate() {
+                let p = t.producto(&format!("P{}", i), l["precio"].as_f64().unwrap(), 1.0, 1000);
+                items.push(CreateSaleItemDto {
+                    product_id: p,
+                    quantity: l["cantidad"].as_i64().unwrap() as i32,
+                    unit_price: 0.0,
+                    discount: l["descuento"].as_f64().unwrap(),
+                    variant_id: None,
+                });
+            }
+            let mut data = venta(vec![]);
+            data.items = items;
+            if let Some(promo) = caso["promo"].as_object() {
+                t.db.execute(
+                    "INSERT INTO promotions (id, name, discount_type, discount_value, start_date, end_date, applies_to)
+                     VALUES (1, 'Caso', ?1, ?2, '2000-01-01', '2999-12-31', 'all')",
+                    params![promo["tipo"].as_str().unwrap(), promo["valor"].as_f64().unwrap()],
+                ).unwrap();
+                data.promotion_id = Some(1);
+            }
+            let total = Cents::from_pesos(t.cobrar(data).unwrap().total).0;
+            obtenidos.push((caso["nombre"].as_str().unwrap().to_string(), total));
+        }
+        let mal: Vec<String> = obtenidos
+            .iter()
+            .filter(|(n, total)| esperados.get(n).and_then(|v| v.as_i64()) != Some(*total))
+            .map(|(n, total)| format!("{:?}: {}", n, total))
+            .collect();
+        assert!(mal.is_empty(), "totales en centavos que no cuadran con totales_de_ticket.json:\n{}", mal.join("\n"));
+        assert_eq!(esperados.len(), casos.len());
+    }
+
+    #[test]
     fn si_el_total_no_es_el_que_vio_el_cajero_no_se_cobra() {
         // Con tarjeta el backend usaba su propio total sin mirar lo que decía
         // la pantalla. Una orden en espera con una promoción que venció a

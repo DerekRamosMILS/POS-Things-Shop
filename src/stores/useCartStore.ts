@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { almacenSeguro } from './almacen';
 import type { CartItem, CartVariant, Product } from '../types';
+import { aCentavos, brutoDeLinea } from '../utils/ticket';
 
 // A cart line is identified by product + variant, so the same product can appear
 // as multiple lines (e.g. size M and size L).
@@ -88,10 +89,11 @@ export const useCartStore = create<CartStore>()(persist((set, get) => ({
 
     restoreItems: (cartItems: CartItem[]) => set({ items: cartItems.map((i) => ({ ...i })) }),
 
+    // Redondeado como lo cobra el backend (`utils/ticket.ts`).
     getSubtotal: () =>
-        get().items.reduce((sum, item) => sum + item.product.sale_price * item.quantity, 0),
+        get().items.reduce((sum, item) => sum + brutoDeLinea(item.product.sale_price, item.quantity), 0) / 100,
 
-    getDiscountTotal: () => get().items.reduce((sum, item) => sum + item.discount, 0),
+    getDiscountTotal: () => get().items.reduce((sum, item) => sum + aCentavos(item.discount), 0) / 100,
 
     getTotal: () => get().getSubtotal() - get().getDiscountTotal(),
 
