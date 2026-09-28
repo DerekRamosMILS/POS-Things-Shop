@@ -9,6 +9,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { invalidateProductImage, useProductImage } from '../hooks/useProductImages';
 import CaptureSettings from '../components/CaptureSettings';
+import { proveedoresParaLaFicha } from '../utils/proveedores';
 
 // ─── Fotos ───────────────────────────────────────────────────────────────────
 // Las fotos se guardan como archivos, no dentro de la base, así que pueden
@@ -719,7 +720,7 @@ export default function ProductsPage() {
                                     <label className="form-label">Proveedor</label>
                                     <select value={form.supplier_id || ''} onChange={e => setForm({ ...form, supplier_id: e.target.value ? Number(e.target.value) : null })} className="input">
                                         <option value="">Sin proveedor</option>
-                                        {suppliers.filter(s => s.is_active).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                        {proveedoresParaLaFicha(suppliers, form.supplier_id ?? null).map(o => <option key={o.id} value={o.id}>{o.etiqueta}</option>)}
                                     </select>
                                 </div>
                             </div>
