@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { formatCurrency, formatDateTime, PAYMENT_METHOD_LABELS } from '../utils';
+import { formatCurrency, formatDateTime, hoyLocal, PAYMENT_METHOD_LABELS } from '../utils';
+import { vencimientoDeApartado } from '../utils/apartados';
 import { useSessionStore } from '../stores/useSessionStore';
 import * as api from '../api';
 import type { Layaway } from '../types';
@@ -130,6 +131,7 @@ export default function LayawaysPage() {
                                 <th>Folio</th>
                                 <th>Cliente</th>
                                 <th>Fecha</th>
+                                <th>Vence</th>
                                 <th style={{ textAlign: 'right' }}>Total</th>
                                 <th style={{ textAlign: 'right' }}>Pagado</th>
                                 <th style={{ textAlign: 'right' }}>Saldo</th>
@@ -143,6 +145,14 @@ export default function LayawaysPage() {
                                     <td><span style={{ fontSize: 13, fontWeight: 700, color: 'var(--primary)', fontFamily: 'monospace' }}>{l.folio}</span></td>
                                     <td style={{ fontSize: 13, color: 'var(--t2)' }}>{l.customer_name || 'Público general'}</td>
                                     <td style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--t3)' }}>{formatDateTime(l.created_at)}</td>
+                                    {(() => {
+                                        const v = vencimientoDeApartado(l.due_date, l.status, hoyLocal());
+                                        return (
+                                            <td style={{ fontFamily: 'monospace', fontSize: 11, color: v.vencido ? 'var(--danger)' : 'var(--t3)', fontWeight: v.vencido ? 700 : 400 }}>
+                                                {v.texto}{v.vencido ? ' · vencido' : ''}
+                                            </td>
+                                        );
+                                    })()}
                                     <td style={{ textAlign: 'right', fontSize: 13, fontWeight: 700, color: 'var(--t1)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(l.total)}</td>
                                     <td style={{ textAlign: 'right', fontSize: 13, color: 'var(--success)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(l.paid)}</td>
                                     <td style={{ textAlign: 'right', fontSize: 13, fontWeight: 700, color: l.total - l.paid > 0 ? 'var(--warning)' : 'var(--success)', fontVariantNumeric: 'tabular-nums' }}>{formatCurrency(l.total - l.paid)}</td>
@@ -165,6 +175,14 @@ export default function LayawaysPage() {
                             <div>
                                 <h3 style={{ fontSize: 16, fontWeight: 800, color: 'var(--t1)' }}>Apartado {detail.folio}</h3>
                                 <p style={{ fontSize: 12, color: 'var(--t3)', marginTop: 2 }}>{detail.customer_name || 'Público general'} · {STATUS_LABELS[detail.status]}</p>
+                                {detail.due_date && (() => {
+                                    const v = vencimientoDeApartado(detail.due_date, detail.status, hoyLocal());
+                                    return (
+                                        <p style={{ fontSize: 12, marginTop: 2, color: v.vencido ? 'var(--danger)' : 'var(--t3)', fontWeight: v.vencido ? 700 : 400 }}>
+                                            {v.vencido ? `Venció el ${v.texto}` : `Vence el ${v.texto}`}
+                                        </p>
+                                    );
+                                })()}
                             </div>
                             <button onClick={() => setDetail(null)} style={{ padding: 6, borderRadius: 9, color: 'var(--t3)' }}><IcoX /></button>
                         </div>
