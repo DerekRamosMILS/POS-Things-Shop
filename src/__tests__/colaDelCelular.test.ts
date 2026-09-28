@@ -252,8 +252,12 @@ describe('capturar con la caja apagada', () => {
         caja.rechazaConEstado = 400;
         doc.getElementById('sincronizar')!.dispatchEvent(new doc.defaultView!.Event('click'));
 
+        // El historial se escribe dentro del envío y el aviso después, tras otra
+        // lectura de la cola: esperar sólo al primero hacía que la prueba fallara
+        // de vez en cuando con la máquina cargada.
         await esperarA(
-            () => doc.getElementById('historial')!.textContent!.includes('Vestido raro'),
+            () => doc.getElementById('historial')!.textContent!.includes('Vestido raro')
+                && doc.getElementById('aviso')!.textContent!.includes('Vestido raro'),
             'que el rechazo quedara a la vista con su nombre',
         );
         expect(doc.getElementById('historial')!.textContent).toContain('Ponle nombre');
