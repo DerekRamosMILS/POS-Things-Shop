@@ -48,6 +48,9 @@ pub fn parse_hex_command(spec: &str) -> Result<Vec<u8>, String> {
 /// con basura en otras; por eso esta es la opción por defecto.
 pub fn to_ascii(text: &str) -> String {
     text.chars()
+        // Los signos de apertura no tienen equivalente: cambiarlos por "!" y "?"
+        // dejaba "!Gracias por su compra!". Sin ellos se lee natural.
+        .filter(|c| !matches!(c, '¡' | '¿'))
         .map(|c| match c {
             'á' | 'à' | 'ä' | 'â' => 'a',
             'é' | 'è' | 'ë' | 'ê' => 'e',
@@ -61,8 +64,6 @@ pub fn to_ascii(text: &str) -> String {
             'Ú' | 'Ù' | 'Ü' | 'Û' => 'U',
             'ñ' => 'n',
             'Ñ' => 'N',
-            '¿' => '?',
-            '¡' => '!',
             '°' => 'o',
             '–' | '—' => '-',
             '\u{201C}' | '\u{201D}' => '"',
@@ -224,7 +225,10 @@ mod tests {
     #[test]
     fn spanish_text_survives_a_printer_without_accents() {
         assert_eq!(to_ascii("Camisa Niña"), "Camisa Nina");
-        assert_eq!(to_ascii("¡Gracias por su compra!"), "!Gracias por su compra!");
+        // El pie por defecto es este: con "¡" convertido en "!", cada ticket
+        // salía con "!Gracias por su compra!". Sin la apertura se lee natural.
+        assert_eq!(to_ascii("¡Gracias por su compra!"), "Gracias por su compra!");
+        assert_eq!(to_ascii("¿Dudas? Llámanos"), "Dudas? Llamanos");
         assert_eq!(to_ascii("Pantalón Café"), "Pantalon Cafe");
     }
 
