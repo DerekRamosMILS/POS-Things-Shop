@@ -138,6 +138,8 @@ pub fn registrar_apartado(
     if data.initial_payment < 0.0 {
         return Err("El anticipo no puede ser negativo".to_string());
     }
+    // En centavos, igual que los abonos.
+    let anticipo = Cents::from_pesos(data.initial_payment);
 
     db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
 
@@ -196,13 +198,13 @@ pub fn registrar_apartado(
             total = total + subtotal;
             lines.push(Line { product_id: item.product_id, name, sku, quantity: item.quantity, unit_price: price, unit_cost: cost, subtotal, variant_id, variant_label });
         }
-        if Cents::from_pesos(data.initial_payment) > total {
+        if anticipo > total {
             return Err("El anticipo no puede superar el total".to_string());
         }
 
         db.execute(
             "INSERT INTO layaways (folio, customer_id, user_id, total, paid, notes, due_date) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![folio, data.customer_id, user_id, total.to_pesos(), data.initial_payment, data.notes, data.due_date],
+            params![folio, data.customer_id, user_id, total.to_pesos(), anticipo.to_pesos(), data.notes, data.due_date],
         ).map_err(|e| e.to_string())?;
         let layaway_id = db.last_insert_rowid();
 
@@ -241,8 +243,8 @@ pub fn registrar_apartado(
             ).map_err(|e| e.to_string())?;
         }
 
-        if data.initial_payment > 0.0 {
-            post_layaway_payment(db, layaway_id, data.initial_payment, &data.payment_method, user_id)?;
+        if anticipo.is_positive() {
+            post_layaway_payment(db, layaway_id, anticipo.to_pesos(), &data.payment_method, user_id)?;
         }
 
         db.execute(
@@ -321,9 +323,13 @@ pub fn abonar_apartado(
     amount: f64,
     payment_method: &str,
 ) -> Result<Layaway, String> {
-    if amount <= 0.0 {
+    // En centavos desde la entrada: el saldo se compara en centavos, y guardar
+    // lo tecleado tal cual dejaba pasar abonos de fracción de centavo.
+    let monto = Cents::from_pesos(amount);
+    if !amount.is_finite() || !monto.is_positive() {
         return Err("El abono debe ser mayor a cero".to_string());
     }
+    let amount = monto.to_pesos();
 
     let (status, total, paid): (String, f64, f64) = db.query_row(
         "SELECT status, total, paid FROM layaways WHERE id = ?1",
@@ -660,6 +666,29 @@ mod tests {
         ).unwrap();
         db.execute("INSERT INTO layaways (id, folio, user_id, total, paid) VALUES (1, 'A-1', 1, 1000, 0)", []).unwrap();
         db
+    }
+
+    #[test]
+    fn un_abono_se_guarda_en_centavos_y_uno_de_fraccion_se_rechaza() {
+        // El saldo se comparaba en centavos pero el abono se guardaba tal cual:
+        // "0.004" pasaba por ser mayor que cero y quedaba un pago de fracción de
+        // centavo; "100.004" sobre un saldo de cien dejaba el apartado pagado
+        // de más, y el corte sumaba la fracción.
+        let db = tienda();
+        abrir_caja(&db);
+        let p = producto(&db, "VES", 100.0, 10);
+        let ap = registrar_apartado(&db, 1, apartado(p, 1, 0.0, "cash")).unwrap();
+
+        assert!(abonar_apartado(&db, 1, ap.id, 0.004, "cash").is_err());
+
+        abonar_apartado(&db, 1, ap.id, 99.996, "cash").unwrap();
+        let (pagado, abono): (f64, f64) = db.query_row(
+            "SELECT l.paid, (SELECT amount FROM layaway_payments WHERE layaway_id = l.id ORDER BY id DESC LIMIT 1)
+             FROM layaways l WHERE l.id = ?1",
+            params![ap.id], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(abono, 100.0);
+        assert_eq!(pagado, 100.0);
     }
 
     #[test]
