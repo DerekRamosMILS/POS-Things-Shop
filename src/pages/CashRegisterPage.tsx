@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { formatCurrency, formatDateTime } from '../utils';
 import { useSessionStore } from '../stores/useSessionStore';
 import * as api from '../api';
-import { cashBreakdown, expectedCash as computeExpectedCash, montoContado, round2 } from '../utils/cash';
+import { cashBreakdown, cobradoPorMetodo, expectedCash as computeExpectedCash, montoContado, round2 } from '../utils/cash';
 import type { CashRegister, Expense } from '../types';
 import { useToast } from '../contexts/ToastContext';
 import { AVISO_CAJA_CERRADA } from './cajaCerrada';
@@ -153,11 +153,18 @@ export default function CashRegisterPage() {
 
             {/* Open register KPIs */}
             {register && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 14 }}>
                     {[
                         { label: 'Ventas Totales', value: formatCurrency(register.total_sales), sub: `${register.sale_count} ventas`, color: 'var(--success)' },
-                        { label: 'Efectivo', value: formatCurrency(register.total_cash_sales), sub: 'en efectivo', color: 'var(--primary)' },
-                        { label: 'Tarjeta / Transf.', value: formatCurrency(register.total_card_sales + register.total_transfer_sales), sub: 'electrónico', color: 'var(--accent)' },
+                        ...(['efectivo', 'tarjeta', 'transferencia'] as const).map(m => {
+                            const c = cobradoPorMetodo(register)[m];
+                            return {
+                                label: m === 'efectivo' ? 'Efectivo' : m === 'tarjeta' ? 'Tarjeta' : 'Transferencia',
+                                value: formatCurrency(c.total),
+                                sub: c.abonos > 0 ? `incluye ${formatCurrency(c.abonos)} de abonos` : 'ventas y abonos',
+                                color: m === 'efectivo' ? 'var(--primary)' : 'var(--accent)',
+                            };
+                        }),
                         { label: 'Gastos', value: formatCurrency(register.total_expenses), sub: `${expenses.length} gastos`, color: 'var(--danger)' },
                     ].map(card => (
                         <div key={card.label} className="card" style={{ padding: '20px 22px' }}>

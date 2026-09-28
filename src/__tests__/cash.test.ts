@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { cashBreakdown, evaluateMixedTender, expectedCash, montoContado, round2, sumMoney } from '../utils/cash';
+import { cashBreakdown, cobradoPorMetodo, evaluateMixedTender, expectedCash, montoContado, round2, sumMoney } from '../utils/cash';
 import type { CashRegister } from '../types';
 
 const caja = (over: Partial<CashRegister> = {}): CashRegister => ({
@@ -172,5 +172,30 @@ describe('la fórmula del efectivo esperado', () => {
         );
 
         expect([...dePantalla].sort()).toEqual([...esperadoEnRust].sort());
+    });
+});
+
+describe('lo cobrado por método en el turno', () => {
+    // La pantalla de Caja enseñaba "Tarjeta / Transf." sólo con ventas y las dos
+    // juntas. La terminal bancaria cierra el día con todo lo cobrado con
+    // tarjeta, abonos de apartados incluidos: los días con abonos nunca
+    // cuadraban, y ninguna pantalla enseñaba esos abonos.
+    const turno = {
+        total_cash_sales: 1000, total_card_sales: 900, total_transfer_sales: 300,
+        total_layaway_cash: 200, total_layaway_card: 150, total_layaway_transfer: 50,
+    } as unknown as CashRegister;
+
+    it('suma ventas y abonos, cada método por separado', () => {
+        expect(cobradoPorMetodo(turno)).toEqual({
+            efectivo: { total: 1200, abonos: 200 },
+            tarjeta: { total: 1050, abonos: 150 },
+            transferencia: { total: 350, abonos: 50 },
+        });
+    });
+
+    it('la pantalla de Caja los usa y ya no junta tarjeta con transferencia', () => {
+        const pagina = readFileSync('src/pages/CashRegisterPage.tsx', 'utf-8');
+        expect(pagina).toContain('cobradoPorMetodo(');
+        expect(pagina).not.toContain('Tarjeta / Transf.');
     });
 });

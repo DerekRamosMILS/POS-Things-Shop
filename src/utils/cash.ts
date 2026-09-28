@@ -24,6 +24,28 @@ export function sumMoney(values: number[]): number {
     return cents / CENTS;
 }
 
+export interface CobradoDeUnMetodo {
+    total: number;
+    /** De ese total, lo que entró como abono de apartado. */
+    abonos: number;
+}
+
+/**
+ * Lo cobrado en el turno con cada método: ventas y abonos de apartados.
+ *
+ * La terminal bancaria cierra el día con todo lo que pasó por tarjeta, abonos
+ * incluidos. La pantalla enseñaba sólo ventas y juntaba tarjeta con
+ * transferencia: los días con abonos no había cómo cuadrarla.
+ */
+export function cobradoPorMetodo(r: CashRegister): Record<'efectivo' | 'tarjeta' | 'transferencia', CobradoDeUnMetodo> {
+    const de = (ventas: number, abonos: number) => ({ total: sumMoney([ventas, abonos]), abonos: round2(abonos) });
+    return {
+        efectivo: de(r.total_cash_sales, r.total_layaway_cash),
+        tarjeta: de(r.total_card_sales, r.total_layaway_card),
+        transferencia: de(r.total_transfer_sales, r.total_layaway_transfer),
+    };
+}
+
 /** Renglón del desglose que se muestra al cerrar la caja. */
 export interface CashLine {
     label: string;
