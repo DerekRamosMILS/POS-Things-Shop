@@ -150,6 +150,21 @@ fn revisiones(db: &Connection) -> Vec<(&'static str, i64)> {
             ),
         ),
         (
+            // `target_id` no tiene llave foránea. Quitar una categoría dejaba su
+            // promoción activa apuntando a nada: se veía vigente y al cobrar no
+            // descontaba, sin un solo aviso.
+            "Promociones vigentes que apuntan a algo que ya no existe",
+            cuenta(
+                "SELECT COUNT(*) FROM promotions p
+                 WHERE p.is_active = 1
+                   AND date(p.end_date) >= date('now','localtime')
+                   AND ((p.applies_to = 'category'
+                         AND NOT EXISTS (SELECT 1 FROM categories c WHERE c.id = p.target_id))
+                     OR (p.applies_to = 'product'
+                         AND NOT EXISTS (SELECT 1 FROM products x WHERE x.id = p.target_id)))",
+            ),
+        ),
+        (
             "Ventas sin ninguna partida",
             cuenta(
                 "SELECT COUNT(*) FROM sales s
@@ -622,6 +637,40 @@ mod tests {
         let report = build_report(&conn);
 
         assert!(report.contains("Ventas sin ninguna partida"), "{}", report);
+    }
+
+    #[test]
+    fn el_reporte_delata_una_promocion_vigente_que_apunta_a_nada() {
+        // Una categoría quitada antes de que eso se negara dejaba su promoción
+        // activa apuntando a nada: se veía vigente y al cobrar no descontaba.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, applies_to, target_id)
+             VALUES ('Verano', 'percentage', 20, '2020-01-01', '2999-12-31', 'category', 777)", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(report.contains("Promociones vigentes que apuntan a algo que ya no existe"), "{}", report);
+    }
+
+    #[test]
+    fn una_promocion_bien_apuntada_no_se_delata() {
+        let conn = db();
+        conn.execute("INSERT INTO categories (id, name) VALUES (70, 'Categoria de prueba 70')", []).unwrap();
+        conn.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock) VALUES (8, 'B', 'Blusa', 1, 2, 1)", [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO promotions (name, discount_type, discount_value, start_date, end_date, applies_to, target_id)
+             VALUES ('A', 'percentage', 20, '2020-01-01', '2999-12-31', 'category', 70),
+                    ('B', 'fixed', 20, '2020-01-01', '2999-12-31', 'product', 8),
+                    ('C', 'fixed', 20, '2020-01-01', '2000-12-31', 'category', 777)", [],
+        ).unwrap();
+
+        let report = build_report(&conn);
+
+        assert!(!report.contains("Promociones vigentes que apuntan"), "{}", report);
     }
 
     #[test]
