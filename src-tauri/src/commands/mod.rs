@@ -185,7 +185,7 @@ mod tests {
             "customers.rs: crear_cliente",
             "customers.rs: actualizar_cliente",
             "products.rs: crear_producto",
-            "products.rs: update_product",
+            "products.rs: editar_producto",
             "promotions.rs: create_promotion",
             "capture/producto.rs: guardar_producto",
         ] {

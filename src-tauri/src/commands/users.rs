@@ -179,13 +179,7 @@ pub fn create_user(state: State<DbState>, sessions: State<SessionState>, token: 
     db.execute(
         "INSERT INTO users (username, password_hash, full_name, role) VALUES (?1, ?2, ?3, ?4)",
         params![data.username, password_hash, data.full_name, data.role],
-    ).map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            "Ya existe un usuario con ese nombre".to_string()
-        } else {
-            e.to_string()
-        }
-    })?;
+    ).map_err(nombre_repetido)?;
 
     let id = db.last_insert_rowid();
     db.query_row(
@@ -231,6 +225,16 @@ pub fn update_user(state: State<DbState>, sessions: State<SessionState>, token: 
     Ok(())
 }
 
+/// Un nombre de usuario que ya existe, dicho para quien lo tecleó. El alta lo
+/// traducía y la edición no.
+fn nombre_repetido(e: rusqlite::Error) -> String {
+    if e.to_string().contains("UNIQUE") {
+        "Ya existe un usuario con ese nombre".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
 /// Núcleo de la edición, con la conexión explícita. Devuelve si hay que cerrarle
 /// las sesiones abiertas.
 pub fn editar_usuario(db: &rusqlite::Connection, data: &UpdateUserDto) -> Result<bool, String> {
@@ -258,7 +262,7 @@ pub fn editar_usuario(db: &rusqlite::Connection, data: &UpdateUserDto) -> Result
         db.execute(
             "UPDATE users SET username=?1, full_name=?2, role=?3, is_active=?4, updated_at=datetime('now','localtime') WHERE id=?5",
             params![data.username, data.full_name, data.role, data.is_active as i32, data.id],
-        ).map_err(|e| e.to_string())?;
+        ).map_err(nombre_repetido)?;
 
         if data.username != cur_username {
             mover_bloqueo(db, &cur_username, &data.username)?;
@@ -699,6 +703,20 @@ mod tests {
             params![nombre],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).ok()
+    }
+
+    #[test]
+    fn renombrar_a_un_nombre_que_ya_existe_lo_dice_claro() {
+        // El alta traducía el duplicado; la edición no, y el administrador leía
+        // "UNIQUE constraint failed: users.username".
+        let conn = db();
+        usuario(&conn, 1, "jefa", "admin");
+        usuario(&conn, 2, "ana", "cashier");
+        let e = editar_usuario(&conn, &UpdateUserDto {
+            id: 2, username: "jefa".to_string(), full_name: "Ana".to_string(),
+            role: "cashier".to_string(), is_active: true,
+        }).unwrap_err();
+        assert_eq!(e, "Ya existe un usuario con ese nombre");
     }
 
     #[test]

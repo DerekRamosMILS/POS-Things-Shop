@@ -245,6 +245,15 @@ pub(crate) fn validar_producto(
 ///
 /// Con quién lo cambió: la columna existía y la pantalla la mostraba, pero nadie
 /// la llenaba.
+/// Un SKU o código de barras repetido, dicho para quien lo tecleó.
+fn duplicado(e: rusqlite::Error) -> String {
+    let texto = e.to_string();
+    if !texto.contains("UNIQUE") {
+        return texto;
+    }
+    if texto.contains("sku") { "El SKU ya existe".to_string() } else { "El código de barras ya existe".to_string() }
+}
+
 pub(crate) fn anotar_precio(
     db: &rusqlite::Connection,
     product_id: i64,
@@ -295,12 +304,7 @@ pub(crate) fn crear_producto(
             data.category_id, data.supplier_id, data.purchase_price,
             data.sale_price, data.stock, data.min_stock
         ],
-    ).map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            if e.to_string().contains("sku") { "El SKU ya existe".to_string() }
-            else { "El código de barras ya existe".to_string() }
-        } else { e.to_string() }
-    })?;
+    ).map_err(duplicado)?;
 
     let id = db.last_insert_rowid();
 
@@ -330,8 +334,16 @@ pub(crate) fn crear_producto(
 #[tauri::command]
 pub fn update_product(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateProductDto) -> Result<Product, String> {
     let user_id = require_admin(&sessions, &token)?;
-    validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, None)?;
     let db = state.conn();
+    editar_producto(&db, user_id, data)
+}
+
+pub(crate) fn editar_producto(
+    db: &rusqlite::Connection,
+    user_id: i64,
+    data: UpdateProductDto,
+) -> Result<Product, String> {
+    validar_producto(&data.name, data.sale_price, data.purchase_price, data.min_stock, None)?;
 
     let old_price: f64 = db
         .query_row("SELECT sale_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
@@ -341,22 +353,35 @@ pub fn update_product(state: State<DbState>, sessions: State<SessionState>, toke
         .query_row("SELECT purchase_price FROM products WHERE id = ?1", params![data.id], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
-    anotar_precio(&db, data.id, "venta", old_price, data.sale_price, user_id)?;
-    anotar_precio(&db, data.id, "costo", old_cost, data.purchase_price, user_id)?;
+    // El historial y el producto van juntos. Anotado aparte, un guardado que
+    // fallaba —un SKU repetido— dejaba en el historial un precio y un costo que
+    // nunca se aplicaron, y la utilidad se calculaba con ese costo.
+    db.execute_batch("BEGIN TRANSACTION;").map_err(|e| e.to_string())?;
+    let r = (|| -> Result<(), String> {
+        anotar_precio(db, data.id, "venta", old_price, data.sale_price, user_id)?;
+        anotar_precio(db, data.id, "costo", old_cost, data.purchase_price, user_id)?;
+        db.execute(
+            "UPDATE products SET sku=?1, barcode=?2, name=?3, description=?4,
+             category_id=?5, supplier_id=?6, purchase_price=?7, sale_price=?8,
+             min_stock=?9, is_active=?10, updated_at=datetime('now','localtime')
+             WHERE id=?11",
+            params![
+                data.sku, data.barcode, data.name.trim(), data.description,
+                data.category_id, data.supplier_id, data.purchase_price,
+                data.sale_price, data.min_stock, data.is_active as i32, data.id
+            ],
+        ).map_err(duplicado)?;
+        Ok(())
+    })();
+    match r {
+        Ok(()) => crate::db::connection::confirmar(db)?,
+        Err(e) => {
+            db.execute_batch("ROLLBACK;").ok();
+            return Err(e);
+        }
+    }
 
-    db.execute(
-        "UPDATE products SET sku=?1, barcode=?2, name=?3, description=?4,
-         category_id=?5, supplier_id=?6, purchase_price=?7, sale_price=?8,
-         min_stock=?9, is_active=?10, updated_at=datetime('now','localtime')
-         WHERE id=?11",
-        params![
-            data.sku, data.barcode, data.name.trim(), data.description,
-            data.category_id, data.supplier_id, data.purchase_price,
-            data.sale_price, data.min_stock, data.is_active as i32, data.id
-        ],
-    ).map_err(|e| e.to_string())?;
-
-    get_product_by_id(&db, data.id)
+    get_product_by_id(db, data.id)
 }
 
 #[tauri::command]
@@ -623,6 +648,40 @@ mod tests {
             .unwrap();
         assert_eq!(cantidad, 3);
         assert_eq!(razon, "Stock inicial");
+    }
+
+    #[test]
+    fn una_edicion_rechazada_no_deja_un_cambio_de_precio_que_no_ocurrio() {
+        // El historial de precios se anotaba antes de guardar el producto y sin
+        // transacción. Si el guardado fallaba —un SKU que ya existe—, el producto
+        // se quedaba igual pero el historial decía que el precio y el costo
+        // habían cambiado, y la utilidad de las ventas siguientes se calculaba
+        // con ese costo que nunca se aplicó. El error, además, salía crudo.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        let alta = |sku: &str| crear_producto(&conn, 1, CreateProductDto {
+            sku: sku.into(), barcode: None, name: "Blusa".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 50.0, sale_price: 120.0, stock: 0, min_stock: 0,
+        }).unwrap();
+        alta("TS-000010");
+        let b = alta("TS-000011");
+
+        let e = editar_producto(&conn, 1, UpdateProductDto {
+            id: b.id, sku: "TS-000010".into(), barcode: None, name: "Blusa".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 80.0, sale_price: 199.0, min_stock: 0, is_active: true,
+        }).unwrap_err();
+
+        assert_eq!(e, "El SKU ya existe");
+        let cambios: i64 = conn
+            .query_row("SELECT COUNT(*) FROM price_history WHERE product_id = ?1", params![b.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cambios, 0, "el historial no debe decir que cambió lo que no cambió");
     }
 
     #[test]
