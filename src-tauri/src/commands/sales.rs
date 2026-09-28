@@ -452,7 +452,7 @@ pub fn registrar_venta(
         if let Some(esperado) = data.total_esperado {
             if (Cents::from_pesos(esperado) - total).0.abs() > 1 {
                 return Err(format!(
-                    "El total cambió: ahora es ${:.2} y la pantalla decía ${:.2}. Revisa la promoción y vuelve a cobrar; no se registró nada.",
+                    "El total cambió: ahora es ${:.2} y la pantalla decía ${:.2}. Cambió un precio, la promoción o el impuesto desde que se armó el ticket; no se registró nada.",
                     total.to_pesos(),
                     esperado
                 ));

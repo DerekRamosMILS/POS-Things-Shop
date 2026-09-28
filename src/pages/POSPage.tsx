@@ -247,38 +247,48 @@ export default function POSPage() {
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3200);
     }, []);
 
-    useEffect(() => {
-        (async () => {
-            try {
-                const [cats, prods, promoList, cfg, custs] = await Promise.all([
-                    api.getCategories(), api.getProducts({ is_active: true }), api.getPromotions(), api.getAllConfig(),
-                    api.getCustomers().catch(() => []),
-                ]);
-                setCategories(cats.filter(c => c.is_active));
-                setAllProducts(prods);
-                setPromos(promoList.filter(p => p.is_active));
-                setCustomers(custs.filter(c => c.is_active));
-                const map: Record<string, string> = {};
-                cfg.forEach(c => { map[c.key] = c.value; });
-                setConfig(map);
-                scannerConfig.current = configFromSettings(map);
+    // Trae de la base catálogo, promociones y ajustes, y pone al día el ticket
+    // abierto. Se usa al abrir la pantalla y cuando el cobro se frena porque el
+    // total cambió: sin esto la pantalla seguía con el precio viejo y cada
+    // reintento se frenaba igual, con el cliente enfrente.
+    const ponerAlDia = useCallback(async () => {
+        const [cats, prods, promoList, cfg, custs] = await Promise.all([
+            api.getCategories(), api.getProducts({ is_active: true }), api.getPromotions(), api.getAllConfig(),
+            api.getCustomers().catch(() => []),
+        ]);
+        setCategories(cats.filter(c => c.is_active));
+        setAllProducts(prods);
+        const activas = promoList.filter(p => p.is_active);
+        setPromos(activas);
+        setCustomers(custs.filter(c => c.is_active));
+        const map: Record<string, string> = {};
+        cfg.forEach(c => { map[c.key] = c.value; });
+        setConfig(map);
+        scannerConfig.current = configFromSettings(map);
 
-                // El ticket guardado lleva una copia del producto de cuando se
-                // agregó. El cobro toma el precio de la base —y hace bien—, así
-                // que un ticket que sobrevivió a un cambio de precio enseñaba un
-                // total y cobraba otro. Se pone al día y se dice qué cambió.
-                const guardado = liveRef.current.items;
-                if (guardado.length > 0) {
-                    const { items: alDia, cambios } = refrescarCarrito(guardado, prods);
-                    if (cambios.length > 0) {
-                        restoreItems(alDia);
-                        showToast(avisoDeCarrito(cambios) ?? '', 'warn');
-                    }
-                }
-            } catch (err) { showToast(String(err), 'error'); }
-            finally { setLoadingProducts(false); }
-        })();
-    }, []);
+        // La promoción elegida también lleva una copia: si la apagaron o
+        // cambiaron, se toma la de la base o se quita.
+        setActivePromo(prev => prev ? (activas.find(p => p.id === prev.id) ?? null) : null);
+
+        // El ticket guardado lleva una copia del producto de cuando se
+        // agregó. El cobro toma el precio de la base —y hace bien—, así
+        // que un ticket que sobrevivió a un cambio de precio enseñaba un
+        // total y cobraba otro. Se pone al día y se dice qué cambió.
+        const guardado = liveRef.current.items;
+        if (guardado.length > 0) {
+            const { items: alDia, cambios } = refrescarCarrito(guardado, prods);
+            if (cambios.length > 0) {
+                restoreItems(alDia);
+                showToast(avisoDeCarrito(cambios) ?? '', 'warn');
+            }
+        }
+    }, [restoreItems, showToast]);
+
+    useEffect(() => {
+        ponerAlDia()
+            .catch(err => showToast(String(err), 'error'))
+            .finally(() => setLoadingProducts(false));
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Keyboard shortcuts + barcode scanner
     useEffect(() => {
@@ -613,7 +623,16 @@ export default function POSPage() {
             chargeRequest.current = null;
             clear(); setShowPayment(false); setAmountPaid(''); setMixedCard(''); setMixedTransfer(''); setCustomerName(''); setRequiereFactura(false); setCustomerId(null); setOrderNotes(''); setActivePromo(null); setPromoInput('');
             setOrderSeq(prev => prev + 1);
-        } catch (err) { showToast(String(err), 'error'); }
+        } catch (err) {
+            if (String(err).includes('El total cambió')) {
+                setShowPayment(false);
+                chargeRequest.current = null;
+                await ponerAlDia().catch(() => {});
+                showToast('El total cambió desde que se armó el ticket. Ya se puso al día: revisa el nuevo total y cobra otra vez.', 'warn');
+            } else {
+                showToast(String(err), 'error');
+            }
+        }
         finally { setProcessing(false); }
     };
 

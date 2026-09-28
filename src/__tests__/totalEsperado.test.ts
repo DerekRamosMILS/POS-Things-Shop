@@ -22,3 +22,27 @@ describe('el total que vio el cajero', () => {
         expect(leer('src/types/index.ts')).toMatch(/total_esperado\?:\s*number/);
     });
 });
+
+describe('cuando el cobro se frena porque el total cambió', () => {
+    // Si el precio cambió con el producto ya en el ticket, la pantalla seguía
+    // con el viejo y cada reintento se frenaba igual: el cajero quedaba atorado
+    // frente al cliente. La pantalla reconoce el aviso y se pone al día.
+    const marca = 'El total cambió';
+
+    it('el backend lo dice con una frase que la pantalla reconoce', () => {
+        expect(leer('src-tauri/src/commands/sales.rs')).toContain(`"${marca}:`);
+    });
+
+    it('el punto de venta la reconoce y recarga antes de volver a cobrar', () => {
+        const pos = leer('src/pages/POSPage.tsx');
+        expect(pos).toContain(`'${marca}'`);
+        const cobro = pos.slice(pos.indexOf('const handleCompleteSale'), pos.indexOf('const handleCompleteSale') + 6000);
+        expect(cobro).toMatch(/ponerAlDia\(/);
+    });
+
+    it('el aviso del backend no culpa sólo a la promoción', () => {
+        const rust = leer('src-tauri/src/commands/sales.rs');
+        const aviso = rust.slice(rust.indexOf(`"${marca}:`), rust.indexOf(`"${marca}:`) + 300);
+        expect(aviso).toMatch(/precio/);
+    });
+});
