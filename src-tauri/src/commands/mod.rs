@@ -29,7 +29,13 @@ pub mod variants;
 pub(crate) fn nombre_requerido(valor: &str, que: &str) -> Result<String, String> {
     let limpio = valor.trim();
     if limpio.is_empty() {
-        return Err(format!("Ponle nombre a {}", que));
+        // "a el proveedor" se contrae en "al". Lo leía así el usuario cada vez
+        // que dejaba el nombre en blanco.
+        let sujeto = match que.strip_prefix("el ") {
+            Some(resto) => format!("al {}", resto),
+            None => format!("a {}", que),
+        };
+        return Err(format!("Ponle nombre {}", sujeto));
     }
     Ok(limpio.to_string())
 }
@@ -53,68 +59,137 @@ mod tests {
     #[test]
     fn el_mensaje_dice_de_qué_se_habla() {
         let e = nombre_requerido("", "el proveedor").unwrap_err();
-        assert!(e.contains("el proveedor"), "{}", e);
+        assert!(e.contains("proveedor"), "{}", e);
     }
 
-    /// Todo comando que da de alta o renombra algo del catálogo tiene que pasar
-    /// por la comprobación.
+    #[test]
+    fn el_mensaje_contrae_la_preposición() {
+        // "Ponle nombre a el proveedor" es lo que leía el usuario. La prueba de
+        // arriba pasaba igual porque sólo buscaba el sustantivo: comprobaba el
+        // alrededor del error, no el error.
+        assert_eq!(nombre_requerido("", "el proveedor").unwrap_err(), "Ponle nombre al proveedor");
+        assert_eq!(nombre_requerido("", "la categoría").unwrap_err(), "Ponle nombre a la categoría");
+        assert_eq!(nombre_requerido("", "el cliente").unwrap_err(), "Ponle nombre al cliente");
+    }
+
+    /// Toda función que escribe una columna `name` la comprueba **y** la guarda
+    /// recortada.
     ///
     /// Se revisa leyendo el código porque los comandos reciben `State` de Tauri y
-    /// no se pueden llamar desde una prueba. Lo que importa no es el ayudante
-    /// —ese ya tiene sus casos— sino que nadie agregue un `create_` nuevo que
-    /// escriba un nombre sin comprobarlo: en blanco se cuela al catálogo y desde
-    /// la 026 ya no se puede borrar.
-    #[test]
-    fn todo_comando_que_escribe_un_nombre_lo_comprueba() {
-        let archivos = [
-            ("categories.rs", include_str!("categories.rs")),
-            ("suppliers.rs", include_str!("suppliers.rs")),
-            ("customers.rs", include_str!("customers.rs")),
-        ];
+    /// no se pueden llamar desde una prueba. La versión anterior partía por
+    /// `#[tauri::command]` y aceptaba `name.trim().is_empty()` como suficiente:
+    /// así pasaron clientes y productos, que comprobaban recortado y guardaban
+    /// crudo. Y en cuanto la escritura se movió a una función aparte, la guarda
+    /// dejó de ver clientes y siguió en verde sin revisar nada.
+    const CON_NOMBRE: [(&str, &str); 6] = [
+        ("categories.rs", include_str!("categories.rs")),
+        ("suppliers.rs", include_str!("suppliers.rs")),
+        ("customers.rs", include_str!("customers.rs")),
+        ("products.rs", include_str!("products.rs")),
+        ("promotions.rs", include_str!("promotions.rs")),
+        ("capture/producto.rs", include_str!("../capture/producto.rs")),
+    ];
 
-        let mut sin_comprobar = Vec::new();
-        for (nombre, codigo) in archivos {
-            for bloque in codigo.split("#[tauri::command]").skip(1) {
-                let firma = bloque.lines().find(|l| l.contains("pub fn")).unwrap_or("");
-                let es_alta_o_edicion = ["create_", "update_"].iter().any(|p| firma.contains(p));
-                if !es_alta_o_edicion {
-                    continue;
-                }
-                // Solo los que de verdad escriben la columna `name`.
-                let cuerpo = bloque.split("#[tauri::command]").next().unwrap_or("");
-                let escribe_nombre = cuerpo.contains("(name,") || cuerpo.contains("SET name=");
-                if !escribe_nombre {
-                    continue;
-                }
-                let comprueba = cuerpo.contains("nombre_requerido")
-                    || cuerpo.contains("name.trim().is_empty()");
-                if !comprueba {
-                    let cual = firma.trim().trim_start_matches("pub fn ");
-                    sin_comprobar.push(format!("{}: {}", nombre, cual.split('(').next().unwrap_or(cual)));
-                }
+    /// El código de producción partido por función: (nombre, cuerpo).
+    fn funciones(codigo: &str) -> Vec<(String, String)> {
+        let produccion = codigo.split("#[cfg(test)]").next().unwrap_or("");
+        let mut out: Vec<(String, String)> = Vec::new();
+        for linea in produccion.lines() {
+            let t = linea.trim_start();
+            let firma = ["pub fn ", "pub(crate) fn ", "fn "].iter().find_map(|p| t.strip_prefix(p));
+            if let Some(resto) = firma {
+                out.push((resto.split('(').next().unwrap_or(resto).to_string(), String::new()));
+            }
+            if let Some((_, cuerpo)) = out.last_mut() {
+                cuerpo.push_str(linea);
+                cuerpo.push('\n');
             }
         }
+        out
+    }
 
-        assert!(
-            sin_comprobar.is_empty(),
-            "estos comandos escriben un nombre sin comprobar que no venga en blanco: {:?}",
-            sin_comprobar
-        );
+    /// ¿Escribe la columna `name` en un INSERT o un UPDATE?
+    fn escribe_nombre(cuerpo: &str) -> bool {
+        let columnas = |lista: &str| lista.split(',').any(|c| c.split('=').next().unwrap_or("").trim() == "name");
+        let inserta = cuerpo.match_indices("INSERT INTO").any(|(i, _)| {
+            let resto = &cuerpo[i..];
+            match (resto.find('('), resto.find(')')) {
+                (Some(a), Some(b)) if a < b => columnas(&resto[a + 1..b]),
+                _ => false,
+            }
+        });
+        let actualiza = cuerpo.match_indices(" SET ").any(|(i, _)| {
+            let resto = &cuerpo[i + 5..];
+            columnas(&resto[..resto.find("WHERE").unwrap_or(resto.len())])
+        });
+        inserta || actualiza
+    }
+
+    fn escritores() -> Vec<(String, String)> {
+        CON_NOMBRE
+            .iter()
+            .flat_map(|(archivo, codigo)| {
+                funciones(codigo)
+                    .into_iter()
+                    .filter(|(_, cuerpo)| escribe_nombre(cuerpo))
+                    .map(move |(f, cuerpo)| (format!("{}: {}", archivo, f), cuerpo))
+            })
+            .collect()
+    }
+
+    /// Lo que va dentro de cada `params![...]` de la función.
+    fn parametros(cuerpo: &str) -> Vec<&str> {
+        cuerpo
+            .match_indices("params![")
+            .map(|(i, _)| {
+                let resto = &cuerpo[i + 8..];
+                &resto[..resto.find(']').unwrap_or(resto.len())]
+            })
+            .collect()
     }
 
     #[test]
-    fn la_guarda_de_arriba_de_verdad_encuentra_los_comandos() {
+    fn todo_nombre_se_comprueba_y_se_guarda_recortado() {
+        let mut mal = Vec::new();
+        for (cual, cuerpo) in escritores() {
+            let crudo = parametros(&cuerpo).iter().any(|p| {
+                p.split(',').any(|v| matches!(v.trim(), "data.name" | "entrada.nombre" | "name"))
+            });
+            if crudo {
+                mal.push(format!("{} guarda el nombre sin recortar", cual));
+            }
+        }
+        // La comprobación de "no en blanco" puede vivir en quien llama (la
+        // captura valida en `recibir_producto` y guarda en `guardar_producto`),
+        // así que se exige por archivo; cada módulo prueba la suya.
+        for (archivo, codigo) in CON_NOMBRE {
+            let produccion = codigo.split("#[cfg(test)]").next().unwrap_or("");
+            let comprueba = ["nombre_requerido(", "validar_producto(", "validar(", ".trim().is_empty()"]
+                .iter()
+                .any(|p| produccion.contains(p));
+            if !comprueba {
+                mal.push(format!("{} no comprueba que el nombre no venga en blanco", archivo));
+            }
+        }
+        assert!(mal.is_empty(), "{:#?}", mal);
+    }
+
+    #[test]
+    fn la_guarda_de_arriba_de_verdad_encuentra_quien_escribe() {
         // Sin esto, un cambio de formato dejaría la lista vacía y la prueba
-        // pasaría sin revisar nada.
-        let codigo = include_str!("suppliers.rs");
-        let altas = codigo
-            .split("#[tauri::command]")
-            .skip(1)
-            .filter(|b| {
-                let firma = b.lines().find(|l| l.contains("pub fn")).unwrap_or("");
-                firma.contains("create_") || firma.contains("update_")
-            })
-            .count();
-        assert!(altas >= 2, "se esperaban al menos create y update, se vieron {}", altas);
+        // pasaría sin revisar nada, que es justo lo que ya pasó una vez.
+        let vistos: Vec<String> = escritores().into_iter().map(|(c, _)| c).collect();
+        for esperado in [
+            "categories.rs: create_category",
+            "suppliers.rs: update_supplier",
+            "customers.rs: crear_cliente",
+            "customers.rs: actualizar_cliente",
+            "products.rs: crear_producto",
+            "products.rs: update_product",
+            "promotions.rs: create_promotion",
+            "capture/producto.rs: guardar_producto",
+        ] {
+            assert!(vistos.iter().any(|v| v == esperado), "no se vio {}; se vieron {:?}", esperado, vistos);
+        }
     }
 }

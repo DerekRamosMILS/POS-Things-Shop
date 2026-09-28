@@ -96,7 +96,7 @@ pub fn create_promotion(state: State<DbState>, sessions: State<SessionState>, to
     db.execute(
         "INSERT INTO promotions (name, description, discount_type, discount_value, start_date, end_date, is_active, applies_to, target_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
-        params![data.name, data.description, data.discount_type, data.discount_value, data.start_date, data.end_date, data.applies_to, data.target_id],
+        params![data.name.trim(), data.description, data.discount_type, data.discount_value, data.start_date, data.end_date, data.applies_to, data.target_id],
     ).map_err(|e| e.to_string())?;
 
     let id = db.last_insert_rowid();
@@ -129,7 +129,7 @@ pub fn update_promotion(state: State<DbState>, sessions: State<SessionState>, to
         "UPDATE promotions SET name = ?1, description = ?2, discount_type = ?3, discount_value = ?4,
          start_date = ?5, end_date = ?6, is_active = ?7, applies_to = ?8, target_id = ?9
          WHERE id = ?10",
-        params![data.name, data.description, data.discount_type, data.discount_value,
+        params![data.name.trim(), data.description, data.discount_type, data.discount_value,
                 data.start_date, data.end_date, data.is_active, data.applies_to, data.target_id, data.id],
     ).map_err(|e| e.to_string())?;
 

@@ -58,9 +58,18 @@ pub fn get_customers(state: State<DbState>, sessions: State<SessionState>, token
 pub fn create_customer(state: State<DbState>, sessions: State<SessionState>, token: String, data: CreateCustomerDto) -> Result<Customer, String> {
     require_auth(&sessions, &token)?;
     let db = state.conn();
-    if data.name.trim().is_empty() {
-        return Err("El nombre es requerido".to_string());
-    }
+    crear_cliente(&db, data)
+}
+
+/// Teléfono y correo sin espacios en los bordes; en blanco es no tenerlo.
+fn limpio(valor: &Option<String>) -> Option<String> {
+    valor.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string)
+}
+
+pub(crate) fn crear_cliente(db: &rusqlite::Connection, data: CreateCustomerDto) -> Result<Customer, String> {
+    let nombre = crate::commands::nombre_requerido(&data.name, "el cliente")?;
+    let telefono = limpio(&data.phone);
+    let correo = limpio(&data.email);
     // Un RFC mal capturado se descubre al facturar, semanas después; mejor aquí.
     validar_datos_fiscales(&data.rfc, &data.regimen_fiscal, &data.cp_fiscal, &data.uso_cfdi)?;
 
@@ -68,7 +77,7 @@ pub fn create_customer(state: State<DbState>, sessions: State<SessionState>, tok
         "INSERT INTO customers (name, phone, email, notes, rfc, razon_social, regimen_fiscal, cp_fiscal, uso_cfdi)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
-            data.name, data.phone, data.email, data.notes,
+            nombre, telefono, correo, data.notes,
             data.rfc, data.razon_social, data.regimen_fiscal, data.cp_fiscal, data.uso_cfdi
         ],
     ).map_err(|e| e.to_string())?;
@@ -81,9 +90,13 @@ pub fn create_customer(state: State<DbState>, sessions: State<SessionState>, tok
 pub fn update_customer(state: State<DbState>, sessions: State<SessionState>, token: String, data: UpdateCustomerDto) -> Result<(), String> {
     require_auth(&sessions, &token)?;
     let db = state.conn();
-    if data.name.trim().is_empty() {
-        return Err("El nombre es requerido".to_string());
-    }
+    actualizar_cliente(&db, data)
+}
+
+pub(crate) fn actualizar_cliente(db: &rusqlite::Connection, data: UpdateCustomerDto) -> Result<(), String> {
+    let nombre = crate::commands::nombre_requerido(&data.name, "el cliente")?;
+    let telefono = limpio(&data.phone);
+    let correo = limpio(&data.email);
     validar_datos_fiscales(&data.rfc, &data.regimen_fiscal, &data.cp_fiscal, &data.uso_cfdi)?;
 
     db.execute(
@@ -92,7 +105,7 @@ pub fn update_customer(state: State<DbState>, sessions: State<SessionState>, tok
                 is_active=?10, updated_at=datetime('now','localtime')
          WHERE id=?11",
         params![
-            data.name, data.phone, data.email, data.notes,
+            nombre, telefono, correo, data.notes,
             data.rfc, data.razon_social, data.regimen_fiscal, data.cp_fiscal, data.uso_cfdi,
             data.is_active as i32, data.id
         ],
@@ -199,4 +212,57 @@ mod tests {
         comprar(&db, 2);
         assert_eq!(comprado(&db), 200.0);
     }
+
+    fn alta(nombre: &str, telefono: Option<&str>, correo: Option<&str>) -> CreateCustomerDto {
+        CreateCustomerDto {
+            name: nombre.to_string(),
+            phone: telefono.map(str::to_string),
+            email: correo.map(str::to_string),
+            notes: None,
+            rfc: None,
+            razon_social: None,
+            regimen_fiscal: None,
+            cp_fiscal: None,
+            uso_cfdi: None,
+        }
+    }
+
+    #[test]
+    fn el_nombre_se_guarda_sin_los_espacios_de_sobra() {
+        // Se comprobaba con `trim()` pero se guardaba tal cual. La lista se
+        // ordena por nombre: " Ana" quedaba para siempre arriba de "Alma", y el
+        // buscador por teléfono no hallaba "5512345678 " con el número exacto.
+        let db = tienda();
+        let c = crear_cliente(&db, alta("  Zoe Paz  ", Some(" 5512345678 "), Some(" zoe@correo.mx "))).unwrap();
+        assert_eq!(c.name, "Zoe Paz");
+        assert_eq!(c.phone.as_deref(), Some("5512345678"));
+        assert_eq!(c.email.as_deref(), Some("zoe@correo.mx"));
+
+        actualizar_cliente(&db, UpdateCustomerDto {
+            id: c.id,
+            name: "\tZoe Paz Ruiz ".to_string(),
+            phone: Some("   ".to_string()),
+            email: None,
+            notes: None,
+            rfc: None,
+            razon_social: None,
+            regimen_fiscal: None,
+            cp_fiscal: None,
+            uso_cfdi: None,
+            is_active: true,
+        }).unwrap();
+        let (nombre, tel): (String, Option<String>) = db
+            .query_row("SELECT name, phone FROM customers WHERE id = ?1", [c.id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(nombre, "Zoe Paz Ruiz");
+        assert_eq!(tel, None, "un teléfono en blanco es no tener teléfono");
+    }
+
+    #[test]
+    fn un_nombre_en_blanco_se_rechaza_con_un_mensaje_legible() {
+        let db = tienda();
+        let e = crear_cliente(&db, alta("   ", None, None)).unwrap_err();
+        assert_eq!(e, "Ponle nombre al cliente");
+    }
+
 }

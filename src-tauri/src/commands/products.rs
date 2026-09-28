@@ -291,7 +291,7 @@ pub(crate) fn crear_producto(
         "INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, purchase_price, sale_price, stock, min_stock)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
-            data.sku, data.barcode, data.name, data.description,
+            data.sku, data.barcode, data.name.trim(), data.description,
             data.category_id, data.supplier_id, data.purchase_price,
             data.sale_price, data.stock, data.min_stock
         ],
@@ -350,7 +350,7 @@ pub fn update_product(state: State<DbState>, sessions: State<SessionState>, toke
          min_stock=?9, is_active=?10, updated_at=datetime('now','localtime')
          WHERE id=?11",
         params![
-            data.sku, data.barcode, data.name, data.description,
+            data.sku, data.barcode, data.name.trim(), data.description,
             data.category_id, data.supplier_id, data.purchase_price,
             data.sale_price, data.min_stock, data.is_active as i32, data.id
         ],
@@ -623,6 +623,25 @@ mod tests {
             .unwrap();
         assert_eq!(cantidad, 3);
         assert_eq!(razon, "Stock inicial");
+    }
+
+    #[test]
+    fn el_nombre_de_la_prenda_se_guarda_recortado() {
+        // La captura del celular ya lo recortaba; el formulario de escritorio
+        // no. La misma blusa quedaba " Blusa" o "Blusa" según por dónde entró,
+        // y el nombre sale impreso en el ticket.
+        let conn = db();
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, full_name, role)
+             VALUES (1, 'u', 'x', 'U', 'admin')",
+            [],
+        ).unwrap();
+        let p = crear_producto(&conn, 1, CreateProductDto {
+            sku: "TS-000003".into(), barcode: None, name: "  Blusa lino ".into(), description: None,
+            category_id: None, supplier_id: None,
+            purchase_price: 50.0, sale_price: 120.0, stock: 0, min_stock: 0,
+        }).unwrap();
+        assert_eq!(p.name, "Blusa lino");
     }
 
     #[test]
