@@ -38,9 +38,13 @@ pub fn registrar_gasto(
     cash_register_id: Option<i64>,
     data: CreateExpenseDto,
 ) -> Result<Expense, String> {
-    if !data.amount.is_finite() || data.amount <= 0.0 {
+    // En centavos desde la entrada: lo guardado tal cual dejaba pasar gastos de
+    // fracción de centavo y sumaba fracciones al total del turno.
+    let monto = Cents::from_pesos(data.amount);
+    if !data.amount.is_finite() || !monto.is_positive() {
         return Err("El gasto tiene que ser mayor a cero".to_string());
     }
+    let data = CreateExpenseDto { amount: monto.to_pesos(), ..data };
     if data.description.trim().is_empty() {
         return Err("Escribe en qué se gastó".to_string());
     }
@@ -145,9 +149,11 @@ pub fn update_expense(state: State<DbState>, sessions: State<SessionState>, toke
 /// Antes eran dos escrituras sueltas: si fallaba la segunda, el gasto quedaba
 /// con el monto nuevo y el corte con el viejo.
 pub fn editar_gasto(db: &rusqlite::Connection, data: Expense) -> Result<(), String> {
-    if !data.amount.is_finite() || data.amount <= 0.0 {
+    let monto = Cents::from_pesos(data.amount);
+    if !data.amount.is_finite() || !monto.is_positive() {
         return Err("El gasto tiene que ser mayor a cero".to_string());
     }
+    let data = Expense { amount: monto.to_pesos(), ..data };
     if data.description.trim().is_empty() {
         return Err("Escribe en qué se gastó".to_string());
     }
@@ -274,6 +280,20 @@ mod tests {
 
     fn total_gastos(db: &rusqlite::Connection) -> f64 {
         db.query_row("SELECT total_expenses FROM cash_registers LIMIT 1", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn un_gasto_se_guarda_en_centavos_y_uno_de_fraccion_se_rechaza() {
+        // Igual que con los abonos: "0.004" pasaba por ser mayor que cero, y
+        // lo guardado tal cual iba sumando fracciones al total del turno.
+        let db = tienda();
+        let caja = abrir_caja(&db, 500.0);
+        assert!(registrar_gasto(&db, 1, Some(caja), gasto(0.004)).is_err());
+
+        registrar_gasto(&db, 1, Some(caja), gasto(120.004)).unwrap();
+        let guardado: f64 = db.query_row("SELECT amount FROM expenses", [], |r| r.get(0)).unwrap();
+        assert_eq!(guardado, 120.0);
+        assert_eq!(total_gastos(&db), 120.0);
     }
 
     #[test]
