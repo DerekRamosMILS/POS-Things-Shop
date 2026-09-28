@@ -498,7 +498,7 @@ mod tests {
              INSERT INTO cash_registers (user_id, opening_amount) VALUES (1, 0);
              INSERT INTO products (id, sku, name, purchase_price, sale_price, stock) VALUES (1, 'V', 'Vestido', 1, 100, 10);",
         ).unwrap();
-        let venta = registrar_venta(&db, 1, None, CreateSaleDto {
+        let venta = registrar_venta(&db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto { product_id: 1, quantity: 3, unit_price: 0.0, discount: 0.0, variant_id: None }],
             payment_method: "cash".into(), amount_paid: 300.0, payments: vec![], discount_total: 0.0,
             promotion_id: None, requiere_factura: false, notes: None, customer_id: None, client_request_id: None,

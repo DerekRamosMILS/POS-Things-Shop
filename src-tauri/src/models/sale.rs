@@ -68,6 +68,11 @@ pub struct CreateSaleDto {
     /// duplicarla (doble clic, reintento tras un cuelgue del webview).
     #[serde(default)]
     pub client_request_id: Option<String>,
+    /// El total que el cajero vio en pantalla. Si el backend calcula otro, la
+    /// venta se niega antes de guardarse: con tarjeta, la terminal ya cobró lo
+    /// que decía la pantalla.
+    #[serde(default)]
+    pub total_esperado: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]

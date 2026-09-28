@@ -487,7 +487,7 @@ mod tests {
             &db,
             1,
             None,
-            crate::models::sale::CreateSaleDto {
+            crate::models::sale::CreateSaleDto { total_esperado: None,
                 items: vec![crate::models::sale::CreateSaleItemDto {
                     product_id: 1, quantity: 3, unit_price: 499.0, discount: 0.0, variant_id: Some(g),
                 }],

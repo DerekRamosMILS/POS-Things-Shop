@@ -385,7 +385,7 @@ mod dia_completo {
         }
 
         fn venta_efectivo(&mut self, piezas: i32, recibe: f64) -> i64 {
-            let sale = registrar_venta(&self.db, 1, None, CreateSaleDto {
+            let sale = registrar_venta(&self.db, 1, None, CreateSaleDto { total_esperado: None,
                 items: vec![CreateSaleItemDto {
                     product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
                 }],
@@ -399,7 +399,7 @@ mod dia_completo {
         }
 
         fn venta_tarjeta(&mut self, piezas: i32) {
-            registrar_venta(&self.db, 1, None, CreateSaleDto {
+            registrar_venta(&self.db, 1, None, CreateSaleDto { total_esperado: None,
                 items: vec![CreateSaleItemDto {
                     product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
                 }],
@@ -411,7 +411,7 @@ mod dia_completo {
         }
 
         fn venta_mixta(&mut self, piezas: i32, tarjeta: f64, efectivo: f64) {
-            let sale = registrar_venta(&self.db, 1, None, CreateSaleDto {
+            let sale = registrar_venta(&self.db, 1, None, CreateSaleDto { total_esperado: None,
                 items: vec![CreateSaleItemDto {
                     product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
                 }],
@@ -546,7 +546,7 @@ mod dia_completo {
         let mut m = Mostrador::abre_con(0.0);
         cerrar_caja(&m.db, 1, CloseRegisterDto { closing_amount: 0.0 }).unwrap();
 
-        let r = registrar_venta(&m.db, 1, None, CreateSaleDto {
+        let r = registrar_venta(&m.db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto {
                 product_id: 1, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: None,
             }],
@@ -737,7 +737,7 @@ mod dia_completo {
         // Una jornada con precios que no dividen bien, en muchas combinaciones.
         let mut ventas: Vec<i64> = Vec::new();
         for piezas in [1, 3, 7, 2, 11, 5] {
-            let venta = crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto {
+            let venta = crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto { total_esperado: None,
                 items: vec![CreateSaleItemDto { product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None }],
                 payment_method: "cash".to_string(), amount_paid: 1_000_000.0, payments: vec![],
                 discount_total: 0.0, promotion_id: None, requiere_factura: false,
@@ -750,7 +750,7 @@ mod dia_completo {
         // Pagos mixtos: parte tarjeta, parte efectivo.
         for (tarjeta, piezas) in [(100.0, 3), (50.0, 2), (7.77, 1)] {
             let total = 137.77 * piezas as f64;
-            crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto {
+            crate::commands::sales::registrar_venta(&db, 1, None, CreateSaleDto { total_esperado: None,
                 items: vec![CreateSaleItemDto { product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None }],
                 payment_method: "mixed".to_string(), amount_paid: total, payments: vec![
                     PaymentSplitDto { method: "card".to_string(), amount: tarjeta },

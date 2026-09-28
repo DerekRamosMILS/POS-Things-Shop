@@ -327,7 +327,7 @@ mod tests {
         }
 
         fn vender(&self, items: Vec<(i64, i32, f64)>, promocion: Option<i64>) -> i64 {
-            registrar_venta(&self.db, 1, None, CreateSaleDto {
+            registrar_venta(&self.db, 1, None, CreateSaleDto { total_esperado: None,
                 items: items.into_iter().map(|(product_id, quantity, discount)| CreateSaleItemDto {
                     product_id, quantity, unit_price: 0.0, discount, variant_id: None,
                 }).collect(),
@@ -606,7 +606,7 @@ mod tests {
     fn devolver_de_una_venta_mixta_regresa_lo_cobrado() {
         let t = Tienda::nueva().con_caja();
         let p = t.producto("CAM", 100.0, 10);
-        let venta_id = registrar_venta(&t.db, 1, None, CreateSaleDto {
+        let venta_id = registrar_venta(&t.db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto { product_id: p, quantity: 2, unit_price: 0.0, discount: 0.0, variant_id: None }],
             payment_method: "cash".to_string(),
             amount_paid: 0.0,

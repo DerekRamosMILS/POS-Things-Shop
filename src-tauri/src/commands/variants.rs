@@ -320,7 +320,7 @@ mod tests {
     }
 
     fn vender(db: &rusqlite::Connection, product_id: i64, variant_id: i64, cantidad: i32) -> i64 {
-        registrar_venta(db, 1, None, CreateSaleDto {
+        registrar_venta(db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto {
                 product_id, quantity: cantidad, unit_price: 0.0, discount: 0.0,
                 variant_id: Some(variant_id),
@@ -404,7 +404,7 @@ mod tests {
         db.execute("UPDATE product_variants SET stock = 0 WHERE id = ?1", params![m]).unwrap();
         db.execute("UPDATE products SET stock = 5 WHERE id = ?1", params![p]).unwrap();
 
-        let r = registrar_venta(&db, 1, None, CreateSaleDto {
+        let r = registrar_venta(&db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto {
                 product_id: p, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: Some(m),
             }],
@@ -430,7 +430,7 @@ mod tests {
         ).unwrap();
         let ajena = db.last_insert_rowid();
 
-        let r = registrar_venta(&db, 1, None, CreateSaleDto {
+        let r = registrar_venta(&db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto {
                 product_id: p, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: Some(ajena),
             }],

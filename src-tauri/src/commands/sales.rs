@@ -444,6 +444,21 @@ pub fn registrar_venta(
         let tax = taxable.percent(tax_rate);
         let total = taxable + tax;
 
+        // Lo que vio el cajero tiene que ser lo que se cobra. Con tarjeta la
+        // terminal ya cobró el total de la pantalla; si aquí sale otro (una
+        // promoción que venció con la orden en espera), guardarlo dejaba la
+        // venta con un importe que nadie cobró. Un centavo se tolera: la
+        // pantalla redondea en coma flotante.
+        if let Some(esperado) = data.total_esperado {
+            if (Cents::from_pesos(esperado) - total).0.abs() > 1 {
+                return Err(format!(
+                    "El total cambió: ahora es ${:.2} y la pantalla decía ${:.2}. Revisa la promoción y vuelve a cobrar; no se registró nada.",
+                    total.to_pesos(),
+                    esperado
+                ));
+            }
+        }
+
         // Normalise the tender. A single-method sale is just a one-leg split.
         let tender: Vec<PaymentSplitDto> = if data.payments.is_empty() {
             vec![PaymentSplitDto {
@@ -1188,7 +1203,7 @@ mod tests {
     }
 
     fn pedido(items: Vec<(i64, i32)>, request: &str) -> crate::models::sale::CreateSaleDto {
-        crate::models::sale::CreateSaleDto {
+        crate::models::sale::CreateSaleDto { total_esperado: None,
             items: items.into_iter().map(|(product_id, quantity)| crate::models::sale::CreateSaleItemDto {
                 product_id, quantity, unit_price: 0.0, discount: 0.0, variant_id: None,
             }).collect(),
@@ -1314,7 +1329,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let err = registrar_venta(&conn, 1, None, crate::models::sale::CreateSaleDto {
+        let err = registrar_venta(&conn, 1, None, crate::models::sale::CreateSaleDto { total_esperado: None,
             items: vec![crate::models::sale::CreateSaleItemDto {
                 product_id: 7, quantity: 1, unit_price: 0.0, discount: 0.0, variant_id: None,
             }],
@@ -1526,7 +1541,7 @@ mod integracion {
     }
 
     fn venta(items: Vec<(i64, i32)>) -> CreateSaleDto {
-        CreateSaleDto {
+        CreateSaleDto { total_esperado: None,
             items: items.into_iter().map(|(product_id, quantity)| CreateSaleItemDto {
                 product_id, quantity, unit_price: 0.0, discount: 0.0, variant_id: None,
             }).collect(),
@@ -1613,6 +1628,39 @@ mod integracion {
         assert_eq!(ventas, 0, "la transacción debe revertirse completa");
         assert_eq!(t.stock(p), 1, "el stock no debe moverse");
         assert_eq!(t.caja().sale_count, 0);
+    }
+
+    #[test]
+    fn si_el_total_no_es_el_que_vio_el_cajero_no_se_cobra() {
+        // Con tarjeta el backend usaba su propio total sin mirar lo que decía
+        // la pantalla. Una orden en espera con una promoción que venció a
+        // medianoche: la terminal cobraba el total con descuento, la venta se
+        // guardaba sin él, y el aviso llegaba cuando ya estaba registrada.
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+
+        let mut data = venta(vec![(p, 1)]);
+        data.payment_method = "card".to_string();
+        data.total_esperado = Some(199.20);
+        let e = t.cobrar(data).unwrap_err();
+        assert!(e.contains("249.00") && e.contains("199.20"), "{}", e);
+        assert_eq!(t.caja().sale_count, 0, "no debe quedar nada registrado");
+
+        let mut data = venta(vec![(p, 1)]);
+        data.payment_method = "card".to_string();
+        data.total_esperado = Some(249.0);
+        assert!(t.cobrar(data).is_ok());
+    }
+
+    #[test]
+    fn un_centavo_de_redondeo_entre_pantalla_y_backend_no_frena_la_venta() {
+        // La pantalla redondea en coma flotante y el backend en centavos
+        // exactos: en un caso límite pueden diferir en uno.
+        let t = Tienda::nueva().con_caja(0.0);
+        let p = t.producto("CAM", 249.0, 100.0, 10);
+        let mut data = venta(vec![(p, 1)]);
+        data.total_esperado = Some(249.01);
+        assert!(t.cobrar(data).is_ok());
     }
 
     #[test]

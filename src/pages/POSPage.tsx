@@ -574,6 +574,7 @@ export default function POSPage() {
                 requiere_factura: requiereFactura,
                 customer_id: customerId,
                 client_request_id: chargeRequest.current.id,
+                total_esperado: total,
                 notes: [SERVICE_LABELS[serviceType], customerName ? `Cliente: ${customerName}` : '', activePromo ? `Promo: ${activePromo.name}` : '', orderNotes.trim()].filter(Boolean).join(' | ') || null,
             });
             setLastSale({ folio: sale.folio, total: sale.total, change: sale.change_amount, items: saleItems, subtotal: saleSubtotal, lineDiscountTotal: saleLineDiscount, promoDiscount, tax: saleTax, paymentMethod, amountPaid: paid, serviceType, customerName, orderNotes });

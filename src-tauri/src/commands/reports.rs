@@ -453,7 +453,7 @@ mod tests {
     }
 
     fn cobrar(db: &rusqlite::Connection, cantidad: i32, pagos: Vec<(&str, f64)>) -> i64 {
-        registrar_venta(db, 1, None, CreateSaleDto {
+        registrar_venta(db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto {
                 product_id: 1, quantity: cantidad, unit_price: 0.0, discount: 0.0, variant_id: None,
             }],

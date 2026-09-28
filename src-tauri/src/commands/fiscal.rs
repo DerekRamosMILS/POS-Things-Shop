@@ -415,7 +415,7 @@ mod tests {
 
     fn vender_por_facturar(db: &rusqlite::Connection, piezas: i32) -> i64 {
         use crate::models::sale::{CreateSaleDto, CreateSaleItemDto};
-        crate::commands::sales::registrar_venta(db, 1, None, CreateSaleDto {
+        crate::commands::sales::registrar_venta(db, 1, None, CreateSaleDto { total_esperado: None,
             items: vec![CreateSaleItemDto {
                 product_id: 1, quantity: piezas, unit_price: 0.0, discount: 0.0, variant_id: None,
             }],

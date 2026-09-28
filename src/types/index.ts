@@ -171,6 +171,8 @@ export interface CreateSaleDto {
     customer_id?: number | null;
     /** Id único del intento de cobro; evita duplicar la venta si se reenvía. */
     client_request_id?: string;
+    /** El total que vio el cajero; el backend se niega a cobrar otro. */
+    total_esperado?: number;
     /** Promoción aplicada. El backend recalcula el importe; no confía en el cliente. */
     promotion_id?: number | null;
     /** El cliente pidió factura; el backend copia sus datos fiscales. */
