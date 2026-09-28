@@ -64,7 +64,9 @@ fn validar_valor(key: &str, value: &str) -> Result<String, String> {
     if !n.is_finite() || n < min || n > max || (entero && n.fract() != 0.0) {
         return Err(format!("{} (se recibió '{}')", mensaje, v));
     }
-    Ok(v.to_string())
+    // Se guarda en la forma que sabe leer quien lo usa: "30.0" o "1e2" pasan
+    // la revisión, pero `parse::<i64>()` no los entiende y cae al de siempre.
+    Ok(if entero { (n as i64).to_string() } else { v.to_string() })
 }
 
 #[tauri::command]
@@ -374,6 +376,21 @@ mod tests {
         assert_eq!(validar_valor("low_stock_threshold", "0").unwrap(), "0");
         assert_eq!(validar_valor("max_backups", "").unwrap(), "", "vacío es el de siempre");
         assert_eq!(validar_valor("store_name", "  Things  ").unwrap(), "  Things  ", "lo demás pasa tal cual");
+    }
+
+    #[test]
+    fn un_entero_escrito_de_otra_forma_se_guarda_como_entero() {
+        // "30.0" y "1e2" pasaban la revisión por ser enteros, pero se guardaban
+        // tal cual. Quien los lee los convierte con `parse::<i64>()` (o
+        // `parseInt` en pantalla): "30.0" no se entiende y cae en silencio al
+        // valor por omisión; "1e2" en pantalla se lee como 1.
+        assert_eq!(validar_valor("log_retention_days", "30.0").unwrap(), "30");
+        assert_eq!(validar_valor("max_backups", "1e2").unwrap(), "100");
+        assert_eq!(validar_valor("session_hours", " 12 ").unwrap(), "12");
+        for (k, v) in [("log_retention_days", "30.0"), ("max_backups", "1e2"), ("session_hours", "+8")] {
+            let guardado = validar_valor(k, v).unwrap();
+            assert!(guardado.parse::<i64>().is_ok(), "{} = {:?} se guardó como {:?}", k, v, guardado);
+        }
     }
 
     #[test]
