@@ -36,6 +36,9 @@ pub struct NuevaFotoDto {
     pub photo: String,
     /// Miniatura para los listados, como data URL JPEG.
     pub thumbnail: String,
+    /// Foto a la que sustituye como principal, si la hay.
+    #[serde(default)]
+    pub reemplaza: Option<i64>,
 }
 
 /// Registra una foto: escribe los archivos y deja la fila que los referencia.
@@ -45,17 +48,6 @@ pub fn agregar_foto(
     db: &rusqlite::Connection,
     data: &NuevaFotoDto,
 ) -> Result<ProductImage, String> {
-    let existentes: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM product_images WHERE product_id = ?1",
-            params![data.product_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if existentes >= MAX_POR_PRODUCTO {
-        return Err(format!("Un producto admite hasta {} fotos", MAX_POR_PRODUCTO));
-    }
-
     let existe: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM products WHERE id = ?1",
@@ -67,29 +59,79 @@ pub fn agregar_foto(
         return Err("El producto no existe".to_string());
     }
 
+    // La foto se revisa antes de tocar nada. Al reemplazar la principal de un
+    // producto lleno, la ficha borraba la vieja y luego subía la nueva: si la
+    // nueva no pasaba esta revisión, la principal ya se había ido.
     let foto = photos::bytes_de_data_url(&data.photo)?;
     let miniatura = photos::bytes_de_data_url(&data.thumbnail)?;
     photos::validar(&foto, &miniatura)?;
 
+    if let Some(vieja) = data.reemplaza {
+        let duena: i64 = db
+            .query_row(
+                "SELECT product_id FROM product_images WHERE id = ?1",
+                params![vieja],
+                |r| r.get(0),
+            )
+            .map_err(|_| "La foto a reemplazar ya no existe".to_string())?;
+        if duena != data.product_id {
+            return Err("La foto a reemplazar es de otro producto".to_string());
+        }
+        // SAVEPOINT y no BEGIN: la captura del celular llama a esta función
+        // dentro de su propia transacción.
+        db.execute_batch("SAVEPOINT reemplazo;").map_err(|e| e.to_string())?;
+        let r = (|| -> Result<ProductImage, String> {
+            db.execute("DELETE FROM product_images WHERE id = ?1", params![vieja])
+                .map_err(|e| e.to_string())?;
+            let id = insertar_foto(db, data.product_id, -1, &foto, &miniatura)?;
+            renumerar(db, data.product_id)?;
+            Ok(ProductImage { id, product_id: data.product_id, position: 0, created_at: String::new() })
+        })();
+        match r {
+            Ok(_) => db.execute_batch("RELEASE reemplazo;").map_err(|e| e.to_string())?,
+            Err(_) => { db.execute_batch("ROLLBACK TO reemplazo; RELEASE reemplazo;").ok(); }
+        }
+        return r;
+    }
+
+    let existentes: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM product_images WHERE product_id = ?1",
+            params![data.product_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if existentes >= MAX_POR_PRODUCTO {
+        return Err(format!("Un producto admite hasta {} fotos", MAX_POR_PRODUCTO));
+    }
+
     // La primera foto de un producto queda como principal.
     let posicion = existentes as i32;
+    let id = insertar_foto(db, data.product_id, posicion, &foto, &miniatura)?;
+    Ok(ProductImage { id, product_id: data.product_id, position: posicion, created_at: String::new() })
+}
 
-    // Los bytes van en la fila. No hay archivo suelto que pueda quedar sin
-    // dueño ni fila que pueda quedar apuntando a un archivo que ya no está:
-    // o entra todo o no entra nada.
+/// Los bytes van en la fila. No hay archivo suelto que pueda quedar sin dueño ni
+/// fila que pueda quedar apuntando a un archivo que ya no está: o entra todo o
+/// no entra nada.
+fn insertar_foto(
+    db: &rusqlite::Connection,
+    product_id: i64,
+    posicion: i32,
+    foto: &[u8],
+    miniatura: &[u8],
+) -> Result<i64, String> {
     db.execute(
         "INSERT INTO product_images (product_id, file_name, thumb_name, position, photo, thumbnail, en_la_base)
          VALUES (?1, '', '', ?2, ?3, ?4, 1)",
-        params![data.product_id, posicion, foto, miniatura],
+        params![product_id, posicion, foto, miniatura],
     ).map_err(|e| e.to_string())?;
-
     let id = db.last_insert_rowid();
     db.execute(
         "UPDATE products SET updated_at = datetime('now','localtime') WHERE id = ?1",
-        params![data.product_id],
+        params![product_id],
     ).ok();
-
-    Ok(ProductImage { id, product_id: data.product_id, position: posicion, created_at: String::new() })
+    Ok(id)
 }
 
 #[tauri::command]
@@ -319,6 +361,7 @@ pub fn migrar_fotos_incrustadas(db: &rusqlite::Connection) {
             product_id,
             photo: data_url.clone(),
             thumbnail: data_url,
+            reemplaza: None,
         };
         match agregar_foto(db, &dto) {
             Ok(_) => {
@@ -412,7 +455,7 @@ mod tests {
     }
 
     fn foto(product_id: i64) -> NuevaFotoDto {
-        NuevaFotoDto { product_id, photo: jpeg(), thumbnail: jpeg() }
+        NuevaFotoDto { product_id, photo: jpeg(), thumbnail: jpeg(), reemplaza: None }
     }
 
     #[test]
@@ -501,7 +544,7 @@ mod tests {
     fn se_rechaza_lo_que_no_sea_jpeg() {
         let db = tienda();
         let png = format!("data:image/png;base64,{}", photos::base64_encode(&[0x89, 0x50, 0x4E, 0x47]));
-        let dto = NuevaFotoDto { product_id: 1, photo: png.clone(), thumbnail: png };
+        let dto = NuevaFotoDto { product_id: 1, photo: png.clone(), thumbnail: png, reemplaza: None };
         assert!(agregar_foto(&db, &dto).is_err());
     }
 
@@ -531,6 +574,7 @@ mod tests {
             product_id: 1,
             photo: jpeg(),
             thumbnail: "data:image/jpeg;base64,bm8gc295IGpwZWc=".to_string(),
+            reemplaza: None,
         };
         assert!(agregar_foto(&db, &dto).is_err());
 
@@ -599,4 +643,63 @@ mod tests {
         assert_eq!(archivada, original, "los bytes de la foto se conservan");
         assert!(db.execute("DELETE FROM product_images_archivo", []).is_err(), "el archivo no se borra");
     }
+
+    fn ocho_fotos(db: &rusqlite::Connection) -> Vec<i64> {
+        (0..MAX_POR_PRODUCTO).map(|_| agregar_foto(db, &foto(1)).unwrap().id).collect()
+    }
+
+    fn ids_en_orden(db: &rusqlite::Connection) -> Vec<i64> {
+        db.prepare("SELECT id FROM product_images WHERE product_id = 1 ORDER BY position, id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn reemplazar_la_principal_con_una_foto_rechazada_no_la_pierde() {
+        // Con el producto lleno, la ficha borraba la principal y luego subía la
+        // nueva. Si la nueva no pasaba la revisión, el cajero veía el error,
+        // creía que nada había cambiado, y la foto principal ya no estaba.
+        let db = tienda();
+        let antes = ocho_fotos(&db);
+        let png = format!("data:image/png;base64,{}", photos::base64_encode(&[0x89, 0x50, 0x4E, 0x47]));
+        let r = agregar_foto(&db, &NuevaFotoDto {
+            product_id: 1, photo: png.clone(), thumbnail: png, reemplaza: Some(antes[0]),
+        });
+        assert!(r.is_err());
+        assert_eq!(ids_en_orden(&db), antes, "la foto rechazada no debe tocar las que ya estaban");
+    }
+
+    #[test]
+    fn reemplazar_la_principal_la_sustituye_en_su_lugar() {
+        let db = tienda();
+        let antes = ocho_fotos(&db);
+        let nueva = agregar_foto(&db, &NuevaFotoDto {
+            product_id: 1, photo: jpeg(), thumbnail: jpeg(), reemplaza: Some(antes[0]),
+        }).unwrap();
+        let despues = ids_en_orden(&db);
+        assert_eq!(despues.len() as i64, MAX_POR_PRODUCTO);
+        assert_eq!(despues[0], nueva.id, "la nueva queda como principal");
+        assert_eq!(&despues[1..], &antes[1..], "las demás no se mueven");
+        assert_eq!(nueva.position, 0);
+    }
+
+    #[test]
+    fn no_se_reemplaza_la_foto_de_otro_producto() {
+        let db = tienda();
+        db.execute(
+            "INSERT INTO products (id, sku, name, purchase_price, sale_price, stock)
+             VALUES (2, 'PAN', 'Pantalón', 10.0, 20.0, 5)", [],
+        ).unwrap();
+        let ajena = agregar_foto(&db, &foto(2)).unwrap();
+        let r = agregar_foto(&db, &NuevaFotoDto {
+            product_id: 1, photo: jpeg(), thumbnail: jpeg(), reemplaza: Some(ajena.id),
+        });
+        assert!(r.is_err());
+        let del_otro: i64 = db.query_row("SELECT COUNT(*) FROM product_images WHERE product_id = 2", [], |r| r.get(0)).unwrap();
+        assert_eq!(del_otro, 1);
+    }
+
 }

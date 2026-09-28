@@ -35,7 +35,7 @@ const REVISADAS: Record<string, string> = {
     post_layaway_payment: 'corre dentro de la transacción de registrar_apartado y de abonar_apartado',
     registrar_venta_de_entrega: 'corre dentro de la transacción de entregar_apartado',
     mark_notification_read: 'escribe en una tabla o en la otra, nunca en las dos',
-    agregar_foto: 'la segunda escritura solo toca updated_at del producto y va con .ok()',
+    insertar_foto: 'la segunda escritura solo toca updated_at del producto y va con .ok()',
 };
 
 /** `app_logs` es rastro y puede fallar sin consecuencia: no cuenta. */

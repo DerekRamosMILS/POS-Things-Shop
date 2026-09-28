@@ -588,7 +588,7 @@ export const relevoSincronizar = () => invoke<VistaRelevo>('relevo_sincronizar')
 export const relevoRegenerar = () => invoke<VistaRelevo>('relevo_regenerar');
 
 // Fotos de producto
-export const addProductImage = (data: { product_id: number; photo: string; thumbnail: string }) =>
+export const addProductImage = (data: { product_id: number; photo: string; thumbnail: string; reemplaza?: number }) =>
     invoke<ProductImage>('add_product_image', { data });
 export const getProductImageList = (productId: number) =>
     invoke<ProductImage[]>('get_product_image_list', { productId });

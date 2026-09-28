@@ -142,7 +142,7 @@ pub fn ajustar_stock(
     db.execute(
         "INSERT INTO inventory_movements (product_id, movement_type, quantity, previous_stock, new_stock, reason, user_id)
          VALUES (?1, 'adjustment', ?2, ?3, ?4, ?5, ?6)",
-        params![data.product_id, data.quantity, current_stock, new_stock, data.reason, user_id],
+        params![data.product_id, data.quantity, current_stock, new_stock, data.reason.trim(), user_id],
     ).map_err(|e| e.to_string())?;
 
         Ok(())
@@ -332,6 +332,18 @@ mod tests {
 
     fn ajuste(cantidad: i32, motivo: &str) -> AdjustStockDto {
         AdjustStockDto { product_id: 1, quantity: cantidad, reason: motivo.to_string() }
+    }
+
+    #[test]
+    fn el_motivo_del_ajuste_se_guarda_recortado() {
+        // Se exigía que no viniera en blanco con `trim()` y se guardaba crudo;
+        // el historial de movimientos lo muestra tal cual.
+        let db = tienda();
+        ajustar_stock(&db, 1, ajuste(-1, "  Merma por mancha  ")).unwrap();
+        let motivo: String = db
+            .query_row("SELECT reason FROM inventory_movements ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(motivo, "Merma por mancha");
     }
 
     fn compra(cantidad: i32, precio: Option<f64>) -> RegisterPurchaseDto {

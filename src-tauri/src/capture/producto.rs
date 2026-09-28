@@ -277,6 +277,7 @@ pub(crate) fn guardar_producto(
                 product_id,
                 photo: foto.photo.clone(),
                 thumbnail: foto.thumbnail.clone(),
+                reemplaza: None,
             })?;
         }
 

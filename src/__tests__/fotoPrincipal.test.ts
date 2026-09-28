@@ -18,7 +18,15 @@ function productoConFotos(n: number) {
     const quitadas: number[] = [];
     const api: ApiDeFotos = {
         getProductImageList: async () => fotos.map(f => ({ ...f })),
-        addProductImage: async () => {
+        // Como `agregar_foto`: con `reemplaza`, la vieja sale y la nueva entra
+        // como principal en un solo paso; si algo falla, no cambia nada.
+        addProductImage: async (data) => {
+            if (data.reemplaza !== undefined) {
+                const f = { id: siguiente++, product_id: 1, position: 0, created_at: '' };
+                fotos = [f, ...fotos.filter(x => x.id !== data.reemplaza)].map((x, position) => ({ ...x, position }));
+                return { ...f };
+            }
+            if (fotos.length >= 8) throw new Error('Un producto admite hasta 8 fotos');
             const f = { id: siguiente++, product_id: 1, position: fotos.length, created_at: '' };
             fotos.push(f);
             return { ...f };
@@ -61,7 +69,6 @@ describe('la foto principal de la ficha', () => {
 
         await aplicarFotoPrincipal(p.api, 1, nueva, 8);
 
-        expect(p.quitadas).toEqual([1]);
         expect(p.orden()).toEqual([100, 2, 3, 4, 5, 6, 7, 8]);
     });
 
@@ -81,5 +88,23 @@ describe('la foto principal de la ficha', () => {
 
         expect(p.quitadas).toEqual([]);
         expect(p.orden()).toEqual([1, 2]);
+    });
+
+    it('con el cupo lleno, si la nueva se rechaza, la principal vieja sigue ahí', async () => {
+        // El caso de arriba usa dos fotos, que nunca estuvo en riesgo. Con el
+        // cupo lleno se borraba la principal antes de subir la nueva: una foto
+        // rechazada dejaba el producto sin su principal y el cajero sólo veía
+        // el error.
+        const p = productoConFotos(8);
+        const subir = p.api.addProductImage;
+        p.api.addProductImage = async (data) => {
+            if (data.reemplaza !== undefined) throw new Error('La foto no es un JPEG válido');
+            return subir(data);
+        };
+
+        await expect(aplicarFotoPrincipal(p.api, 1, nueva, 8)).rejects.toThrow('JPEG');
+
+        expect(p.quitadas).toEqual([]);
+        expect(p.orden()).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     });
 });
