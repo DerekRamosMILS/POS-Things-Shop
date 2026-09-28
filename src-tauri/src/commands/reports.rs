@@ -84,8 +84,13 @@ fn utilidad_partida() -> String {
     )
 }
 
-/// Filtro de antigüedad, como parámetro `?1` con la forma `-30`.
-const DESDE: &str = "datetime('now', ?1 || ' days', 'localtime')";
+/// Filtro de antigüedad, como parámetro `?1` con la forma `-30`: hoy y los 29
+/// días anteriores, **enteros**.
+///
+/// Antes arrancaba a la hora exacta de hace 30 días: abierto a las tres de la
+/// tarde, el primer día de la gráfica sólo tenía lo vendido después de las tres,
+/// y el total del periodo cambiaba según la hora a la que se mirara.
+const DESDE: &str = "datetime('now', 'localtime', 'start of day', (?1 + 1) || ' days')";
 
 fn filas<T>(
     db: &rusqlite::Connection,
@@ -528,6 +533,36 @@ mod tests {
 
     fn hace(db: &rusqlite::Connection, dias: i32) -> String {
         db.query_row(&format!("SELECT date('now','localtime','-{} days')", dias), [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn los_ultimos_30_dias_son_30_dias_completos() {
+        // El periodo arrancaba a la hora exacta de hace 30 días: abierto a las
+        // tres de la tarde, el primer día de la gráfica sólo tenía lo vendido
+        // después de las tres, parecía un día malo, y el total del periodo
+        // cambiaba según la hora a la que se mirara. Son hoy y los 29 de antes,
+        // enteros.
+        let db = tienda();
+        let fuera = cobrar(&db, 1, vec![("cash", 100.0)]);
+        let dentro = cobrar(&db, 1, vec![("cash", 100.0)]);
+        db.execute(
+            "UPDATE sales SET created_at = datetime('now','localtime','start of day','-30 days','+23 hours','+59 minutes') WHERE id = ?1",
+            params![fuera],
+        ).unwrap();
+        db.execute(
+            "UPDATE sales SET created_at = datetime('now','localtime','start of day','-29 days','+1 minute') WHERE id = ?1",
+            params![dentro],
+        ).unwrap();
+        let (dia_fuera, dia_dentro): (String, String) = db.query_row(
+            "SELECT date('now','localtime','-30 days'), date('now','localtime','-29 days')", [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+
+        let dias: Vec<String> = reporte_diario(&db, 30).unwrap().into_iter()
+            .filter(|d| d.sale_count > 0).map(|d| d.date).collect();
+
+        assert!(dias.contains(&dia_dentro), "falta el primer día del periodo: {:?}", dias);
+        assert!(!dias.contains(&dia_fuera), "entró un día de más: {:?}", dias);
     }
 
     #[test]
